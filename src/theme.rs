@@ -115,13 +115,37 @@ pub fn app_icon(size: i32) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     r as u32 | (g as u32) << 8 | (b as u32) << 16
 }
+/// `#RRGGBB` to a GDI `COLORREF`; `None` for anything else.
+pub fn hex_to_colorref(s: &str) -> Option<u32> {
+    let h = s.strip_prefix('#')?;
+    (h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit())).then(|| {
+        let n = u32::from_str_radix(h, 16).unwrap();
+        rgb((n >> 16) as u8, (n >> 8) as u8, n as u8)
+    })
+}
+/// A GDI `COLORREF` to `#RRGGBB` (uppercase).
+pub fn colorref_to_hex(c: u32) -> String {
+    format!("#{:02X}{:02X}{:02X}", c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Palette {
     pub bg: u32,
-    pub panel: u32,
+    /// Setting cards.
+    pub card: u32,
+    /// Edit boxes and drop-downs sitting on a card.
+    pub field: u32,
+    /// The thin line under a field (replaced by the accent while it has focus).
+    pub field_line: u32,
     pub text: u32,
     pub subtext: u32,
     pub border: u32,
+    /// Selected navigation item.
+    pub nav_sel: u32,
+    /// Hovered navigation item or button.
+    pub hover: u32,
+    /// A switch's outline and knob when off.
+    pub track: u32,
     pub error: u32,
 }
 /// Window colours matching Windows 11 Settings in light and dark.
@@ -129,19 +153,29 @@ pub fn palette(dark: bool) -> Palette {
     if dark {
         Palette {
             bg: rgb(0x20, 0x20, 0x20),
-            panel: rgb(0x2B, 0x2B, 0x2B),
+            card: rgb(0x2B, 0x2B, 0x2B),
+            field: rgb(0x33, 0x33, 0x33),
+            field_line: rgb(0x9A, 0x9A, 0x9A),
             text: rgb(0xFF, 0xFF, 0xFF),
-            subtext: rgb(0xA6, 0xA6, 0xA6),
-            border: rgb(0x40, 0x40, 0x40),
+            subtext: rgb(0xC8, 0xC8, 0xC8),
+            border: rgb(0x36, 0x36, 0x36),
+            nav_sel: rgb(0x2D, 0x2D, 0x2D),
+            hover: rgb(0x3A, 0x3A, 0x3A),
+            track: rgb(0xCF, 0xCF, 0xCF),
             error: rgb(0xFF, 0x99, 0xA4),
         }
     } else {
         Palette {
             bg: rgb(0xF3, 0xF3, 0xF3),
-            panel: rgb(0xFF, 0xFF, 0xFF),
+            card: rgb(0xFB, 0xFB, 0xFB),
+            field: rgb(0xFF, 0xFF, 0xFF),
+            field_line: rgb(0x8A, 0x8A, 0x8A),
             text: rgb(0x1A, 0x1A, 0x1A),
             subtext: rgb(0x5F, 0x5F, 0x5F),
-            border: rgb(0xE0, 0xE0, 0xE0),
+            border: rgb(0xE5, 0xE5, 0xE5),
+            nav_sel: rgb(0xE6, 0xE6, 0xE6),
+            hover: rgb(0xEE, 0xEE, 0xEE),
+            track: rgb(0x5F, 0x5F, 0x5F),
             error: rgb(0xC4, 0x2B, 0x1C),
         }
     }
@@ -176,16 +210,27 @@ mod tests {
             let p = palette(dark);
             for (name, fg, bg) in [
                 ("text/bg", p.text, p.bg),
-                ("text/panel", p.text, p.panel),
+                ("text/card", p.text, p.card),
+                ("text/field", p.text, p.field),
+                ("text/nav", p.text, p.nav_sel),
                 ("subtext/bg", p.subtext, p.bg),
-                ("subtext/panel", p.subtext, p.panel),
-                ("error/panel", p.error, p.panel),
+                ("subtext/card", p.subtext, p.card),
+                ("error/card", p.error, p.card),
             ] {
                 assert!(contrast(fg, bg) >= 4.5, "dark={dark} {name}: {:.2}", contrast(fg, bg));
             }
         }
     }
 
+
+    #[test]
+    fn hex_colorref_round_trip() {
+        assert_eq!(hex_to_colorref("#3B82F6"), Some(rgb(0x3B, 0x82, 0xF6)));
+        assert_eq!(colorref_to_hex(rgb(0x3B, 0x82, 0xF6)), "#3B82F6");
+        for bad in ["3B82F6", "#GGGGGG", "#FFF", "", "#3B82F6A"] {
+            assert_eq!(hex_to_colorref(bad), None, "{bad:?}");
+        }
+    }
     #[test]
     fn dwm_argb_becomes_colorref() {
         assert_eq!(argb_to_colorref(0xC40078D4), rgb(0x00, 0x78, 0xD4));

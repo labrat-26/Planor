@@ -143,10 +143,11 @@ impl Model {
         })
     }
 
-    /// +1 / -1: step a number, cycle a choice, flip a yes/no.
-    pub fn step(&mut self, i: usize, dir: i64) -> std::result::Result<(), String> {
+    /// The value `step` would set: one notch up (+1) or down (-1) for a number, the next word of a choice,
+    /// the opposite of a yes/no. Does not change anything.
+    pub fn stepped(&self, i: usize, dir: i64) -> std::result::Result<toml::Value, String> {
         let e = &self.entries[i];
-        let v = match (self.value(i), crate::choices(&e.key)) {
+        Ok(match (self.value(i), crate::choices(&e.key)) {
             (toml::Value::Boolean(b), _) => toml::Value::Boolean(!b),
             (toml::Value::Integer(n), _) => {
                 let unit = if n.abs() >= 1000 { 100 } else if n.abs() >= 100 { 10 } else { 1 };
@@ -161,7 +162,12 @@ impl Model {
                 toml::Value::String(c[(at + dir).rem_euclid(c.len() as i64) as usize].to_string())
             }
             _ => return Err("type a new value with Enter".into()),
-        };
+        })
+    }
+
+    /// +1 / -1: step a number, cycle a choice, flip a yes/no.
+    pub fn step(&mut self, i: usize, dir: i64) -> std::result::Result<(), String> {
+        let v = self.stepped(i, dir)?;
         self.set(i, v)
     }
 
@@ -380,6 +386,18 @@ mod tests {
         assert_eq!(m.value(idx(&m, "borders", "width_px")), toml::Value::Integer(2), "missing -> default");
     }
 
+
+    #[test]
+    fn stepped_previews_without_changing_anything() {
+        let m = model();
+        let (gap, share, curve) = (idx(&m, "layout", "gap_px"), idx(&m, "layout", "default_tile_share"), idx(&m, "animation", "curve"));
+        assert_eq!(m.stepped(gap, 1).unwrap(), toml::Value::Integer(7));
+        assert_eq!(m.stepped(gap, -1).unwrap(), toml::Value::Integer(5));
+        assert_eq!(m.stepped(share, 1).unwrap(), toml::Value::Float(0.55));
+        assert_eq!(m.stepped(curve, 1).unwrap(), toml::Value::String("spring".into()));
+        assert_eq!(m.value(gap), toml::Value::Integer(6));
+        assert!(!m.dirty);
+    }
     #[test]
     fn hotkey_valid_accepts_all_example_hotkeys() {
         let cfg: toml::Value = toml::from_str(crate::EXAMPLE).unwrap();

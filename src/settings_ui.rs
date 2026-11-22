@@ -68,34 +68,59 @@ pub fn save_guarded(model: &mut Model) -> std::result::Result<(), String> {
 }
 
 // ---- Win32 window ----------------------------------------------------------------------------------------
+//
+// Look: Windows 11 Settings. A navigation pane on the left (icon, label, accent pill on the selected item) and,
+// on the right, the section title and one rounded card per setting: title and grey description on the left, the
+// control on the right (switch, rounded field, drop-down). Shapes are anti-aliased with GDI+; text is GDI.
 
 use crate::{Command, client, pipe_name, theme, wide};
+use std::result::Result::Ok; // GdiPlus exports a constant named `Ok`
 use std::{
+    collections::HashMap,
     path::Path,
     sync::atomic::{AtomicPtr, Ordering},
 };
 use windows_sys::Win32::{
     Foundation::*,
-    Graphics::Gdi::*,
+    Graphics::{Gdi::*, GdiPlus::*},
     System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
-    UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::{EnableWindow, SetFocus}, WindowsAndMessaging::*},
+    UI::{
+        Controls::*,
+        HiDpi::*,
+        Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_UP},
+        Shell::{DefSubclassProc, SetWindowSubclass},
+        WindowsAndMessaging::*,
+    },
 };
 
-const NAV_ID: usize = 100;
 const BANNER_ID: usize = 101;
 const ROW_BASE: usize = 1000;
 const TIMER_SAVE: usize = 1;
 const TIMER_REBUILD: usize = 2;
-const KIND_LABEL: isize = 1;
-const KIND_HELP: isize = 2;
-const KIND_ERROR: isize = 3;
-const SS_LEFT: u32 = 0;
-const SS_NOTIFY: u32 = 0x100;
 const INSTALL_PAGE: &str = "Install";
 
+struct Fonts {
+    title: HFONT,
+    body: HFONT,
+    small: HFONT,
+    icon: HFONT,
+    brand: HFONT,
+}
 struct Brushes {
     bg: HBRUSH,
-    panel: HBRUSH,
+    field: HBRUSH,
+}
+struct Row {
+    entry: Option<usize>,
+    card: RECT,
+    title: String,
+    title_rc: RECT,
+    desc: String,
+    desc_rc: RECT,
+    field: Option<RECT>,
+    swatch: bool,
+    ctl: HWND,
+    reset: HWND,
 }
 struct State {
     hwnd: HWND,
@@ -110,13 +135,18 @@ struct State {
     selected: usize,
     dark: bool,
     pal: theme::Palette,
+    accent: u32,
     brushes: Brushes,
-    font: HFONT,
+    fonts: Fonts,
     dpi: u32,
     page_w: i32,
     content_h: i32,
     scroll: i32,
+    rows: Vec<Row>,
     kids: Vec<HWND>,
+    errors: HashMap<usize, String>,
+    hover: HWND,
+    nav_hover: Option<usize>,
     scheduler: SaveScheduler,
     stamp: Option<(std::time::SystemTime, u64)>,
     quiet: bool,
@@ -135,6 +165,9 @@ fn hi(v: usize) -> u32 {
 fn mul(px: i32, dpi: u32) -> i32 {
     px * dpi as i32 / 96
 }
+fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
+    RECT { left: l, top: t, right: r, bottom: b }
+}
 
 /// "gap_px" -> "Gap (px)", "focused_color" -> "Focused color".
 pub fn label_for(key: &str) -> String {
@@ -148,17 +181,161 @@ pub fn label_for(key: &str) -> String {
     }
     text + unit
 }
+/// Segoe Fluent Icons glyph for a navigation entry.
+fn icon_for(page: &str) -> &'static str {
+    match page {
+        "layout" => "\u{E80A}",
+        "borders" => "\u{E790}",
+        "animation" => "\u{E768}",
+        "touchpad" => "\u{E7C9}",
+        "mouse" => "\u{E962}",
+        "diagnostics" => "\u{E9D9}",
+        "hotkeys" => "\u{E765}",
+        INSTALL_PAGE => "\u{E896}",
+        _ => "\u{E713}",
+    }
+}
 
-fn make_font(dpi: u32) -> HFONT {
+fn make_font(face: &str, dp: i32, weight: i32, dpi: u32) -> HFONT {
     unsafe {
-        let mut m: ICONMETRICSW = std::mem::zeroed();
-        m.cbSize = std::mem::size_of::<ICONMETRICSW>() as u32;
-        SystemParametersInfoForDpi(SPI_GETICONMETRICS, m.cbSize, (&mut m as *mut ICONMETRICSW).cast(), 0, dpi);
-        CreateFontIndirectW(&m.lfFont)
+        CreateFontW(-mul(dp, dpi), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET as u32, 0, 0, CLEARTYPE_QUALITY as u32, 0, wide(face).as_ptr())
+    }
+}
+fn make_fonts(dpi: u32) -> Fonts {
+    Fonts {
+        title: make_font("Segoe UI Variable Display", 28, 600, dpi),
+        body: make_font("Segoe UI Variable Text", 14, 400, dpi),
+        small: make_font("Segoe UI Variable Text", 12, 400, dpi),
+        icon: make_font("Segoe Fluent Icons", 16, 400, dpi),
+        brand: make_font("Segoe UI Variable Text", 16, 600, dpi),
+    }
+}
+fn delete_fonts(f: &Fonts) {
+    unsafe {
+        for h in [f.title, f.body, f.small, f.icon, f.brand] {
+            DeleteObject(h as HGDIOBJ);
+        }
     }
 }
 fn make_brushes(pal: &theme::Palette) -> Brushes {
-    unsafe { Brushes { bg: CreateSolidBrush(pal.bg), panel: CreateSolidBrush(pal.panel) } }
+    unsafe { Brushes { bg: CreateSolidBrush(pal.bg), field: CreateSolidBrush(pal.field) } }
+}
+/// The accent colour, lightened in dark mode the way Windows does for text and switches.
+fn accent_for(dark: bool) -> u32 {
+    let c = theme::accent_color();
+    if !dark {
+        return c;
+    }
+    let mix = |v: u32| (v + (255 - v) * 30 / 100) & 0xFF;
+    mix(c & 0xFF) | mix((c >> 8) & 0xFF) << 8 | mix((c >> 16) & 0xFF) << 16
+}
+
+// ---- drawing -------------------------------------------------------------------------------------------
+
+fn argb(c: u32) -> u32 {
+    0xFF00_0000 | ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+/// A drawing surface: GDI+ for shapes, GDI for text, both shifted by (-ox, -oy).
+struct Canvas {
+    hdc: HDC,
+    g: *mut GpGraphics,
+    ox: i32,
+    oy: i32,
+}
+impl Canvas {
+    fn new(hdc: HDC, ox: i32, oy: i32) -> Self {
+        unsafe {
+            let mut g = std::ptr::null_mut();
+            GdipCreateFromHDC(hdc, &mut g);
+            GdipSetSmoothingMode(g, SmoothingModeAntiAlias);
+            GdipSetPixelOffsetMode(g, PixelOffsetModeHalf);
+            Self { hdc, g, ox, oy }
+        }
+    }
+    fn off(&self, r: RECT) -> RECT {
+        rect(r.left - self.ox, r.top - self.oy, r.right - self.ox, r.bottom - self.oy)
+    }
+    fn fill(&self, r: RECT, color: u32) {
+        unsafe {
+            let b = CreateSolidBrush(color);
+            FillRect(self.hdc, &self.off(r), b);
+            DeleteObject(b as HGDIOBJ);
+        }
+    }
+    fn rrect(&self, r: RECT, radius: f32, fill: Option<u32>, line: Option<(u32, f32)>) {
+        unsafe {
+            let r = self.off(r);
+            let inset = line.map_or(0.0, |(_, w)| w / 2.0);
+            let (x, y) = (r.left as f32 + inset, r.top as f32 + inset);
+            let (w, h) = ((r.right - r.left) as f32 - 2.0 * inset, (r.bottom - r.top) as f32 - 2.0 * inset);
+            let d = (radius * 2.0).clamp(1.0, w.min(h));
+            let mut path = std::ptr::null_mut();
+            GdipCreatePath(FillModeAlternate, &mut path);
+            GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+            GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+            GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+            GdipClosePathFigure(path);
+            if let Some(color) = fill {
+                let mut brush = std::ptr::null_mut();
+                GdipCreateSolidFill(argb(color), &mut brush);
+                GdipFillPath(self.g, brush as *mut GpBrush, path);
+                GdipDeleteBrush(brush as *mut GpBrush);
+            }
+            if let Some((color, width)) = line {
+                let mut pen = std::ptr::null_mut();
+                GdipCreatePen1(argb(color), width, UnitWorld, &mut pen);
+                GdipDrawPath(self.g, pen, path);
+                GdipDeletePen(pen);
+            }
+            GdipDeletePath(path);
+        }
+    }
+    fn circle(&self, cx: i32, cy: i32, d: i32, color: u32) {
+        unsafe {
+            let mut brush = std::ptr::null_mut();
+            GdipCreateSolidFill(argb(color), &mut brush);
+            GdipFillEllipse(self.g, brush as *mut GpBrush, (cx - self.ox) as f32 - d as f32 / 2.0, (cy - self.oy) as f32 - d as f32 / 2.0, d as f32, d as f32);
+            GdipDeleteBrush(brush as *mut GpBrush);
+        }
+    }
+    fn text(&self, s: &str, r: RECT, font: HFONT, color: u32, flags: u32) {
+        unsafe {
+            GdipFlush(self.g, FlushIntentionSync);
+            let old = SelectObject(self.hdc, font as HGDIOBJ);
+            SetTextColor(self.hdc, color);
+            SetBkMode(self.hdc, TRANSPARENT as i32);
+            let mut rc = self.off(r);
+            let w = wide(s);
+            DrawTextW(self.hdc, w.as_ptr(), -1, &mut rc, flags | DT_NOPREFIX);
+            SelectObject(self.hdc, old);
+        }
+    }
+}
+impl Drop for Canvas {
+    fn drop(&mut self) {
+        unsafe { GdipDeleteGraphics(self.g) };
+    }
+}
+/// Paint `r` of `hdc` through an off-screen bitmap (no flicker); `f` draws in the original coordinates.
+fn buffered(hdc: HDC, r: RECT, f: impl FnOnce(&Canvas)) {
+    unsafe {
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let mem = CreateCompatibleDC(hdc);
+        let bmp = CreateCompatibleBitmap(hdc, w, h);
+        let old = SelectObject(mem, bmp as HGDIOBJ);
+        {
+            let canvas = Canvas::new(mem, r.left, r.top);
+            f(&canvas);
+        }
+        BitBlt(hdc, r.left, r.top, w, h, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bmp as HGDIOBJ);
+        DeleteDC(mem);
+    }
 }
 
 /// One instance at a time: a second launch brings the first window to the front and exits.
@@ -212,39 +389,32 @@ unsafe fn wstr(p: *const u16) -> String {
     }
     String::from_utf16_lossy(&v)
 }
-
 fn stamp_of(path: &Path) -> Option<(std::time::SystemTime, u64)> {
     let m = std::fs::metadata(path).ok()?;
     Some((m.modified().ok()?, m.len()))
 }
 
+// ---- page layout ---------------------------------------------------------------------------------------
+
 #[allow(clippy::too_many_arguments)]
-fn child(st: &mut State, class: &str, text: &str, style: u32, ex: u32, r: (i32, i32, i32, i32), id: usize, kind: isize) -> HWND {
+fn child(st: &mut State, class: &str, text: &str, style: u32, ex: u32, r: RECT, id: usize, font: HFONT) -> HWND {
     unsafe {
         let h = CreateWindowExW(
             ex,
             wide(class).as_ptr(),
             wide(text).as_ptr(),
             style | WS_CHILD | WS_VISIBLE,
-            r.0,
-            r.1,
-            r.2,
-            r.3,
+            r.left,
+            r.top,
+            r.right - r.left,
+            r.bottom - r.top,
             st.page,
             id as isize as HMENU,
             GetModuleHandleW(std::ptr::null()),
             std::ptr::null(),
         );
-        SendMessageW(h, WM_SETFONT, st.font as usize, 1);
-        if kind != 0 {
-            SetWindowLongPtrW(h, GWLP_USERDATA, kind);
-        }
-        match class {
-            "EDIT" | "COMBOBOX" => theme::apply_input(h, st.dark),
-            "BUTTON" | "msctls_updown32" => theme::apply_control(h, st.dark),
-            _ => (),
-        }
-        if st.blocked.is_some() && kind == 0 {
+        SendMessageW(h, WM_SETFONT, font as usize, 1);
+        if st.blocked.is_some() {
             EnableWindow(h, 0);
         }
         st.kids.push(h);
@@ -252,13 +422,13 @@ fn child(st: &mut State, class: &str, text: &str, style: u32, ex: u32, r: (i32, 
     }
 }
 
-fn measure_height(st: &State, text: &str, width: i32) -> i32 {
+fn measure_height(st: &State, font: HFONT, text: &str, width: i32) -> i32 {
     unsafe {
         let hdc = GetDC(st.page);
-        let old = SelectObject(hdc, st.font as HGDIOBJ);
-        let mut rc = RECT { left: 0, top: 0, right: width, bottom: 0 };
+        let old = SelectObject(hdc, font as HGDIOBJ);
+        let mut rc = rect(0, 0, width, 0);
         let w = wide(text);
-        DrawTextW(hdc, w.as_ptr(), -1, &mut rc, DT_CALCRECT | DT_WORDBREAK);
+        DrawTextW(hdc, w.as_ptr(), -1, &mut rc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
         SelectObject(hdc, old);
         ReleaseDC(st.page, hdc);
         rc.bottom
@@ -269,6 +439,8 @@ fn clear_page(st: &mut State) {
     for h in st.kids.drain(..) {
         unsafe { DestroyWindow(h) };
     }
+    st.rows.clear();
+    st.hover = std::ptr::null_mut();
 }
 
 fn build_page(st: &mut State) {
@@ -276,69 +448,104 @@ fn build_page(st: &mut State) {
     st.quiet = true;
     let dpi = st.dpi;
     let s = |px: i32| mul(px, dpi);
-    let (pad, label_w, ctl_w, reset_w) = (s(24), s(215), s(200), s(72));
-    let row_h = s(28);
-    let full_w = (st.page_w - 2 * pad).max(s(300));
-    let ctl_x = pad + label_w;
-    let mut y = s(16);
+    let (margin, pad, gap) = (s(36), s(16), s(6));
+    let card_l = margin;
+    let card_r = (st.page_w - margin).max(card_l + s(420));
+    let mut y = s(24) + s(48) + s(16); // title block
     let page = st.pages[st.selected].clone();
+    let body = st.fonts.body;
     if page == INSTALL_PAGE {
-        child(st, "STATIC", "Install options appear here.", SS_LEFT, 0, (pad, y, full_w, s(24)), 0, KIND_LABEL);
-        y += s(40);
+        let desc = "Install Planor for your user account and start it when you sign in.";
+        let text_w = card_r - card_l - 2 * pad;
+        let dh = measure_height(st, st.fonts.small, desc, text_w);
+        let h = pad * 2 + s(20) + s(2) + dh;
+        let card = rect(card_l, y, card_r, y + h);
+        st.rows.push(Row {
+            entry: None,
+            card,
+            title: "Install".into(),
+            title_rc: rect(card_l + pad, y + pad, card_r - pad, y + pad + s(20)),
+            desc: desc.into(),
+            desc_rc: rect(card_l + pad, y + pad + s(22), card_r - pad, y + pad + s(22) + dh),
+            field: None,
+            swatch: false,
+            ctl: std::ptr::null_mut(),
+            reset: std::ptr::null_mut(),
+        });
+        y += h + gap;
     } else {
         for i in st.model.in_section(&page) {
             let entry = st.model.entries[i].clone();
             let base = ROW_BASE + i * 4;
             let control = control_for(&entry);
             let value = st.model.value(i);
-            let label = label_for(&entry.key);
+            let editable = !matches!(control, Control::Check);
+            let (ctl_w, ctl_h, reset_w) = (if editable { s(220) } else { s(92) }, s(32), s(56));
+            let text_w = (card_r - card_l - 2 * pad - ctl_w - reset_w - s(24)).max(s(160));
+            let title = label_for(&entry.key);
+            let desc_h = if entry.help.is_empty() { 0 } else { measure_height(st, st.fonts.small, &entry.help, text_w) };
+            let desc_h = if editable { desc_h.max(s(16)) } else { desc_h };
+            let block = s(20) + if desc_h > 0 { s(2) + desc_h } else { 0 };
+            let h = (pad * 2 + block).max(if editable { s(64) } else { s(56) });
+            let block = if entry.help.is_empty() { s(20) } else { block };
+            let top = y + (h - block) / 2;
+            let card = rect(card_l, y, card_r, y + h);
+            let cy = y + (h - ctl_h) / 2;
+            let ctl_rc = rect(card_r - pad - ctl_w, cy, card_r - pad, cy + ctl_h);
+            let reset_rc = rect(ctl_rc.left - s(8) - reset_w, cy, ctl_rc.left - s(8), cy + ctl_h);
+            let mut field = None;
+            let mut swatch = false;
+            let ctl;
             match control {
                 Control::Check => {
-                    let h = child(st, "BUTTON", "", BS_AUTOCHECKBOX as u32 | WS_TABSTOP, 0, (pad, y + s(2), s(24), s(24)), base, 0);
-                    let on = value.as_bool() == Some(true);
-                    unsafe { SendMessageW(h, BM_SETCHECK, if on { BST_CHECKED } else { BST_UNCHECKED } as usize, 0) };
-                    child(st, "STATIC", &label, SS_LEFT | SS_NOTIFY, 0, (pad + s(30), y + s(4), label_w + ctl_w, s(22)), base + 3, KIND_LABEL);
+                    ctl = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, ctl_rc, base, body);
+                }
+                Control::Choice(_) => {
+                    ctl = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, ctl_rc, base, body);
+                    field = Some(ctl_rc);
                 }
                 other => {
-                    child(st, "STATIC", &label, SS_LEFT, 0, (pad, y + s(4), label_w - s(8), s(22)), base + 3, KIND_LABEL);
-                    match other {
-                        Control::Choice(choices) => {
-                            let h = child(st, "COMBOBOX", "", CBS_DROPDOWNLIST as u32 | WS_TABSTOP | WS_VSCROLL, 0, (ctl_x, y, ctl_w, s(240)), base, 0);
-                            for c in choices {
-                                unsafe { SendMessageW(h, CB_ADDSTRING, 0, wide(c).as_ptr() as isize) };
-                            }
-                            let at = choices.iter().position(|c| Some(*c) == value.as_str()).unwrap_or(0);
-                            unsafe { SendMessageW(h, CB_SETCURSEL, at, 0) };
-                        }
-                        _ => {
-                            let shown = match &value {
-                                toml::Value::String(t) => t.clone(),
-                                v => v.to_string(),
-                            };
-                            let edit = child(st, "EDIT", &shown, ES_AUTOHSCROLL as u32 | WS_TABSTOP, WS_EX_CLIENTEDGE, (ctl_x, y, ctl_w, row_h), base, 0);
-                            if matches!(other, Control::Number { float: false }) {
-                                unsafe {
-                                    let up = child(st, "msctls_updown32", "", UDS_ALIGNRIGHT as u32 | UDS_SETBUDDYINT as u32 | UDS_ARROWKEYS as u32, 0, (0, 0, 0, 0), base + 4000, 0);
-                                    SendMessageW(up, UDM_SETBUDDY, edit as usize, 0);
-                                    SendMessageW(up, UDM_SETRANGE32, 0, 100000);
-                                    SendMessageW(up, UDM_SETPOS32, 0, value.as_integer().unwrap_or(0) as isize);
-                                }
-                            }
-                        }
+                    swatch = matches!(other, Control::Color);
+                    let inner_l = ctl_rc.left + s(12) + if swatch { s(28) } else { 0 };
+                    let eh = s(20);
+                    let shown = match &value {
+                        toml::Value::String(t) => t.clone(),
+                        v => v.to_string(),
+                    };
+                    ctl = child(st, "EDIT", &shown, ES_AUTOHSCROLL as u32 | WS_TABSTOP, 0, rect(inner_l, cy + (ctl_h - eh) / 2, ctl_rc.right - s(12), cy + (ctl_h - eh) / 2 + eh), base, body);
+                    field = Some(ctl_rc);
+                    if matches!(other, Control::Number { .. }) {
+                        unsafe { SetWindowSubclass(ctl, Some(edit_proc), 1, i) };
                     }
                 }
             }
-            let reset = child(st, "BUTTON", "Reset", BS_PUSHBUTTON as u32 | WS_TABSTOP, 0, (ctl_x + ctl_w + s(8), y, reset_w, row_h), base + 1, 0);
-            unsafe { EnableWindow(reset, (value != entry.default && st.blocked.is_none()) as i32) };
-            let help_h = if entry.help.is_empty() { 0 } else { measure_height(st, &entry.help, full_w) };
-            let info_h = help_h.max(s(16));
-            child(st, "STATIC", &entry.help, SS_LEFT, 0, (pad, y + row_h + s(2), full_w, info_h), base + 2, KIND_HELP);
-            y += row_h + s(2) + info_h + s(10);
+            if matches!(control, Control::Check | Control::Choice(_)) {
+                unsafe { SetWindowSubclass(ctl, Some(hover_proc), 2, 0) };
+            }
+            let reset = child(st, "BUTTON", "Reset", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, reset_rc, base + 1, body);
+            unsafe {
+                SetWindowSubclass(reset, Some(hover_proc), 2, 0);
+                ShowWindow(reset, if value != entry.default { SW_SHOW } else { SW_HIDE });
+            }
+            st.rows.push(Row {
+                entry: Some(i),
+                card,
+                title,
+                title_rc: rect(card_l + pad, top, card_l + pad + text_w, top + s(20)),
+                desc: entry.help.clone(),
+                desc_rc: rect(card_l + pad, top + s(22), card_l + pad + text_w, top + s(22) + desc_h),
+                field,
+                swatch,
+                ctl,
+                reset,
+            });
+            y += h + gap;
         }
     }
-    st.content_h = y + s(8);
+    st.content_h = y + s(24);
     st.quiet = false;
     apply_scroll(st);
+    unsafe { InvalidateRect(st.page, std::ptr::null(), 1) };
 }
 
 fn apply_scroll(st: &mut State) {
@@ -367,8 +574,8 @@ fn layout(st: &mut State) {
         GetClientRect(st.hwnd, &mut rc);
         let dpi = st.dpi;
         let banner_h = if st.banner_text.is_empty() { 0 } else { mul(44, dpi) };
-        let nav_w = mul(210, dpi);
-        MoveWindow(st.banner, 0, 0, rc.right, banner_h, 1);
+        let nav_w = mul(260, dpi);
+        MoveWindow(st.banner, mul(16, dpi), mul(6, dpi), rc.right - mul(32, dpi), banner_h.max(1) - mul(8, dpi).min(banner_h.max(1) - 1), 1);
         ShowWindow(st.banner, if banner_h == 0 { SW_HIDE } else { SW_SHOW });
         MoveWindow(st.nav, 0, banner_h, nav_w, rc.bottom - banner_h, 1);
         MoveWindow(st.viewport, nav_w, banner_h, rc.right - nav_w, rc.bottom - banner_h, 1);
@@ -418,41 +625,61 @@ fn flush_save(st: &mut State) {
     }
 }
 
-fn show_info(st: &State, i: usize, error: Option<&str>) {
-    unsafe {
-        let h = GetDlgItem(st.page, (ROW_BASE + i * 4 + 2) as i32);
-        if h.is_null() {
-            return;
-        }
-        match error {
-            Some(e) => {
-                SetWindowLongPtrW(h, GWLP_USERDATA, KIND_ERROR);
-                set_text(h, e);
-            }
-            None => {
-                SetWindowLongPtrW(h, GWLP_USERDATA, KIND_HELP);
-                set_text(h, &st.model.entries[i].help);
+// ---- editing -------------------------------------------------------------------------------------------
+
+fn row_of(st: &State, i: usize) -> Option<&Row> {
+    st.rows.iter().find(|r| r.entry == Some(i))
+}
+fn repaint_row(st: &State, i: usize) {
+    if let Some(r) = row_of(st, i) {
+        unsafe {
+            InvalidateRect(st.page, &r.card, 0);
+            for h in [r.ctl, r.reset] {
+                InvalidateRect(h, std::ptr::null(), 0);
             }
         }
-        InvalidateRect(h, std::ptr::null(), 1);
     }
 }
+fn set_error(st: &mut State, i: usize, error: Option<String>) {
+    match error {
+        Some(e) => st.errors.insert(i, e),
+        None => st.errors.remove(&i),
+    };
+    repaint_row(st, i);
+}
 fn refresh_reset(st: &State, i: usize) {
-    unsafe {
-        let h = GetDlgItem(st.page, (ROW_BASE + i * 4 + 1) as i32);
-        if !h.is_null() {
-            EnableWindow(h, (st.model.value(i) != st.model.entries[i].default) as i32);
-        }
+    if let Some(r) = row_of(st, i) {
+        let changed = st.model.value(i) != st.model.entries[i].default;
+        unsafe { ShowWindow(r.reset, if changed { SW_SHOW } else { SW_HIDE }) };
     }
 }
 fn change(st: &mut State, i: usize, v: toml::Value) {
     match apply_change(&mut st.model, i, v) {
         Ok(()) => {
-            show_info(st, i, None);
+            set_error(st, i, None);
             refresh_reset(st, i);
             start_save_timer(st);
         }
-        Err(e) => show_info(st, i, Some(&e)),
+        Err(e) => set_error(st, i, Some(e)),
+    }
+}
+
+fn choose(st: &mut State, i: usize, choices: &'static [&'static str]) {
+    let Some(r) = row_of(st, i) else { return };
+    let current = st.model.value(i);
+    unsafe {
+        let menu = CreatePopupMenu();
+        for (n, c) in choices.iter().enumerate() {
+            let flags = MF_STRING | if current.as_str() == Some(c) { MF_CHECKED } else { 0 };
+            AppendMenuW(menu, flags, n + 1, wide(c).as_ptr());
+        }
+        let mut at = POINT { x: 0, y: (r.field.map_or(0, |f| f.bottom - f.top)) };
+        ClientToScreen(r.ctl, &mut at);
+        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y + 2, 0, st.hwnd, std::ptr::null());
+        DestroyMenu(menu);
+        if picked > 0 {
+            change(st, i, toml::Value::String(choices[picked as usize - 1].to_string()));
+        }
     }
 }
 
@@ -464,81 +691,182 @@ fn row_command(st: &mut State, id: usize, code: u32) {
     if i >= st.model.entries.len() {
         return;
     }
-    let ctl = unsafe { GetDlgItem(st.page, (ROW_BASE + i * 4) as i32) };
-    match slot {
-        1 if code == BN_CLICKED => {
-            let default = st.model.entries[i].default.clone();
-            change(st, i, default);
-            build_page(st);
-        }
-        3 if code == STN_CLICKED => {
-            // clicking a checkbox's label toggles it
-            let on = unsafe { SendMessageW(ctl, BM_GETCHECK, 0, 0) } as u32 == BST_CHECKED;
-            unsafe { SendMessageW(ctl, BM_SETCHECK, if on { BST_UNCHECKED } else { BST_CHECKED } as usize, 0) };
+    if slot == 1 && code == BN_CLICKED {
+        let default = st.model.entries[i].default.clone();
+        change(st, i, default);
+        build_page(st);
+        return;
+    }
+    if slot != 0 {
+        return;
+    }
+    match control_for(&st.model.entries[i]) {
+        Control::Check if code == BN_CLICKED => {
+            let on = st.model.value(i).as_bool() == Some(true);
             change(st, i, toml::Value::Boolean(!on));
         }
-        0 => match control_for(&st.model.entries[i]) {
-            Control::Check if code == BN_CLICKED => {
-                let on = unsafe { SendMessageW(ctl, BM_GETCHECK, 0, 0) } as u32 == BST_CHECKED;
-                change(st, i, toml::Value::Boolean(on));
-            }
-            Control::Choice(choices) if code == CBN_SELCHANGE => {
-                let at = unsafe { SendMessageW(ctl, CB_GETCURSEL, 0, 0) };
-                if let Some(word) = choices.get(at.max(0) as usize) {
-                    change(st, i, toml::Value::String(word.to_string()));
-                }
-            }
-            Control::Number { .. } | Control::Color | Control::Hotkey | Control::Text if code == EN_CHANGE => {
+        Control::Choice(choices) if code == BN_CLICKED => choose(st, i, choices),
+        Control::Number { .. } | Control::Color | Control::Hotkey | Control::Text => {
+            let Some(ctl) = row_of(st, i).map(|r| r.ctl) else { return };
+            if code == EN_CHANGE {
                 match st.model.parse_input(i, &text_of(ctl)) {
                     Ok(v) => change(st, i, v),
-                    Err(e) => show_info(st, i, Some(&e)),
+                    Err(e) => set_error(st, i, Some(e)),
                 }
+                repaint_row(st, i);
+            } else if code == EN_SETFOCUS || code == EN_KILLFOCUS {
+                repaint_row(st, i);
             }
-            _ => (),
-        },
+        }
         _ => (),
     }
 }
 
 fn select_page(st: &mut State, at: usize) {
-    if at < st.pages.len() {
+    if at < st.pages.len() && at != st.selected {
         st.selected = at;
         st.scroll = 0;
         build_page(st);
+        unsafe { InvalidateRect(st.nav, std::ptr::null(), 0) };
     }
 }
 
 fn retheme(st: &mut State) {
     st.dark = theme::system_is_dark();
     st.pal = theme::palette(st.dark);
+    st.accent = accent_for(st.dark);
     unsafe {
         DeleteObject(st.brushes.bg as HGDIOBJ);
-        DeleteObject(st.brushes.panel as HGDIOBJ);
+        DeleteObject(st.brushes.field as HGDIOBJ);
     }
     st.brushes = make_brushes(&st.pal);
     theme::apply_window(st.hwnd, st.dark);
-    theme::apply_control(st.nav, st.dark);
     theme::apply_control(st.viewport, st.dark);
     build_page(st);
     unsafe { InvalidateRect(st.hwnd, std::ptr::null(), 1) };
+    unsafe { InvalidateRect(st.nav, std::ptr::null(), 1) };
 }
 
-fn paint_colors(st: &State, msg: u32, hdc: HDC, ctl: HWND) -> LRESULT {
-    unsafe {
-        if msg == WM_CTLCOLORSTATIC {
-            let color = match GetWindowLongPtrW(ctl, GWLP_USERDATA) {
-                KIND_HELP => st.pal.subtext,
-                KIND_ERROR => st.pal.error,
-                _ => st.pal.text,
-            };
-            SetTextColor(hdc, color);
-            SetBkColor(hdc, st.pal.bg);
-            st.brushes.bg as LRESULT
-        } else {
-            SetTextColor(hdc, st.pal.text);
-            SetBkColor(hdc, st.pal.panel);
-            st.brushes.panel as LRESULT
+// ---- painting ------------------------------------------------------------------------------------------
+
+fn paint_page(st: &State, c: &Canvas, clip: RECT) {
+    let (pal, dpi) = (st.pal, st.dpi);
+    let s = |px: i32| mul(px, dpi);
+    c.fill(clip, pal.bg);
+    let page = &st.pages[st.selected];
+    c.text(&label_for(page), rect(s(36), s(24), st.page_w - s(36), s(24) + s(48)), st.fonts.title, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    for row in &st.rows {
+        if row.card.bottom < clip.top || row.card.top > clip.bottom {
+            continue;
         }
+        c.rrect(row.card, s(4) as f32, Some(pal.card), Some((pal.border, 1.0)));
+        let error = row.entry.and_then(|i| st.errors.get(&i));
+        // a card with no description makes room for the error line by lifting its title
+        let lift = if error.is_some() && row.desc.is_empty() { s(10) } else { 0 };
+        let up = |r: RECT| rect(r.left, r.top - lift, r.right, r.bottom - lift);
+        c.text(&row.title, up(row.title_rc), st.fonts.body, pal.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        match error {
+            Some(e) => c.text(e, up(row.desc_rc), st.fonts.small, pal.error, DT_LEFT | DT_WORDBREAK),
+            None if !row.desc.is_empty() => c.text(&row.desc, row.desc_rc, st.fonts.small, pal.subtext, DT_LEFT | DT_WORDBREAK),
+            None => (),
+        }
+        let (Some(f), Some(i)) = (row.field, row.entry) else { continue };
+        if matches!(control_for(&st.model.entries[i]), Control::Choice(_)) {
+            continue; // the drop-down paints itself
+        }
+        let focused = unsafe { GetFocus() } == row.ctl;
+        c.rrect(f, s(4) as f32, Some(pal.field), Some((if error.is_some() { pal.error } else { pal.border }, 1.0)));
+        let line = if error.is_some() { pal.error } else if focused { st.accent } else { pal.field_line };
+        c.fill(rect(f.left + s(3), f.bottom - if focused { s(2) } else { 1 }, f.right - s(3), f.bottom), line);
+        if row.swatch {
+            let hex = st.model.value(i);
+            let hex = hex.as_str().unwrap_or("#000000");
+            if let Some(color) = theme::hex_to_colorref(hex) {
+                c.rrect(rect(f.left + s(10), f.top + (f.bottom - f.top - s(18)) / 2, f.left + s(28), f.top + (f.bottom - f.top - s(18)) / 2 + s(18)), s(3) as f32, Some(color), Some((pal.field_line, 1.0)));
+            }
+        }
+    }
+}
+
+fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
+    let id = d.CtlID as usize;
+    if id < ROW_BASE {
+        return;
+    }
+    let (i, slot) = ((id - ROW_BASE) / 4, (id - ROW_BASE) % 4);
+    let (pal, dpi) = (st.pal, st.dpi);
+    let s = |px: i32| mul(px, dpi);
+    let rc = d.rcItem;
+    let hover = st.hover == d.hwndItem;
+    let pressed = d.itemState & ODS_SELECTED != 0;
+    let focus = d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0;
+    buffered(d.hDC, rc, |c| {
+        c.fill(rc, pal.card);
+        if slot == 1 {
+            if hover || pressed {
+                c.rrect(rc, s(4) as f32, Some(pal.hover), None);
+            }
+            c.text("Reset", rc, st.fonts.body, st.accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            match control_for(&st.model.entries[i]) {
+                Control::Check => {
+                    let on = st.model.value(i).as_bool() == Some(true);
+                    let (w, h) = (s(40), s(20));
+                    let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
+                    c.text(if on { "On" } else { "Off" }, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, pal.text, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                    let cy = sw.top + h / 2;
+                    let knob = if hover || pressed { s(14) } else { s(12) };
+                    if on {
+                        c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
+                        c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
+                    } else {
+                        c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
+                        c.circle(sw.left + s(10), cy, knob, pal.track);
+                    }
+                }
+                Control::Choice(_) => {
+                    c.rrect(rc, s(4) as f32, Some(if hover || pressed { pal.hover } else { pal.field }), Some((pal.border, 1.0)));
+                    c.fill(rect(rc.left + s(3), rc.bottom - 1, rc.right - s(3), rc.bottom), pal.field_line);
+                    let v = st.model.value(i);
+                    c.text(v.as_str().unwrap_or(""), rect(rc.left + s(12), rc.top, rc.right - s(36), rc.bottom), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                    c.text("\u{E70D}", rect(rc.right - s(32), rc.top, rc.right - s(10), rc.bottom), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                }
+                _ => (),
+            }
+        }
+        if focus {
+            c.rrect(rect(rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1), s(4) as f32, None, Some((pal.text, 2.0)));
+        }
+    });
+}
+
+fn paint_nav(st: &State, hwnd: HWND) {
+    unsafe {
+        let mut ps: PAINTSTRUCT = std::mem::zeroed();
+        let hdc = BeginPaint(hwnd, &mut ps);
+        let mut rc: RECT = std::mem::zeroed();
+        GetClientRect(hwnd, &mut rc);
+        let (pal, dpi) = (st.pal, st.dpi);
+        let s = |px: i32| mul(px, dpi);
+        buffered(hdc, rc, |c| {
+            c.fill(rc, pal.bg);
+            DrawIconEx(c.hdc, s(18), s(18), theme::app_icon(s(28)), s(28), s(28), 0, std::ptr::null_mut(), DI_NORMAL);
+            c.text("Planor", rect(s(56), s(14), rc.right - s(8), s(14) + s(36)), st.fonts.brand, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            for (n, page) in st.pages.iter().enumerate() {
+                let top = s(72) + n as i32 * s(44);
+                let item = rect(s(8), top, rc.right - s(8), top + s(40));
+                let selected = n == st.selected;
+                if selected {
+                    c.rrect(item, s(4) as f32, Some(pal.nav_sel), None);
+                    c.rrect(rect(item.left, top + s(12), item.left + s(3), top + s(28)), 1.5, Some(st.accent), None);
+                } else if st.nav_hover == Some(n) {
+                    c.rrect(item, s(4) as f32, Some(pal.hover), None);
+                }
+                c.text(icon_for(page), rect(item.left + s(12), top, item.left + s(36), top + s(40)), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                c.text(&label_for(page), rect(item.left + s(46), top, item.right - s(8), top + s(40)), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            }
+        });
+        EndPaint(hwnd, &ps);
     }
 }
 
@@ -549,6 +877,54 @@ fn erase(hwnd: HWND, hdc: HDC, brush: HBRUSH) -> LRESULT {
         FillRect(hdc, &rc, brush);
     }
     1
+}
+
+// ---- window procedures ---------------------------------------------------------------------------------
+
+fn track_leave(hwnd: HWND) {
+    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+    unsafe { TrackMouseEvent(&mut t) };
+}
+
+/// Hover highlight for the owner-drawn buttons.
+unsafe extern "system" fn hover_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        let p = STATE.load(Ordering::Relaxed);
+        if !p.is_null() {
+            let s = &mut *p;
+            match msg {
+                WM_MOUSEMOVE if s.hover != hwnd => {
+                    s.hover = hwnd;
+                    track_leave(hwnd);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                WM_MOUSELEAVE => {
+                    s.hover = std::ptr::null_mut();
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                _ => (),
+            }
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
+}
+
+/// Up and down arrows in a number box step the value.
+unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, entry: usize) -> LRESULT {
+    unsafe {
+        if msg == WM_KEYDOWN && (wp as u16 == VK_UP || wp as u16 == VK_DOWN) {
+            let p = STATE.load(Ordering::Relaxed);
+            if !p.is_null() {
+                let s = &mut *p;
+                let dir = if wp as u16 == VK_UP { 1 } else { -1 };
+                if let Ok(v) = s.model.stepped(entry, dir) {
+                    set_text(hwnd, &v.to_string()); // EN_CHANGE then validates and saves it
+                }
+            }
+            return 0;
+        }
+        DefSubclassProc(hwnd, msg, wp, lp)
+    }
 }
 
 unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -563,8 +939,23 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 row_command(s, lo(wp) as usize, hi(wp));
                 0
             }
-            WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT | WM_CTLCOLORLISTBOX | WM_CTLCOLORBTN => paint_colors(s, msg, wp as HDC, lp as HWND),
-            WM_ERASEBKGND => erase(hwnd, wp as HDC, s.brushes.bg),
+            WM_DRAWITEM => {
+                draw_item(s, &*(lp as *const DRAWITEMSTRUCT));
+                1
+            }
+            WM_CTLCOLOREDIT => {
+                SetTextColor(wp as HDC, s.pal.text);
+                SetBkColor(wp as HDC, s.pal.field);
+                s.brushes.field as LRESULT
+            }
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                let mut ps: PAINTSTRUCT = std::mem::zeroed();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                buffered(hdc, ps.rcPaint, |c| paint_page(s, c, ps.rcPaint));
+                EndPaint(hwnd, &ps);
+                0
+            }
             WM_MOUSEWHEEL => SendMessageW(s.viewport, msg, wp, lp),
             _ => DefWindowProcW(hwnd, msg, wp, lp),
         }
@@ -605,6 +996,60 @@ unsafe extern "system" fn viewport_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
     }
 }
 
+fn nav_index(st: &State, y: i32) -> Option<usize> {
+    let s = |px: i32| mul(px, st.dpi);
+    let rel = y - s(72);
+    (rel >= 0 && rel % s(44) < s(40) && ((rel / s(44)) as usize) < st.pages.len()).then_some((rel / s(44)) as usize)
+}
+
+unsafe extern "system" fn nav_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        let p = STATE.load(Ordering::Relaxed);
+        if p.is_null() {
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+        let s = &mut *p;
+        match msg {
+            WM_ERASEBKGND => 1,
+            WM_PAINT => {
+                paint_nav(s, hwnd);
+                0
+            }
+            WM_GETDLGCODE => DLGC_WANTARROWS as LRESULT,
+            WM_LBUTTONDOWN => {
+                SetFocus(hwnd);
+                if let Some(n) = nav_index(s, (lp >> 16) as i16 as i32) {
+                    select_page(s, n);
+                }
+                0
+            }
+            WM_MOUSEMOVE => {
+                let over = nav_index(s, (lp >> 16) as i16 as i32);
+                if over != s.nav_hover {
+                    s.nav_hover = over;
+                    track_leave(hwnd);
+                    InvalidateRect(hwnd, std::ptr::null(), 0);
+                }
+                0
+            }
+            WM_MOUSELEAVE => {
+                s.nav_hover = None;
+                InvalidateRect(hwnd, std::ptr::null(), 0);
+                0
+            }
+            WM_KEYDOWN => {
+                match wp as u16 {
+                    VK_UP if s.selected > 0 => select_page(s, s.selected - 1),
+                    VK_DOWN => select_page(s, s.selected + 1),
+                    _ => (),
+                }
+                0
+            }
+            _ => DefWindowProcW(hwnd, msg, wp, lp),
+        }
+    }
+}
+
 unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         let p = STATE.load(Ordering::Relaxed);
@@ -631,20 +1076,10 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 }
                 0
             }
-            WM_COMMAND => {
-                if lo(wp) as usize == NAV_ID && hi(wp) == LBN_SELCHANGE {
-                    let at = SendMessageW(s.nav, LB_GETCURSEL, 0, 0);
-                    select_page(s, at.max(0) as usize);
-                }
-                0
-            }
-            WM_CTLCOLORLISTBOX | WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
-                if lp as HWND == s.banner {
-                    SetTextColor(wp as HDC, s.pal.error);
-                    SetBkColor(wp as HDC, s.pal.bg);
-                    return s.brushes.bg as LRESULT;
-                }
-                paint_colors(s, if msg == WM_CTLCOLORLISTBOX { WM_CTLCOLOREDIT } else { msg }, wp as HDC, lp as HWND)
+            WM_CTLCOLORSTATIC => {
+                SetTextColor(wp as HDC, s.pal.error);
+                SetBkColor(wp as HDC, s.pal.bg);
+                s.brushes.bg as LRESULT
             }
             WM_ERASEBKGND => erase(hwnd, wp as HDC, s.brushes.bg),
             WM_SETTINGCHANGE => {
@@ -657,12 +1092,12 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 s.dpi = hi(wp);
                 let r = &*(lp as *const RECT);
                 SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-                DeleteObject(s.font as HGDIOBJ);
-                s.font = make_font(s.dpi);
-                SendMessageW(s.nav, WM_SETFONT, s.font as usize, 1);
-                SendMessageW(s.nav, LB_SETITEMHEIGHT, 0, mul(34, s.dpi) as isize);
+                delete_fonts(&s.fonts);
+                s.fonts = make_fonts(s.dpi);
+                SendMessageW(s.banner, WM_SETFONT, s.fonts.body as usize, 1);
                 layout(s);
                 build_page(s);
+                InvalidateRect(s.nav, std::ptr::null(), 1);
                 0
             }
             WM_ACTIVATE => {
@@ -705,12 +1140,10 @@ fn register(name: &str, proc: WNDPROC, style: u32) {
 pub fn run(path: &Path) -> Result<()> {
     let Some(_guard) = single_instance() else { return Ok(()) };
     theme::enable_app_dark_mode();
+    let mut gdiplus_token = 0usize;
     unsafe {
-        let icc = INITCOMMONCONTROLSEX {
-            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES,
-        };
-        InitCommonControlsEx(&icc);
+        let input = GdiplusStartupInput { GdiplusVersion: 1, DebugEventCallback: 0, SuppressBackgroundThread: 0, SuppressExternalCodecs: 0 };
+        GdiplusStartup(&mut gdiplus_token, &input, std::ptr::null_mut());
     }
     let (model, load_problem) = match Model::load(path) {
         Ok(m) => (m, None),
@@ -724,6 +1157,7 @@ pub fn run(path: &Path) -> Result<()> {
     register("PlanorSettings", Some(main_proc), CS_HREDRAW | CS_VREDRAW);
     register("PlanorViewport", Some(viewport_proc), 0);
     register("PlanorPage", Some(page_proc), 0);
+    register("PlanorNav", Some(nav_proc), 0);
     unsafe {
         let dpi = GetDpiForSystem();
         let instance = GetModuleHandleW(std::ptr::null());
@@ -734,8 +1168,8 @@ pub fn run(path: &Path) -> Result<()> {
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            mul(1040, dpi),
-            mul(700, dpi),
+            mul(1100, dpi),
+            mul(760, dpi),
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             instance,
@@ -747,8 +1181,8 @@ pub fn run(path: &Path) -> Result<()> {
         let mk = |class: &str, style: u32, ex: u32, id: usize| {
             CreateWindowExW(ex, wide(class).as_ptr(), wide("").as_ptr(), style | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, id as isize as HMENU, instance, std::ptr::null())
         };
-        let nav = mk("LISTBOX", LBS_NOTIFY as u32 | LBS_NOINTEGRALHEIGHT as u32 | WS_TABSTOP | WS_VSCROLL, 0, NAV_ID);
-        let banner = mk("STATIC", SS_LEFT, 0, BANNER_ID);
+        let nav = mk("PlanorNav", WS_TABSTOP, 0, 100);
+        let banner = mk("STATIC", 0, 0, BANNER_ID);
         let viewport = mk("PlanorViewport", WS_VSCROLL | WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, 0);
         let page = CreateWindowExW(
             WS_EX_CONTROLPARENT,
@@ -764,7 +1198,7 @@ pub fn run(path: &Path) -> Result<()> {
             instance,
             std::ptr::null(),
         );
-        let font = make_font(dpi);
+        let fonts = make_fonts(dpi);
         let state = Box::new(State {
             hwnd,
             nav,
@@ -778,28 +1212,26 @@ pub fn run(path: &Path) -> Result<()> {
             selected: 0,
             dark,
             pal,
+            accent: accent_for(dark),
             brushes: make_brushes(&pal),
-            font,
+            fonts,
             dpi,
             page_w: 0,
             content_h: 0,
             scroll: 0,
+            rows: vec![],
             kids: vec![],
+            errors: HashMap::new(),
+            hover: std::ptr::null_mut(),
+            nav_hover: None,
             scheduler: SaveScheduler::new(Duration::from_millis(250)),
             stamp: stamp_of(path),
             quiet: false,
         });
         STATE.store(Box::into_raw(state), Ordering::Relaxed);
         let s = st();
-        for p in &s.pages {
-            SendMessageW(nav, LB_ADDSTRING, 0, wide(&format!("  {}", label_for(p))).as_ptr() as isize);
-        }
-        SendMessageW(nav, LB_SETCURSEL, 0, 0);
-        SendMessageW(nav, WM_SETFONT, font as usize, 1);
-        SendMessageW(banner, WM_SETFONT, font as usize, 1);
-        SendMessageW(nav, LB_SETITEMHEIGHT, 0, mul(34, dpi) as isize);
+        SendMessageW(banner, WM_SETFONT, s.fonts.body as usize, 1);
         theme::apply_window(hwnd, dark);
-        theme::apply_control(nav, dark);
         theme::apply_control(viewport, dark);
         if let Some(e) = blocked {
             s.banner_text = format!("{SYNTAX_ERROR}  ({e})");
@@ -817,6 +1249,7 @@ pub fn run(path: &Path) -> Result<()> {
                 DispatchMessageW(&msg);
             }
         }
+        GdiplusShutdown(gdiplus_token);
     }
     Ok(())
 }
