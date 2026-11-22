@@ -57,7 +57,7 @@ If you have used a phone's home screen, you already know the idea: swipe to see 
 
 > 🔓 **No administrator rights needed.** Planor is a single file that runs as your normal user. There is no installer and no "Run as administrator" prompt. It keeps its settings in `%APPDATA%\planor`, and `autostart` uses your own per-user startup entry, so nothing system-wide is changed.
 
-That is all. The next sections explain what you can do now.
+That is all. For the smoothest experience, spend five minutes on the [recommended Windows settings](#-recommended-windows-settings-five-minutes-once) below (the main one: turn off Windows' own touchpad gestures). Then the next sections explain what you can do.
 
 ### Start Planor automatically when you sign in
 
@@ -70,6 +70,49 @@ That is all. The next sections explain what you can do now.
 ```powershell
 .\planor.exe stop
 ```
+
+---
+
+## 🧹 Recommended Windows settings (five minutes, once)
+
+Windows has its own ideas about window layout, and they clash with Planor. These four settings let the two get along. Only the first one needs a manual change. The rest are checks.
+
+### 1. Turn off Windows' own touchpad gestures
+
+Windows reacts to three- and four-finger swipes (Task view, Show desktop, switch desktops) at the same time as Planor does. Planor can only *listen* to the touchpad, so it cannot stop Windows from reacting. Please switch Windows' gestures off by hand:
+
+> **Settings → Bluetooth & devices → Touchpad → Three-finger gestures** and **Four-finger gestures**
+> Set every **Swipe** (up, down, left, right) and **Tap** to **Nothing**. On some PCs this lives under **Advanced gestures**.
+
+Use the settings page itself. Editing the registry does not take effect, and the "media" preset makes swipes change your volume.
+
+### 2. Turn off Snap, Snap Assist and the maximize pop-up
+
+Snap would tile windows a second time, and the little layout picker that appears when you hover over a window's **maximize** button is Snap too.
+
+- **Planor does this for you.** While it runs it switches off Snap windows, Snap Assist, the maximize-button layout picker, the snap bar and joint resizing. When you run `planor.exe stop` it puts your original choices back.
+- **To do it yourself,** open **Settings → System → Multitasking** and switch **Snap windows** off. That turns the sub-options off too.
+
+If you ever see the layout picker again, run `planor.exe stop` and `planor.exe start`.
+
+### 3. Give each screen's taskbar only that screen's windows
+
+With several monitors, you want the taskbar on each screen to show only the windows that live on that screen.
+
+> **Settings → Personalization → Taskbar → Taskbar behaviors**
+> - **Show my taskbar on all displays:** *On*
+> - **When using multiple displays, show my taskbar apps on:** **Taskbar where window is open**
+
+Now the strip on each monitor and the taskbar below it tell the same story.
+
+### 4. Stay on one virtual desktop
+
+Planor's strip already does the job virtual desktops usually do, and windows hidden on another desktop are easy to forget about. Windows has no switch to turn virtual desktops off, but you can make them disappear from your day:
+
+- **Hide the Task view button:** **Settings → Personalization → Taskbar → Taskbar items → Task view: Off**.
+- **Close the extra desktops:** open Task view (<kbd>Win</kbd>+<kbd>Tab</kbd>), hover over each extra desktop and click the **×**. Windows moves their windows to the desktop you stay on.
+- **Show everything everywhere:** in **Settings → System → Multitasking → Desktops**, set the taskbar and <kbd>Alt</kbd>+<kbd>Tab</kbd> to show windows from **all desktops**.
+- **Avoid the gestures and shortcuts** that switch desktops (<kbd>Win</kbd>+<kbd>Ctrl</kbd>+<kbd>←</kbd>/<kbd>→</kbd>). Step 1 already removes the touchpad ones.
 
 ---
 
@@ -310,6 +353,8 @@ Fullscreen apps are handled for you: the strip steps aside while they are fullsc
 | **Everything looks odd and I want out** | Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Backspace</kbd>. Every window goes back to where it was |
 | **A window vanished** | `planor.exe pull-orphans` |
 | **A shortcut conflicts with another app** | Change it in `planor.exe config` |
+| **Task view or "Show desktop" pops up when I swipe** | Windows' own gestures are still on. See [Recommended Windows settings](#-recommended-windows-settings-five-minutes-once), step 1 |
+| **The layout picker shows when I hover maximize** | Snap is back on. Turn it off in **Settings → System → Multitasking**, or restart Planor |
 | **Gestures do nothing** | They need a *precision touchpad*. Make sure `three_finger_enabled = true`. The keyboard and mouse still work |
 | **I want to see what's happening** | `planor.exe diag on`, reproduce the problem, then `planor.exe diag export <folder>` |
 | **It feels slow** | `planor.exe perf` prints timings you can share in an issue |
