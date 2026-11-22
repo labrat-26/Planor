@@ -69,6 +69,9 @@ pub(crate) trait WindowBackend {
     /// `Some(Some(cls))` => only unmanaged windows of class `cls`.
     fn holes_class_filter(&self) -> Option<Option<String>>;
     fn frames_log_dir(&self) -> Option<std::path::PathBuf>;
+    fn max_refresh_hz(&self) -> f64 {
+        60.0
+    }
 }
 
 const RECOVERY_PROP: &str = "Planor.Recovery.Identity";
@@ -335,6 +338,10 @@ impl WindowBackend for Win32Backend {
     fn frames_log_dir(&self) -> Option<std::path::PathBuf> {
         folder("LOCALAPPDATA").ok()
     }
+
+    fn max_refresh_hz(&self) -> f64 {
+        win32::max_monitor_refresh_hz()
+    }
 }
 
 #[cfg(test)]
@@ -355,8 +362,9 @@ pub(crate) mod sim {
         pub normal_rect: Rect,
         pub min_w: i32,
         pub min_h: i32,
-        /// When set (> min_w), simulates an application refusing widths narrower than this on `place`.
+        /// When set (> min_w/min_h), simulates an application refusing smaller sizes on `place`.
         pub min_enforced_w: i32,
+        pub min_enforced_h: i32,
         pub visible: bool,
         pub iconic: bool,
         pub zoomed: bool,
@@ -384,6 +392,7 @@ pub(crate) mod sim {
                 min_w: 160,
                 min_h: 120,
                 min_enforced_w: 0,
+                min_enforced_h: 0,
                 visible: true,
                 iconic: false,
                 zoomed: false,
@@ -406,10 +415,12 @@ pub(crate) mod sim {
         pub tiles_len: usize,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
+        pub covered: Vec<isize>,
     }
 
     pub(crate) struct SimDesktop {
         pub monitors: Vec<(String, Rect, Rect)>,
+        pub max_refresh_hz: f64,
         pub current_desktop: Option<u128>,
         pub windows: BTreeMap<isize, SimWindow>,
         pub z_order: Vec<isize>,
@@ -427,6 +438,7 @@ pub(crate) mod sim {
         pub fn new(monitors: Vec<(String, Rect, Rect)>, config: toml::Value) -> Self {
             Self {
                 monitors,
+                max_refresh_hz: 60.0,
                 current_desktop: Some(1),
                 windows: BTreeMap::new(),
                 z_order: Vec::new(),
@@ -508,8 +520,16 @@ pub(crate) mod sim {
             for (id, want) in placements {
                 if let Some(w) = self.windows.get_mut(&id) {
                     let mut actual = want;
+                    let mut constrained = false;
                     if want.x != park && w.min_enforced_w > actual.w {
                         actual.w = w.min_enforced_w;
+                        constrained = true;
+                    }
+                    if want.x != park && w.min_enforced_h > actual.h {
+                        actual.h = w.min_enforced_h;
+                        constrained = true;
+                    }
+                    if constrained {
                         rejected.push((id, actual));
                     }
                     w.rect = actual;
@@ -520,6 +540,12 @@ pub(crate) mod sim {
                 tiles_len: scene.tiles.len(),
                 holes: scene.holes.clone(),
                 zones: scene.zones.clone(),
+                covered: scene
+                    .tiles
+                    .iter()
+                    .filter(|t| t.cover.is_some())
+                    .map(|t| t.id)
+                    .collect(),
             });
             rejected
         }
@@ -887,6 +913,10 @@ pub(crate) mod sim {
 
         fn frames_log_dir(&self) -> Option<std::path::PathBuf> {
             None
+        }
+
+        fn max_refresh_hz(&self) -> f64 {
+            self.0.lock().unwrap().max_refresh_hz
         }
     }
 }

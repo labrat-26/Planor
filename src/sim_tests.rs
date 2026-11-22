@@ -1331,3 +1331,380 @@ fn live_scroll_caches_holes_during_continuous_motion_on_both_orientations() {
         h.stop_clean();
     }
 }
+
+#[test]
+fn newborn_window_gets_cover_while_scan_and_neighbours_do_not_on_both_orientations() {
+    for (mon, cursor, new_rect) in [
+        ("MON0", (400, 400), Rect { x: 200, y: 200, w: 600, h: 400 }),
+        ("MON2", (-700, 800), Rect { x: -1200, y: 500, w: 700, h: 500 }),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        // Existing windows tiled via `scan()` never receive a newborn cover.
+        assert!(h.desktop.0.lock().unwrap().scenes.iter().all(|s| s.covered.is_empty()), "{mon}: scan must not mark covers");
+
+        h.desktop.0.lock().unwrap().cursor = cursor;
+        let id = h.desktop.0.lock().unwrap().add_window(SimWindow::new(0, new_rect));
+        h.engine.event(Event::Window(EVENT_OBJECT_SHOW, id));
+        h.settle();
+
+        let last_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert_eq!(last_scene.covered, vec![id], "{mon}: only newborn {id} covered, not neighbours");
+
+        // Hiding/destroying removes any cover state cleanly.
+        h.desktop.0.lock().unwrap().windows.get_mut(&id).unwrap().visible = false;
+        h.engine.event(Event::Window(EVENT_OBJECT_HIDE, id));
+        h.settle();
+        assert!(!h.engine.covering.contains_key(&id), "{mon}: hide clears cover state");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn cross_monitor_transfer_gets_cover_landscape_and_portrait() {
+    // 1) Landscape MON0 -> Portrait MON2 via drag drop.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        to_start(&mut h, "MON2");
+        to_start(&mut h, "MON0");
+        assert!(h.engine.strips[&(1, "MON2".into())].in_view(301));
+        let r = h.rect(301);
+        mouse_drag(&mut h, 101, (r.x + r.w / 8, r.y + r.h / 8));
+        drop_now(&mut h, 101);
+        assert!(h.engine.strips[&(1, "MON2".into())].locate(101).is_some(), "101 transferred to MON2");
+        let covered = h.desktop.0.lock().unwrap().scenes.last().unwrap().covered.clone();
+        assert!(covered.contains(&101), "landscape->portrait transfer must cover 101: {covered:?}");
+        assert!(!covered.contains(&301), "existing destination neighbour 301 must not be covered");
+        h.stop_clean();
+    }
+    // 2) Portrait MON2 -> Landscape MON0 via drag drop.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        to_start(&mut h, "MON0");
+        to_start(&mut h, "MON2");
+        assert!(h.engine.strips[&(1, "MON0".into())].in_view(101));
+        let r = h.rect(101);
+        mouse_drag(&mut h, 301, (r.x + r.w / 8, r.y + r.h / 8));
+        drop_now(&mut h, 301);
+        assert!(h.engine.strips[&(1, "MON0".into())].locate(301).is_some(), "301 transferred to MON0");
+        let covered = h.desktop.0.lock().unwrap().scenes.last().unwrap().covered.clone();
+        assert!(covered.contains(&301), "portrait->landscape transfer must cover 301: {covered:?}");
+        assert!(!covered.contains(&101), "existing destination neighbour 101 must not be covered");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn placeholder_config_false_disables_cover_on_both_orientations() {
+    for (mon, cursor, new_rect) in [
+        ("MON0", (400, 400), Rect { x: 200, y: 200, w: 600, h: 400 }),
+        ("MON2", (-700, 800), Rect { x: -1200, y: 500, w: 700, h: 500 }),
+    ] {
+        let mut cfg = note_cfg();
+        cfg["animation"]["placeholder"] = toml::Value::Boolean(false);
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+        h.desktop.0.lock().unwrap().cursor = cursor;
+        let id = h.desktop.0.lock().unwrap().add_window(SimWindow::new(0, new_rect));
+        h.engine.event(Event::Window(EVENT_OBJECT_SHOW, id));
+        h.settle();
+        let covered = h.desktop.0.lock().unwrap().scenes.last().unwrap().covered.clone();
+        assert!(covered.is_empty(), "{mon}: placeholder=false disables cover: {covered:?}");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn high_refresh_and_vrr_momentum_steps_smoothly_on_both_orientations() {
+    for hz in [48.0, 60.0, 120.0, 240.0] {
+        for (mon, axis_delta) in [("MON0", (-60.0, 0.0)), ("MON2", (0.0, -60.0))] {
+            let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+            h.desktop.0.lock().unwrap().max_refresh_hz = hz;
+            h.engine.topology();
+            h.settle();
+            assert_eq!(h.engine.max_refresh_hz, hz);
+
+            let key = (1, mon.to_string());
+            to_start(&mut h, mon);
+            let before = h.engine.strips[&key].offset;
+            // Drive an active momentum inertia state and advance fast_tick intervals.
+            let vertical = mon == "MON2";
+            h.engine.inertia = Some((vertical, -1200.0, Instant::now() - Duration::from_millis(8)));
+            assert!(h.engine.wants_fast_tick(), "{mon}@{hz}Hz wants fast tick during inertia");
+            for _ in 0..4 {
+                h.engine.fast_tick();
+                h.settle_quiet();
+                if let Some((v, s, _)) = h.engine.inertia {
+                    h.engine.inertia = Some((v, s, Instant::now() - Duration::from_millis(planor::pacing::fast_tick_ms(hz))));
+                }
+            }
+            let after = h.engine.strips[&key].offset;
+            assert_ne!(after, before, "{mon}@{hz}Hz: momentum fast_tick advanced strip offset (dx/dy {axis_delta:?})");
+            h.engine.inertia = None;
+            h.engine.settle = Some(Instant::now() - Duration::from_millis(1));
+            h.tick_now();
+            h.stop_clean();
+        }
+    }
+}
+
+fn mouse_resize(h: &mut SimHarness, id: isize, new_rect: Rect, cursor: (i32, i32)) {
+    let r = h.rect(id);
+    h.desktop.0.lock().unwrap().cursor = (r.x + r.w / 2, r.y + r.h / 2);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, id));
+    h.settle_quiet();
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&id).unwrap().rect = new_rect;
+        g.cursor = cursor;
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, id));
+    h.settle();
+}
+
+#[test]
+fn sim_disallowed_resizes_snap_back_on_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        to_start(&mut h, mon);
+        let (a, b) = (ids[0], ids[1]);
+        let ra = h.rect(a);
+        let rb = h.rect(b);
+
+        // 1. Cross-axis edge drags (including dragging into taskbar area) snap back completely.
+        if mon == "MON0" {
+            mouse_resize(&mut h, a, Rect { y: 40, h: ra.h - 40, ..ra }, (ra.x + ra.w / 2, 40));
+            assert_eq!(h.rect(a), ra, "{mon}: top-edge cross-axis resize snaps back");
+            mouse_resize(&mut h, a, Rect { h: 1190, ..ra }, (ra.x + ra.w / 2, 1185));
+            assert_eq!(h.rect(a), ra, "{mon}: bottom-edge into taskbar snaps back");
+        } else {
+            mouse_resize(&mut h, a, Rect { x: ra.x + 80, w: ra.w - 80, ..ra }, (ra.x + 80, ra.y + ra.h / 2));
+            assert_eq!(h.rect(a), ra, "{mon}: left-edge cross-axis resize snaps back");
+            mouse_resize(&mut h, a, Rect { w: ra.w - 150, ..ra }, (ra.x + ra.w - 150, ra.y + ra.h / 2));
+            assert_eq!(h.rect(a), ra, "{mon}: right-edge cross-axis resize snaps back");
+        }
+        assert_eq!(h.rect(b), rb, "{mon}: neighbour untouched after cross-axis snap-back");
+
+        // 2. Column 0 leading-edge drag (inward & outward) is ignored and snapped back.
+        let (grow_lead, shrink_lead, lead_cursor) = if mon == "MON0" {
+            (
+                Rect { x: ra.x - 120, w: ra.w + 120, ..ra },
+                Rect { x: ra.x + 120, w: ra.w - 120, ..ra },
+                (ra.x + 120, ra.y + ra.h / 2),
+            )
+        } else {
+            (
+                Rect { y: ra.y - 120, h: ra.h + 120, ..ra },
+                Rect { y: ra.y + 120, h: ra.h - 120, ..ra },
+                (ra.x + ra.w / 2, ra.y + 120),
+            )
+        };
+        mouse_resize(&mut h, a, shrink_lead, lead_cursor);
+        assert_eq!(h.rect(a), ra, "{mon}: col 0 inward leading resize ignored");
+        mouse_resize(&mut h, a, grow_lead, (ra.x + 100, ra.y + 100));
+        assert_eq!(h.rect(a), ra, "{mon}: col 0 outward leading resize ignored");
+
+        // 3. Escape-cancelled resize (rect unchanged) and paused resize leave layout untouched.
+        mouse_resize(&mut h, a, ra, (ra.x + ra.w / 2, ra.y + ra.h / 2));
+        assert_eq!(h.rect(a), ra, "{mon}: unchanged rect is a no-op");
+
+        h.cmd(Command::Pause);
+        let paused_try = if mon == "MON0" { Rect { w: ra.w + 100, ..ra } } else { Rect { h: ra.h + 100, ..ra } };
+        mouse_resize(&mut h, a, paused_try, (ra.x + 200, ra.y + 200));
+        h.cmd(Command::Resume);
+        h.settle();
+        assert_eq!(h.rect(a), ra, "{mon}: resize while paused is ignored");
+        h.stop_clean();
+    }
+
+    // 4. Lone window shrink snaps back to full work area, and sub-min / pair squeeze clamp to min.
+    for (mon, origin, single_w, single_h, pair_b_rect) in [
+        ("MON0", (100, 100), 600, 400, Rect { x: 800, y: 100, w: 600, h: 400 }),
+        ("MON2", (-1300, 200), 900, 500, Rect { x: -1300, y: 1200, w: 900, h: 500 }),
+    ] {
+        // Lone window shrink.
+        let mut solo = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            let mut w = SimWindow::new(501, Rect { x: origin.0, y: origin.1, w: single_w, h: single_h });
+            w.min_w = 400;
+            w.min_h = 400;
+            sim.add_window(w);
+            sim.foreground = 501;
+        });
+        let full = solo.rect(501);
+        let shrunk = if mon == "MON0" {
+            Rect { w: full.w - 400, ..full }
+        } else {
+            Rect { h: full.h - 400, ..full }
+        };
+        mouse_resize(&mut solo, 501, shrunk, (full.x + 300, full.y + 300));
+        assert_eq!(solo.rect(501), full, "{mon}: lone window shrink snaps back to full monitor");
+        solo.stop_clean();
+
+        // Pair sub-minimum shrink + squeezing neighbour below its minimum.
+        let mut pair_h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            for (wid, r) in [(501, Rect { x: origin.0, y: origin.1, w: single_w, h: single_h }), (502, pair_b_rect)] {
+                let mut w = SimWindow::new(wid, r);
+                w.min_w = 400;
+                w.min_h = 400;
+                sim.add_window(w);
+            }
+            sim.foreground = 501;
+        });
+        let r1 = pair_h.rect(501);
+        let tiny = if mon == "MON0" { Rect { w: 50, ..r1 } } else { Rect { h: 50, ..r1 } };
+        mouse_resize(&mut pair_h, 501, tiny, (r1.x + 200, r1.y + 200));
+        let len1 = if mon == "MON0" { pair_h.rect(501).w } else { pair_h.rect(501).h };
+        assert!(len1 >= 400, "{mon}: sub-minimum shrink clamped to >= 400, got {len1}");
+
+        // Squeeze neighbour 501 down to ~90 px by dragging 502's leading edge far toward origin.
+        let r2 = pair_h.rect(502);
+        let squeeze = if mon == "MON0" {
+            let new_x = 100;
+            Rect { x: new_x, w: (r2.x + r2.w) - new_x, ..r2 }
+        } else {
+            let new_y = 100;
+            Rect { y: new_y, h: (r2.y + r2.h) - new_y, ..r2 }
+        };
+        mouse_resize(&mut pair_h, 502, squeeze, (r1.x + 200, r1.y + 200));
+        let len1_after = if mon == "MON0" { pair_h.rect(501).w } else { pair_h.rect(501).h };
+        assert!(len1_after >= 400, "{mon}: squeezed neighbour stayed >= 400 min, got {len1_after}");
+        pair_h.stop_clean();
+    }
+}
+
+#[test]
+fn sim_varied_allowed_and_corner_resizes_on_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        let key = (1, mon.to_string());
+        to_start(&mut h, mon);
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+        // 1. Allowed trailing resize and middle-column leading resize.
+        let ra = h.rect(a);
+        let grow = if mon == "MON0" { Rect { w: ra.w + 120, ..ra } } else { Rect { h: ra.h + 120, ..ra } };
+        mouse_resize(&mut h, a, grow, (ra.x + 300, ra.y + 300));
+        assert_eq!(h.rect(a), grow, "{mon}: trailing-edge grow honoured");
+
+        focus(&mut h, b);
+        let rb = h.rect(b);
+        let lead_shrink = if mon == "MON0" {
+            Rect { x: rb.x + 80, w: rb.w - 80, ..rb }
+        } else {
+            Rect { y: rb.y + 80, h: rb.h - 80, ..rb }
+        };
+        mouse_resize(&mut h, b, lead_shrink, (rb.x + 200, rb.y + 200));
+        let rb_now = h.rect(b);
+        if mon == "MON0" {
+            assert_eq!(rb_now.w, rb.w - 80);
+            assert_eq!(rb_now.x + rb_now.w - rb.x - rb.w, 0, "{mon}: leading resize keeps trailing X edge");
+        } else {
+            assert_eq!(rb_now.h, rb.h - 80);
+            assert_eq!(rb_now.y + rb_now.h - rb.y - rb.h, 0, "{mon}: leading resize keeps trailing Y edge");
+        }
+
+        // 2. Corner drags: col 1 top-left keeps strip change & snaps cross-axis; col 0 top-left snaps all back.
+        let rb2 = h.rect(b);
+        let corner_b = if mon == "MON0" {
+            Rect { x: rb2.x - 60, y: 40, w: rb2.w + 60, h: rb2.h - 40 }
+        } else {
+            Rect { x: rb2.x + 90, y: rb2.y - 60, w: rb2.w - 90, h: rb2.h + 60 }
+        };
+        mouse_resize(&mut h, b, corner_b, (rb2.x + 200, rb2.y + 200));
+        let rb2_after = h.rect(b);
+        if mon == "MON0" {
+            assert_eq!((rb2_after.w, rb2_after.y, rb2_after.h), (rb2.w + 60, rb2.y, rb2.h));
+        } else {
+            assert_eq!((rb2_after.h, rb2_after.x, rb2_after.w), (rb2.h + 60, rb2.x, rb2.w));
+        }
+
+        to_start(&mut h, mon);
+        let ra0 = h.rect(a);
+        let corner_a0 = Rect { x: ra0.x + 50, y: ra0.y + 50, w: ra0.w - 50, h: ra0.h - 50 };
+        mouse_resize(&mut h, a, corner_a0, (ra0.x + 200, ra0.y + 200));
+        assert_eq!(h.rect(a), ra0, "{mon}: col 0 top-left corner disallowed on both axes -> full snap back");
+
+        // 3. Edge drag with cursor crossing onto neighbouring monitor while window stays mostly on home monitor.
+        let (cross_rect, cross_cursor) = if mon == "MON0" {
+            (Rect { w: 1200, ..ra0 }, (2100, 500))
+        } else {
+            (Rect { h: 1400, ..ra0 }, (200, 500))
+        };
+        mouse_resize(&mut h, a, cross_rect, cross_cursor);
+        assert!(h.engine.strips[&key].locate(a).is_some(), "{mon}: must stay on home monitor as a resize, not transfer");
+        if mon == "MON0" {
+            assert_eq!(h.rect(a).w, 1200);
+        } else {
+            assert_eq!(h.rect(a).h, 1400);
+        }
+
+        // 4. Stacked/grouped column resize: cross-axis snaps back; strip-axis resizes all group members together.
+        focus(&mut h, a);
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let active_id = h.engine.strips[&key].active().unwrap();
+        let col_idx = h.engine.strips[&key].locate(active_id).unwrap().0;
+        let sibling_id = h.engine.strips[&key].columns[col_idx].members.iter().copied().find(|&m| m != active_id).unwrap();
+        let r_stack = h.rect(active_id);
+        let cross_stack = if mon == "MON0" { Rect { h: r_stack.h - 90, ..r_stack } } else { Rect { w: r_stack.w - 90, ..r_stack } };
+        mouse_resize(&mut h, active_id, cross_stack, (r_stack.x + 200, r_stack.y + 200));
+        assert_eq!(h.rect(active_id), r_stack, "{mon}: stacked cross-axis resize snaps back");
+
+        let strip_stack = if mon == "MON0" { Rect { w: r_stack.w - 100, ..r_stack } } else { Rect { h: r_stack.h - 100, ..r_stack } };
+        mouse_resize(&mut h, active_id, strip_stack, (r_stack.x + 200, r_stack.y + 200));
+        assert_eq!(
+            h.engine.strips[&key].columns[col_idx].length,
+            if mon == "MON0" { strip_stack.w } else { strip_stack.h },
+            "{mon}: stacked column resizes along strip axis for all members {sibling_id}"
+        );
+
+        // 5. Pinned window free resize persists without snapping back or disturbing the strip.
+        focus(&mut h, c);
+        h.cmd(Command::Key { name: "toggle_pin".into() });
+        h.settle();
+        assert!(h.engine.pinned.contains(&c));
+        let pinned_rect = if mon == "MON0" {
+            Rect { x: 220, y: 220, w: 520, h: 340 }
+        } else {
+            Rect { x: -1200, y: 300, w: 520, h: 340 }
+        };
+        mouse_resize(&mut h, c, pinned_rect, (pinned_rect.x + 100, pinned_rect.y + 100));
+        assert_eq!(h.rect(c), pinned_rect, "{mon}: pinned window keeps free resize on both axes");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn sim_app_rejected_resize_enforces_minimum_on_landscape_and_portrait() {
+    // 1. Landscape MON0: app rejects width < 1100 px after user shrinks column.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            let mut w1 = SimWindow::new(101, Rect { x: 100, y: 100, w: 600, h: 400 });
+            w1.min_enforced_w = 1100;
+            sim.add_window(w1);
+            sim.add_window(SimWindow::new(102, Rect { x: 800, y: 100, w: 600, h: 400 }));
+            sim.foreground = 101;
+        });
+        // Settle initial scan already triggered rejection >= 1100; grow first, then user drags inward to 500.
+        let r = h.rect(101);
+        assert!(r.w >= 1100);
+        mouse_resize(&mut h, 101, Rect { w: 500, ..r }, (500, 400));
+        assert!(h.rect(101).w >= 1100, "landscape app rejection restores >= 1100 px width: {:?}", h.rect(101));
+        h.stop_clean();
+    }
+    // 2. Portrait MON2: app rejects height < 1300 px after user shrinks column.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            let mut w1 = SimWindow::new(301, Rect { x: -1300, y: 100, w: 900, h: 500 });
+            w1.min_enforced_h = 1300;
+            sim.add_window(w1);
+            sim.add_window(SimWindow::new(302, Rect { x: -1300, y: 900, w: 900, h: 500 }));
+            sim.foreground = 301;
+        });
+        let r = h.rect(301);
+        assert!(r.h >= 1300);
+        mouse_resize(&mut h, 301, Rect { h: 500, ..r }, (-700, 500));
+        assert!(h.rect(301).h >= 1300, "portrait app rejection restores >= 1300 px height: {:?}", h.rect(301));
+        h.stop_clean();
+    }
+}

@@ -259,20 +259,23 @@ impl Strip {
             } else {
                 i - 1
             };
-            let other = self.columns[j].length - (new - old);
-            let floor = self.columns[j].minimum;
+            let delta = new as i64 - old as i64;
+            let other = self.columns[j].length as i64 - delta;
+            let floor = self.columns[j].minimum as i64;
             if other < floor {
-                new -= floor - other;
-                self.columns[j].length = floor;
+                new = (new as i64 - (floor - other))
+                    .clamp(self.columns[i].minimum as i64, i32::MAX as i64)
+                    as i32;
+                self.columns[j].length = floor as i32;
             } else {
-                self.columns[j].length = other;
+                self.columns[j].length = other as i32;
             }
         }
         self.columns[i].length = new;
         if leading && !fits {
             // The strip flows from the left, so a longer column would push its RIGHT edge out. Dragging the
             // leading edge must move only that edge: scroll by the change so the trailing edge stays put.
-            self.offset = self.offset.saturating_add(new - old);
+            self.offset = self.offset.saturating_add(new.saturating_sub(old));
         }
         self.scroll(0);
     }
@@ -1036,4 +1039,210 @@ pub fn check_settled_parked(
         }
     }
     out
+}
+
+pub mod cover {
+    /// Timing parameters for covering newly created or cross-monitor windows behind the overlay
+    /// while they resize at their destination slot on-screen.
+    #[derive(Clone, Copy, Debug)]
+    pub struct CoverConfig {
+        pub min_hold_ms: u64,
+        pub settle_ms: u64,
+        pub spinner_delay_ms: u64,
+        pub spinner_fade_ms: u64,
+        pub max_ms: u64,
+        pub rev_per_sec: f64,
+    }
+
+    impl Default for CoverConfig {
+        fn default() -> Self {
+            Self {
+                min_hold_ms: 40,
+                settle_ms: 48,
+                spinner_delay_ms: 120,
+                spinner_fade_ms: 100,
+                max_ms: 320,
+                rev_per_sec: 1.25,
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct CoverVisual {
+        pub active: bool,
+        pub timed_out: bool,
+        pub spinner_alpha: f32,
+        pub spinner_angle_rad: f32,
+    }
+
+    pub fn eval_cover(
+        cfg: CoverConfig,
+        elapsed_ms: u64,
+        landed_for_ms: Option<u64>,
+        source_size_matches: bool,
+    ) -> CoverVisual {
+        if elapsed_ms >= cfg.max_ms {
+            return CoverVisual {
+                active: false,
+                timed_out: true,
+                spinner_alpha: 0.0,
+                spinner_angle_rad: 0.0,
+            };
+        }
+        if elapsed_ms >= cfg.min_hold_ms
+            && landed_for_ms.is_some_and(|l| source_size_matches || l >= cfg.settle_ms)
+        {
+            return CoverVisual {
+                active: false,
+                timed_out: false,
+                spinner_alpha: 0.0,
+                spinner_angle_rad: 0.0,
+            };
+        }
+        let spinner_alpha = if elapsed_ms < cfg.spinner_delay_ms {
+            0.0
+        } else {
+            ((elapsed_ms - cfg.spinner_delay_ms) as f32 / cfg.spinner_fade_ms.max(1) as f32)
+                .clamp(0.0, 1.0)
+        };
+        let spinner_angle_rad =
+            ((elapsed_ms as f64 / 1000.0) * std::f64::consts::TAU * cfg.rev_per_sec) as f32;
+        CoverVisual {
+            active: true,
+            timed_out: false,
+            spinner_alpha,
+            spinner_angle_rad,
+        }
+    }
+}
+
+pub mod pacing {
+    pub const MIN_REFRESH_HZ: f64 = 10.0;
+    pub const MAX_REFRESH_HZ: f64 = 1000.0;
+    pub const DEFAULT_REFRESH_HZ: f64 = 60.0;
+
+    pub fn clamp_hz(hz: f64) -> Option<f64> {
+        (hz.is_finite() && (MIN_REFRESH_HZ..=MAX_REFRESH_HZ).contains(&hz)).then_some(hz)
+    }
+
+    pub fn period_us(hz: f64) -> f64 {
+        1_000_000.0 / hz.clamp(MIN_REFRESH_HZ, MAX_REFRESH_HZ)
+    }
+
+    pub fn effective_refresh_us(dwm_refresh_us: Option<f64>, monitor_hz: Option<f64>) -> f64 {
+        if let Some(u) = dwm_refresh_us
+            && u.is_finite()
+            && (1_000.0..=100_000.0).contains(&u)
+        {
+            return u;
+        }
+        if let Some(h) = monitor_hz.and_then(clamp_hz) {
+            return period_us(h);
+        }
+        1_000_000.0 / DEFAULT_REFRESH_HZ
+    }
+
+    pub fn fast_tick_ms(max_hz: f64) -> u64 {
+        let hz = clamp_hz(max_hz).unwrap_or(DEFAULT_REFRESH_HZ).max(120.0);
+        ((650.0 / hz).round() as u64).clamp(3, 6)
+    }
+
+    pub fn pad_move_min_interval_us(max_hz: f64) -> u64 {
+        let hz = clamp_hz(max_hz).unwrap_or(DEFAULT_REFRESH_HZ).max(120.0);
+        (period_us(hz) * 0.5).round().clamp(2_000.0, 4_000.0) as u64
+    }
+
+    pub fn settled_capture_delay_100ns(refresh_us: f64) -> i64 {
+        ((refresh_us * 2.0).clamp(33_000.0, 120_000.0) * 10.0).round() as i64
+    }
+
+    pub fn live_gap_cutoff_ms(refresh_us: f64) -> u64 {
+        ((refresh_us * 3.5) / 1000.0).ceil().clamp(120.0, 400.0) as u64
+    }
+
+    pub fn frame_budget_ms(refresh_us: f64) -> f64 {
+        ((refresh_us / 1000.0).clamp(4.0, 16.0) * 10.0).round() / 10.0
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct FrameSample {
+        pub interval_us: u64,
+        pub refresh_us: f64,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum FrameVerdict {
+        Ok,
+        Late,
+        Dropped,
+    }
+
+    pub fn classify_frame(sample: FrameSample) -> FrameVerdict {
+        let r = sample.refresh_us.clamp(1_000.0, 100_000.0);
+        if sample.interval_us as f64 > r * 2.5 {
+            FrameVerdict::Dropped
+        } else if sample.interval_us as f64 > r * 1.5 {
+            FrameVerdict::Late
+        } else {
+            FrameVerdict::Ok
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Default, PartialEq)]
+    pub struct FrameSummary {
+        pub frames: u64,
+        pub late: u64,
+        pub dropped: u64,
+        pub p50_ms: f64,
+        pub p95_ms: f64,
+        pub worst_ms: f64,
+        pub refresh_ms: f64,
+        pub min_refresh_ms: f64,
+        pub max_refresh_ms: f64,
+        pub effective_hz: f64,
+    }
+
+    pub fn summarize_frames(samples: &[FrameSample]) -> FrameSummary {
+        if samples.is_empty() {
+            return FrameSummary::default();
+        }
+        let mut intervals = Vec::with_capacity(samples.len());
+        let mut refreshes = Vec::with_capacity(samples.len());
+        let mut late = 0u64;
+        let mut dropped = 0u64;
+        for &s in samples {
+            intervals.push(s.interval_us);
+            let r = s.refresh_us.clamp(1_000.0, 100_000.0);
+            refreshes.push(r);
+            match classify_frame(s) {
+                FrameVerdict::Ok => {}
+                FrameVerdict::Late => late += 1,
+                FrameVerdict::Dropped => {
+                    late += 1;
+                    dropped += 1;
+                }
+            }
+        }
+        intervals.sort_unstable();
+        refreshes.sort_by(f64::total_cmp);
+        let pick_u64 = |v: &[u64], q: f64| v[((v.len() - 1) as f64 * q) as usize];
+        let p50_us = pick_u64(&intervals, 0.5);
+        let p95_us = pick_u64(&intervals, 0.95);
+        let worst_us = *intervals.last().unwrap();
+        let med_refresh = refreshes[(refreshes.len() - 1) / 2];
+        let min_refresh = *refreshes.first().unwrap();
+        let max_refresh = *refreshes.last().unwrap();
+        FrameSummary {
+            frames: samples.len() as u64,
+            late,
+            dropped,
+            p50_ms: p50_us as f64 / 1000.0,
+            p95_ms: p95_us as f64 / 1000.0,
+            worst_ms: worst_us as f64 / 1000.0,
+            refresh_ms: med_refresh / 1000.0,
+            min_refresh_ms: min_refresh / 1000.0,
+            max_refresh_ms: max_refresh / 1000.0,
+            effective_hz: if p50_us > 0 { 1e6 / p50_us as f64 } else { 0.0 },
+        }
+    }
 }

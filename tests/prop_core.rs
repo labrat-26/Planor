@@ -286,3 +286,79 @@ fn randomised_layout_catches_broken_rule_within_1000_sequences() {
         shrunk
     );
 }
+
+#[test]
+fn adversarial_and_disallowed_resizes_preserve_all_invariants() {
+    let base_seed: u64 = 0x5245_5349_5A45_0001;
+    for seq_idx in 0..150u64 {
+        let mut rng = Rng(base_seed.wrapping_add(seq_idx.wrapping_mul(0x9E37_79B9_7F4A_7C15)) | 1);
+        let area = MONITOR_GEOMS[rng.usize(MONITOR_GEOMS.len())];
+        let mut s = Strip::new(area);
+        let mut next_id: WindowId = 1;
+        for step in 0..40usize {
+            let pick = rng.next() % 100;
+            if s.columns.is_empty() || pick < 22 {
+                let min = rng.range(80, (s.area.length() / 3).max(81));
+                s.insert(next_id, min);
+                next_id += 1;
+                s.reveal(54);
+            } else if pick < 72 {
+                let len = s.area.length();
+                let col_idx = if rng.next() % 8 == 0 {
+                    s.columns.len() + 3 // OOB index
+                } else {
+                    rng.usize(s.columns.len())
+                };
+                let min_here = s.columns.get(col_idx).map(|c| c.minimum()).unwrap_or(100);
+                let fits = s.columns.len() > 1
+                    && s.columns.iter().map(|c| c.length + s.gap).sum::<i32>() - s.gap == len;
+                let choices = [
+                    0,
+                    -1,
+                    -500,
+                    i32::MIN,
+                    1,
+                    min_here - 100,
+                    len + 600,
+                    len * 2,
+                    if fits && s.columns.len() == 2 { i32::MAX } else { len / 2 },
+                ];
+                let bad_len = choices[rng.usize(choices.len())];
+                let leading = col_idx == 0 && (rng.next() % 2 == 0) || (rng.next() % 2 == 0);
+                s.resize(col_idx, bad_len, leading);
+                s.reveal(54);
+            } else if pick < 80 {
+                let ids = collect_ids(&s);
+                if !ids.is_empty() {
+                    s.remove(ids[rng.usize(ids.len())]);
+                    s.fill();
+                    s.reveal(54);
+                }
+            } else if pick < 88 {
+                let ids = collect_ids(&s);
+                if ids.len() >= 2 {
+                    let a = ids[rng.usize(ids.len())];
+                    let b = ids[rng.usize(ids.len())];
+                    if a != b {
+                        s.group(a, b);
+                        s.reveal(54);
+                    }
+                }
+            } else if pick < 94 {
+                s.scroll(rng.range(-900, 900));
+                s.focus_nearest_center();
+            } else {
+                let idx = rng.usize(MONITOR_GEOMS.len());
+                s.set_area(MONITOR_GEOMS[idx]);
+                s.reveal(54);
+            }
+            s.fill_gaps();
+            let vs = check_strip_invariants(&s, 28);
+            assert!(
+                vs.is_empty(),
+                "adversarial resize seq {seq_idx} step {step} failed: {:?}",
+                vs.iter().map(|v| v.trace_line()).collect::<Vec<_>>()
+            );
+        }
+    }
+}

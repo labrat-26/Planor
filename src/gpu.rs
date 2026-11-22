@@ -226,8 +226,21 @@ impl Sampler {
         if unsafe { DwmGetCompositionTimingInfo(std::ptr::null_mut(), &mut t) } < 0 {
             return;
         }
-        if t.rateRefresh.uiDenominator != 0 {
-            s.dwm_refresh_hz = Some(t.rateRefresh.uiNumerator as f64 / t.rateRefresh.uiDenominator as f64);
+        let mut hz_from_qpc = None;
+        if t.qpcRefreshPeriod > 0 {
+            let freq = perf::qpc_frequency().max(1) as f64;
+            let us = (t.qpcRefreshPeriod as f64 * 1_000_000.0) / freq;
+            if us > 0.0 {
+                hz_from_qpc = planor::pacing::clamp_hz(1_000_000.0 / us);
+            }
+        }
+        if let Some(hz) = hz_from_qpc {
+            s.dwm_refresh_hz = Some(hz);
+        } else if t.rateRefresh.uiDenominator != 0 {
+            let hz = t.rateRefresh.uiNumerator as f64 / t.rateRefresh.uiDenominator as f64;
+            if let Some(hz) = planor::pacing::clamp_hz(hz) {
+                s.dwm_refresh_hz = Some(hz);
+            }
         }
         let now = perf::qpc_us();
         if let Some((at, frame, late, dropped, missed)) = self.last_dwm {
@@ -292,7 +305,7 @@ mod tests {
         let second = s.sample();
         // On a desktop session DWM always reports its refresh rate; values must be sane when present.
         if let Some(hz) = second.dwm_refresh_hz.or(first.dwm_refresh_hz) {
-            assert!((20. ..=500.).contains(&hz), "refresh rate {hz}");
+            assert!((10. ..=1000.).contains(&hz), "refresh rate {hz}");
         }
         if let Some(fps) = second.dwm_compose_fps {
             assert!((0. ..=1000.).contains(&fps), "compose fps {fps}");

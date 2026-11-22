@@ -1106,3 +1106,273 @@ fn five_fingers_veto_and_cancel_what_the_first_fingers_started() {
     g.sample(&[(0., 0.); 3], 12., 100.);
     assert_eq!(g.sample(&[(5., 0.); 3], 12., 100.), Swipe::Scroll(5.));
 }
+
+#[test]
+fn cover_fast_window_reveals_without_spinner() {
+    let cfg = cover::CoverConfig::default();
+    let v0 = cover::eval_cover(cfg, 10, Some(10), false);
+    assert!(v0.active && !v0.timed_out && v0.spinner_alpha == 0.0);
+
+    // Before min_hold_ms, stays covered cleanly without showing a spinner.
+    let v1 = cover::eval_cover(cfg, 35, Some(35), true);
+    assert!(v1.active && !v1.timed_out && v1.spinner_alpha == 0.0);
+
+    // Past min_hold_ms + settle_ms, reveals cleanly before spinner_delay_ms ever hits.
+    let v2 = cover::eval_cover(cfg, 60, Some(cfg.settle_ms), false);
+    assert!(!v2.active && !v2.timed_out && v2.spinner_alpha == 0.0);
+}
+
+#[test]
+fn cover_source_size_match_reveals_immediately_after_min_hold() {
+    let cfg = cover::CoverConfig::default();
+    // Window landed 4 ms ago, but WGC bitmap size already matches destination -> no need to wait 48 ms.
+    let v = cover::eval_cover(cfg, cfg.min_hold_ms, Some(4), true);
+    assert!(!v.active && !v.timed_out);
+    // If not landed yet at OS frame level, keep cover even if WGC matched stale size.
+    let waiting = cover::eval_cover(cfg, cfg.min_hold_ms, None, true);
+    assert!(waiting.active);
+}
+
+#[test]
+fn cover_slow_window_fades_spinner_and_rotates_rate_independently() {
+    let cfg = cover::CoverConfig::default();
+    let v_start = cover::eval_cover(cfg, cfg.spinner_delay_ms, None, false);
+    assert!(v_start.active && v_start.spinner_alpha == 0.0);
+
+    let v_mid = cover::eval_cover(cfg, cfg.spinner_delay_ms + cfg.spinner_fade_ms / 2, None, false);
+    assert!(v_mid.active && v_mid.spinner_alpha > 0.45 && v_mid.spinner_alpha < 0.55);
+
+    let v_full = cover::eval_cover(cfg, cfg.spinner_delay_ms + cfg.spinner_fade_ms + 20, None, false);
+    assert!(v_full.active && (v_full.spinner_alpha - 1.0).abs() < 1e-6);
+
+    // Spinner angle is pure elapsed wall time, so 24/48/60/120/240 Hz VRR steps advance at the exact same speed.
+    let at_ms = 240u64;
+    let a = cover::eval_cover(cfg, at_ms, None, false).spinner_angle_rad;
+    let want = ((at_ms as f64 / 1000.0) * std::f64::consts::TAU * cfg.rev_per_sec) as f32;
+    assert!((a - want).abs() < 1e-5);
+}
+
+#[test]
+fn cover_hard_cap_always_reveals() {
+    let cfg = cover::CoverConfig::default();
+    let v = cover::eval_cover(cfg, cfg.max_ms, None, false);
+    assert!(!v.active && v.timed_out && v.spinner_alpha == 0.0);
+}
+
+#[test]
+fn pacing_supports_low_hz_vrr_through_240hz() {
+    assert_eq!(pacing::clamp_hz(5.0), None);
+    assert_eq!(pacing::clamp_hz(10.0), Some(10.0));
+    assert_eq!(pacing::clamp_hz(24.0), Some(24.0));
+    assert_eq!(pacing::clamp_hz(48.0), Some(48.0));
+    assert_eq!(pacing::clamp_hz(120.0), Some(120.0));
+    assert_eq!(pacing::clamp_hz(240.0), Some(240.0));
+    assert_eq!(pacing::clamp_hz(1001.0), None);
+
+    assert_eq!(pacing::fast_tick_ms(60.0), 5);
+    assert_eq!(pacing::fast_tick_ms(120.0), 5);
+    assert!(pacing::fast_tick_ms(144.0) <= 5);
+    assert!(pacing::fast_tick_ms(240.0) <= 3);
+
+    assert!(pacing::pad_move_min_interval_us(120.0) <= 4_000);
+    assert!(pacing::pad_move_min_interval_us(240.0) <= 2_200);
+
+    // Low-Hz VRR keeps enough live gap leeway and settle window instead of cutting off prematurely.
+    assert!(pacing::live_gap_cutoff_ms(pacing::period_us(24.0)) > 120);
+    assert!(pacing::settled_capture_delay_100ns(pacing::period_us(24.0)) > 330_000);
+    assert_eq!(pacing::frame_budget_ms(pacing::period_us(48.0)), 16.0);
+    assert_eq!(pacing::frame_budget_ms(pacing::period_us(60.0)), 16.0);
+    assert_eq!(pacing::frame_budget_ms(pacing::period_us(120.0)), 8.3);
+    assert_eq!(pacing::frame_budget_ms(pacing::period_us(240.0)), 4.2);
+}
+
+#[test]
+fn pacing_drr_and_vrr_frame_classification_uses_per_frame_refresh() {
+    use pacing::{FrameSample, FrameVerdict};
+    // Simulate a DRR / VRR sweep: 120 Hz -> 48 Hz LFC/VRR -> 60 Hz -> 240 Hz without false late flags.
+    let mut samples = Vec::new();
+    for &hz in &[120.0, 120.0, 72.0, 48.0, 24.0, 60.0, 120.0, 240.0] {
+        let r = pacing::period_us(hz);
+        let interval = (r * 1.05).round() as u64;
+        let s = FrameSample { interval_us: interval, refresh_us: r };
+        assert_eq!(pacing::classify_frame(s), FrameVerdict::Ok, "healthy frame at {hz} Hz");
+        samples.push(s);
+    }
+    let clean = pacing::summarize_frames(&samples);
+    assert_eq!(clean.frames, 8);
+    assert_eq!(clean.late, 0);
+    assert_eq!(clean.dropped, 0);
+    assert!(clean.min_refresh_ms < clean.max_refresh_ms);
+
+    // Real hitch at 120 Hz (15 ms gap when refresh is 8.33 ms) is flagged Late, while 19 ms at 48 Hz is Ok!
+    assert_eq!(
+        pacing::classify_frame(FrameSample { interval_us: 15_000, refresh_us: pacing::period_us(120.0) }),
+        FrameVerdict::Late
+    );
+    assert_eq!(
+        pacing::classify_frame(FrameSample { interval_us: 23_000, refresh_us: pacing::period_us(120.0) }),
+        FrameVerdict::Dropped
+    );
+    assert_eq!(
+        pacing::classify_frame(FrameSample { interval_us: 19_000, refresh_us: pacing::period_us(48.0) }),
+        FrameVerdict::Ok
+    );
+}
+
+#[test]
+fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
+    for area in [LANDSCAPE, PORTRAIT] {
+        let span = area.length();
+
+        // 1. Empty strip and out-of-bounds indices are safe no-ops.
+        let mut empty = Strip::new(area);
+        empty.resize(0, 500, false);
+        empty.resize(0, 500, true);
+        assert!(empty.columns.is_empty(), "{area:?}: empty resize stays empty");
+
+        let mut s = Strip::new(area);
+        s.insert(1, 200);
+        let orig_len = s.columns[0].length;
+        s.resize(1, 300, false);
+        s.resize(usize::MAX, 300, true);
+        assert_eq!(s.columns[0].length, orig_len, "{area:?}: OOB index ignored");
+
+        // 2. Column 0 leading-edge resize is always ignored (both pair and 3-column non-fitting strip).
+        s.insert(2, 200);
+        let pair_lens: Vec<i32> = s.columns.iter().map(|c| c.length).collect();
+        s.resize(0, pair_lens[0] + 200, true);
+        s.resize(0, pair_lens[0] - 120, true);
+        assert_eq!(
+            s.columns.iter().map(|c| c.length).collect::<Vec<_>>(),
+            pair_lens,
+            "{area:?}: pair col 0 leading-edge resize ignored"
+        );
+
+        s.insert(3, 200);
+        s.scroll(200);
+        let three_lens: Vec<i32> = s.columns.iter().map(|c| c.length).collect();
+        let off_before = s.offset;
+        s.resize(0, three_lens[0] + 250, true);
+        s.resize(0, three_lens[0] - 150, true);
+        assert_eq!(
+            s.columns.iter().map(|c| c.length).collect::<Vec<_>>(),
+            three_lens,
+            "{area:?}: 3-col col 0 leading-edge resize ignored"
+        );
+        assert_eq!(s.offset, off_before, "{area:?}: ignored col 0 leading resize preserves offset");
+
+        // 3. Zero, negative, i32::MIN, and sub-minimum lengths clamp to >= minimum with zero violations.
+        for bad in [0, -1, -500, i32::MIN, 50] {
+            let mut single = Strip::new(area);
+            single.insert(1, 250);
+            single.resize(0, bad, false);
+            assert!(single.columns[0].length >= 250, "{area:?}: single col length {} < min on {bad}", single.columns[0].length);
+            single.fill_gaps();
+            assert_eq!(single.columns[0].length, span, "{area:?}: lone column snap-back on {bad}");
+            assert!(check_strip_invariants(&single, 28).is_empty());
+
+            let mut three = Strip::new(area);
+            three.insert(1, 300);
+            three.insert(2, 300);
+            three.insert(3, 300);
+            three.resize(1, bad, false);
+            three.resize(2, bad, true);
+            assert!(three.columns[1].length >= 300, "{area:?}: col 1 clamped on {bad}");
+            assert!(three.columns[2].length >= 300, "{area:?}: col 2 clamped on {bad}");
+            three.fill_gaps();
+            assert!(check_strip_invariants(&three, 28).is_empty(), "{area:?}: invariants after bad len {bad}");
+        }
+
+        // 4. Pair squeeze below neighbour minimum and adversarial i32::MAX do not overflow or crush neighbour.
+        for (idx, leading) in [(0, false), (1, true), (1, false)] {
+            let mut p = Strip::new(area);
+            p.insert(1, 450);
+            p.insert(2, 450);
+            p.resize(idx, i32::MAX, leading);
+            assert!(p.columns[0].length >= 450 && p.columns[1].length >= 450, "{area:?}: neighbour crushed ({idx}, {leading}): {:?}", p.columns);
+            assert_eq!(p.columns[0].length + p.columns[1].length + p.gap, span, "{area:?}: pair sum must still fill monitor");
+            assert!(check_strip_invariants(&p, 28).is_empty());
+        }
+
+        // 5. Shrinking a lone column is healed by fill_gaps; over-viewport length keeps all invariants.
+        let mut over = Strip::new(area);
+        over.insert(1, 200);
+        over.resize(0, span + 500, false);
+        over.fill_gaps();
+        assert!(check_strip_invariants(&over, 28).is_empty());
+        over.insert(2, 200);
+        over.insert(3, 200);
+        over.resize(1, span + 500, false);
+        over.fill_gaps();
+        assert!(check_strip_invariants(&over, 28).is_empty());
+
+        // 6. Resizing while fullscreen is active leaves clean invariants upon exiting fullscreen.
+        let mut fs = Strip::new(area);
+        fs.insert(1, 200);
+        fs.insert(2, 200);
+        fs.fullscreen(true, area);
+        fs.resize(0, 500, false);
+        fs.resize(1, 700, true);
+        fs.fullscreen(false, area);
+        fs.fill_gaps();
+        assert!(check_strip_invariants(&fs, 28).is_empty(), "{area:?}: invariants after resize in fullscreen");
+    }
+}
+
+#[test]
+fn resize_varied_valid_operations_on_landscape_and_portrait() {
+    for area in [LANDSCAPE, PORTRAIT] {
+        let span = area.length();
+        let rect_of_id = |s: &Strip, id| s.rects(28).into_iter().find(|r| r.0 == id).unwrap().1;
+        let axis_start = |r: Rect| if area.horizontal() { r.x } else { r.y };
+        let axis_len = |r: Rect| if area.horizontal() { r.w } else { r.h };
+
+        // Multi-column strip: trailing-edge grow/shrink and leading-edge anchor preservation.
+        let mut s = Strip::new(area);
+        s.insert(1, 180);
+        s.insert(2, 180);
+        s.insert(3, 180);
+        s.select(2);
+        s.reveal(0);
+
+        let r2_before = rect_of_id(&s, 2);
+        let trailing_before = axis_start(r2_before) + axis_len(r2_before);
+        s.resize(1, s.columns[1].length + 90, true);
+        let r2_after = rect_of_id(&s, 2);
+        assert_eq!(axis_len(r2_after), axis_len(r2_before) + 90, "{area:?}: col 1 grew from leading edge");
+        assert_eq!(axis_start(r2_after) + axis_len(r2_after), trailing_before, "{area:?}: col 1 trailing edge anchored");
+
+        let r3_before = rect_of_id(&s, 3);
+        let r3_trailing = axis_start(r3_before) + axis_len(r3_before);
+        s.resize(2, s.columns[2].length - 60, true);
+        let r3_after = rect_of_id(&s, 3);
+        assert_eq!(axis_len(r3_after), axis_len(r3_before) - 60, "{area:?}: col 2 shrank from leading edge");
+        assert_eq!(axis_start(r3_after) + axis_len(r3_after), r3_trailing, "{area:?}: col 2 trailing edge anchored");
+
+        s.resize(0, s.columns[0].length + 75, false);
+        s.fill_gaps();
+        assert!(check_strip_invariants(&s, 28).is_empty());
+
+        // Grouped column resize moves all members' lengths together.
+        s.group(2, 1);
+        let grp_col = s.locate(1).unwrap().0;
+        let target_len = (span / 3).max(250);
+        s.resize(grp_col, target_len, false);
+        s.fill_gaps();
+        assert_eq!(axis_len(rect_of_id(&s, 1)), target_len);
+        assert_eq!(axis_len(rect_of_id(&s, 2)), target_len);
+        assert!(check_strip_invariants(&s, 28).is_empty());
+
+        // Work-area shrink below sum of minimums, expand, and orientation flip.
+        let mut tight = Strip::new(area);
+        tight.insert(10, 400);
+        tight.insert(11, 400);
+        tight.set_area(Rect { x: 0, y: 0, w: 600, h: 400 });
+        assert!(tight.columns.iter().all(|c| c.length >= 400), "set_area clamps to minimum when area shrinks below mins");
+        assert!(check_strip_invariants(&tight, 28).is_empty());
+        let other = if area.horizontal() { PORTRAIT } else { LANDSCAPE };
+        tight.set_area(other);
+        tight.fill_gaps();
+        assert!(check_strip_invariants(&tight, 28).is_empty());
+    }
+}

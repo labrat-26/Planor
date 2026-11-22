@@ -801,3 +801,79 @@ pub fn place(items: &[(isize, Rect)]) -> Result<()> {
         Ok(())
     }
 }
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
+/// RAII guard for 1 ms Windows scheduler timer resolution during active high-refresh motion.
+pub struct HighResTimer(bool);
+
+impl HighResTimer {
+    pub fn acquire() -> Self {
+        Self(unsafe { timeBeginPeriod(1) == 0 })
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                timeEndPeriod(1);
+            }
+        }
+    }
+}
+
+pub fn max_monitor_refresh_hz() -> f64 {
+    unsafe extern "system" fn cb(m: HMONITOR, _: HDC, _: *mut RECT, l: isize) -> i32 {
+        unsafe {
+            let best = &mut *(l as *mut f64);
+            let mut info = MONITORINFOEXW::default();
+            info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(m, &mut info.monitorInfo) != 0 {
+                let mut mode = DEVMODEW::default();
+                mode.dmSize = size_of::<DEVMODEW>() as u16;
+                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
+                    && let Some(hz) = planor::pacing::clamp_hz(mode.dmDisplayFrequency as f64)
+                {
+                    *best = (*best).max(hz);
+                }
+            }
+            1
+        }
+    }
+    let mut best = 0.0f64;
+    unsafe { EnumDisplayMonitors(null_mut(), null(), Some(cb), &mut best as *mut f64 as isize) };
+    if best > 0.0 {
+        best
+    } else {
+        planor::pacing::DEFAULT_REFRESH_HZ
+    }
+}
+
+pub fn dwm_refresh_period_us() -> Option<f64> {
+    unsafe {
+        let mut t = DWM_TIMING_INFO::default();
+        t.cbSize = size_of::<DWM_TIMING_INFO>() as u32;
+        if DwmGetCompositionTimingInfo(null_mut(), &mut t) < 0 {
+            return None;
+        }
+        if t.qpcRefreshPeriod > 0 {
+            let freq = crate::perf::qpc_frequency().max(1) as f64;
+            let us = (t.qpcRefreshPeriod as f64 * 1_000_000.0) / freq;
+            if us > 0.0 && planor::pacing::clamp_hz(1_000_000.0 / us).is_some() {
+                return Some(us);
+            }
+        }
+        if t.rateRefresh.uiDenominator != 0 {
+            let hz = t.rateRefresh.uiNumerator as f64 / t.rateRefresh.uiDenominator as f64;
+            if let Some(hz) = planor::pacing::clamp_hz(hz) {
+                return Some(planor::pacing::period_us(hz));
+            }
+        }
+        None
+    }
+}

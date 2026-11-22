@@ -35,6 +35,7 @@ pub struct Tile {
     pub monitor: String,
     pub color: Option<u32>,
     pub cookie: usize,
+    pub cover: Option<Instant>,
 }
 pub struct Scene {
     pub epoch: u64,
@@ -222,6 +223,43 @@ unsafe impl Send for SendDevice {}
 /// A capture source made on the worker (its frame pool is free-threaded, its session agile); handed over once.
 struct SendSource(Source);
 unsafe impl Send for SendSource {}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CardDraw {
+    rect: Rect,
+    spinner_alpha: f32,
+    spinner_angle_rad: f32,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct DrawSig {
+    fills: Vec<(Rect, u32, u32)>,
+    cards: Vec<(Rect, u32, u32)>,
+    lines: Vec<(Rect, u32)>,
+    width_bits: u32,
+    radius_bits: u32,
+    dpi_bits: u32,
+}
+impl DrawSig {
+    fn new(
+        fills: &[(Rect, u32, f32)],
+        cards: &[CardDraw],
+        lines: &[(Rect, u32)],
+        width: f32,
+        radius: f32,
+        dpi: f32,
+    ) -> Self {
+        Self {
+            fills: fills.iter().map(|&(r, c, a)| (r, c, a.to_bits())).collect(),
+            cards: cards
+                .iter()
+                .map(|c| (c.rect, c.spinner_alpha.to_bits(), c.spinner_angle_rad.to_bits()))
+                .collect(),
+            lines: lines.to_vec(),
+            width_bits: width.to_bits(),
+            radius_bits: radius.to_bits(),
+            dpi_bits: dpi.to_bits(),
+        }
+    }
+}
 struct Surface {
     gpu: ID3D11Device,
     dev: IDCompositionDevice,
@@ -232,6 +270,29 @@ struct Surface {
     timer: crate::gpu::GpuTimer,
 }
 impl Surface {
+    unsafe fn brush_for<'a>(
+        brushes: &'a mut HashMap<u32, ID2D1SolidColorBrush>,
+        rt: &ID2D1RenderTarget,
+        c: u32,
+    ) -> Result<&'a ID2D1SolidColorBrush> {
+        Ok(match brushes.entry(c) {
+            std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let created = unsafe {
+                    rt.CreateSolidColorBrush(
+                        &D2D1_COLOR_F {
+                            r: ((c >> 16) & 255) as f32 / 255.,
+                            g: ((c >> 8) & 255) as f32 / 255.,
+                            b: (c & 255) as f32 / 255.,
+                            a: 1.,
+                        },
+                        None,
+                    )?
+                };
+                e.insert(created)
+            }
+        })
+    }
     fn new(h: HWND, b: Rect) -> Result<Self> {
         unsafe {
             let (gpu, dev, d2d) = shared_devices()?;
@@ -262,9 +323,11 @@ impl Surface {
         &mut self,
         pictures: &[(Rect, ID2D1Bitmap1)],
         fills: &[(Rect, u32, f32)],
+        cards: &[CardDraw],
         lines: &[(Rect, u32)],
         width: f32,
         radius: f32,
+        dpi: f32,
     ) -> Result<()> {
         unsafe {
             let mut off = F::POINT::default();
@@ -304,37 +367,92 @@ impl Surface {
                         None,
                     )
                 }
-                let strokes = fills.iter().map(|&(r, c, a)| (r, c, a, true)).chain(lines.iter().map(|&(r, c)| (r, c, 1., false)));
-                for (r, c, alpha, filled) in strokes {
-                    let brush = match self.brushes.entry(c) {
-                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
-                        std::collections::hash_map::Entry::Vacant(e) => {
-                            let created = rt.CreateSolidColorBrush(
-                                &D2D1_COLOR_F {
-                                    r: ((c >> 16) & 255) as f32 / 255.,
-                                    g: ((c >> 8) & 255) as f32 / 255.,
-                                    b: (c & 255) as f32 / 255.,
-                                    a: 1.,
-                                },
-                                None,
-                            )?;
-                            e.insert(created)
-                        }
-                    };
+                for &(r, c, alpha) in fills {
+                    let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
                     brush.SetOpacity(alpha);
-                    if filled {
-                        rt.FillRoundedRectangle(
-                            &D2D1_ROUNDED_RECT {
-                                rect: D2D_RECT_F { left: x, top: y, right: x + r.w as f32, bottom: y + r.h as f32 },
-                                radiusX: radius,
-                                radiusY: radius,
+                    rt.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: x, top: y, right: x + r.w as f32, bottom: y + r.h as f32 },
+                            radiusX: radius,
+                            radiusY: radius,
+                        },
+                        &*brush,
+                    );
+                }
+                for card in cards {
+                    let x = (card.rect.x + off.x) as f32;
+                    let y = (card.rect.y + off.y) as f32;
+                    let w = card.rect.w as f32;
+                    let h = card.rect.h as f32;
+                    let base = Self::brush_for(&mut self.brushes, rt, 0x161B26)?;
+                    base.SetOpacity(1.0);
+                    rt.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h },
+                            radiusX: radius,
+                            radiusY: radius,
+                        },
+                        &*base,
+                    );
+                    let rim_w = 1.0 * dpi;
+                    let rim_d = rim_w * 0.5;
+                    let rim_r = (radius - rim_d).max(0.0);
+                    let rim = Self::brush_for(&mut self.brushes, rt, 0x2A3347)?;
+                    rim.SetOpacity(0.85);
+                    rt.DrawRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: x + rim_d,
+                                top: y + rim_d,
+                                right: x + w - rim_d,
+                                bottom: y + h - rim_d,
                             },
-                            &*brush,
-                        );
-                        continue;
+                            radiusX: rim_r,
+                            radiusY: rim_r,
+                        },
+                        &*rim,
+                        rim_w,
+                        None,
+                    );
+                    if card.spinner_alpha > 0.001 && w.min(h) >= 80.0 * dpi {
+                        let cx = x + w * 0.5;
+                        let cy = y + h * 0.5;
+                        let ring_r = 14.0 * dpi;
+                        let mut track = D2D1_ELLIPSE {
+                            radiusX: ring_r,
+                            radiusY: ring_r,
+                            ..Default::default()
+                        };
+                        track.point.X = cx;
+                        track.point.Y = cy;
+                        let track_brush = Self::brush_for(&mut self.brushes, rt, 0x334155)?;
+                        track_brush.SetOpacity(0.35 * card.spinner_alpha);
+                        rt.DrawEllipse(&track, &*track_brush, 2.2 * dpi, None);
+                        for i in 0..12 {
+                            let frac = i as f32 / 11.0;
+                            let theta = card.spinner_angle_rad
+                                - (1.0 - frac) * (std::f32::consts::TAU * 2.0 / 3.0);
+                            let dot_r = (1.0 + 1.3 * frac) * dpi;
+                            let mut dot = D2D1_ELLIPSE {
+                                radiusX: dot_r,
+                                radiusY: dot_r,
+                                ..Default::default()
+                            };
+                            dot.point.X = cx + ring_r * theta.cos();
+                            dot.point.Y = cy + ring_r * theta.sin();
+                            let dot_brush = Self::brush_for(&mut self.brushes, rt, 0x60A5FA)?;
+                            dot_brush.SetOpacity((0.12 + 0.88 * frac * frac) * card.spinner_alpha);
+                            rt.FillEllipse(&dot, &*dot_brush);
+                        }
                     }
+                }
+                for &(r, c) in lines {
+                    let brush = Self::brush_for(&mut self.brushes, rt, c)?;
+                    let x = (r.x + off.x) as f32;
+                    let y = (r.y + off.y) as f32;
+                    brush.SetOpacity(1.0);
                     let d = width / 2.;
                     rt.DrawRoundedRectangle(
                         &D2D1_ROUNDED_RECT {
@@ -370,6 +488,8 @@ struct Host {
     b: Rect,
     surface: Option<Surface>,
     thumbs: HashMap<isize, isize>,
+    visible: bool,
+    last_draw: Option<DrawSig>,
 }
 impl Drop for Host {
     fn drop(&mut self) {
@@ -445,6 +565,8 @@ impl Host {
                 b,
                 surface,
                 thumbs: Default::default(),
+                visible: false,
+                last_draw: None,
             })
         }
     }
@@ -526,6 +648,18 @@ fn interpolate(a: Rect, b: Rect, t: f64) -> Rect {
         h: f(a.h, b.h),
     }
 }
+fn warm_hosts(monitors: Vec<(String, Rect)>, hosts: &mut BTreeMap<String, Host>) {
+    for (n, b) in monitors {
+        if hosts.get(&n).is_some_and(|h| h.b != b) {
+            hosts.remove(&n);
+        }
+        if !hosts.contains_key(&n)
+            && let Ok(h) = Host::new(b)
+        {
+            hosts.insert(n, h);
+        }
+    }
+}
 pub static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 pub fn start() -> crossbeam_channel::Sender<Message> {
     let (tx, rx) = crossbeam_channel::unbounded();
@@ -552,6 +686,13 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         let mut open_landed: Option<u64> = None;
         let mut open_timed_out = false;
         let mut anim_done = false;
+        let cover_cfg = planor::cover::CoverConfig::default();
+        let mut cover_landed: HashMap<(isize, Instant), Instant> = HashMap::new();
+        let mut cover_done: HashMap<isize, Instant> = HashMap::new();
+        let mut cover_sent: std::collections::HashSet<(u64, isize)> = Default::default();
+        let mut cover_timed_out_ids: std::collections::HashSet<isize> = Default::default();
+        let mut live_refresh_us: f64 = win32::dwm_refresh_period_us().unwrap_or(16_666.7);
+        let mut refresh_checked = Instant::now();
         type SourceKey = (isize, usize, String);
         let (source_tx, source_jobs) = crossbeam_channel::unbounded::<(SourceKey, isize, SendDevice)>();
         let (source_done_tx, source_done) = crossbeam_channel::unbounded::<(SourceKey, std::result::Result<SendSource, String>, u128)>();
@@ -661,16 +802,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     break;
                 }
                 Ok(Message::Warm(monitors)) => {
-                    for (n, b) in monitors {
-                        if hosts.get(&n).is_some_and(|h| h.b != b) {
-                            hosts.remove(&n);
-                        }
-                        if !hosts.contains_key(&n) {
-                            if let Ok(h) = Host::new(b) {
-                                hosts.insert(n, h);
-                            }
-                        }
-                    }
+                    warm_hosts(monitors, &mut hosts);
                     continue;
                 }
                 Ok(Message::Clear(ack)) => {
@@ -684,6 +816,10 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     open_landed = None;
                     open_timed_out = false;
                     anim_done = false;
+                    cover_landed.clear();
+                    cover_done.clear();
+                    cover_sent.clear();
+                    cover_timed_out_ids.clear();
                     win32::set_peeks(Vec::new());
                     let _ = ack.send(());
                     continue;
@@ -696,18 +832,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     while let Ok(next_msg) = rx.try_recv() {
                         match next_msg {
                             Message::Scene(newer) => s = newer,
-                            Message::Warm(monitors) => {
-                                for (n, b) in monitors {
-                                    if hosts.get(&n).is_some_and(|h| h.b != b) {
-                                        hosts.remove(&n);
-                                    }
-                                    if !hosts.contains_key(&n) {
-                                        if let Ok(h) = Host::new(b) {
-                                            hosts.insert(n, h);
-                                        }
-                                    }
-                                }
-                            }
+                            Message::Warm(monitors) => warm_hosts(monitors, &mut hosts),
                             Message::Clear(ack) => {
                                 verify = None;
                                 hosts.clear();
@@ -719,6 +844,10 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                 open_landed = None;
                                 open_timed_out = false;
                                 anim_done = false;
+                                cover_landed.clear();
+                                cover_done.clear();
+                                cover_sent.clear();
+                                cover_timed_out_ids.clear();
                                 win32::set_peeks(Vec::new());
                                 let _ = ack.send(());
                                 cleared = true;
@@ -857,6 +986,13 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     open_landed = None;
                     open_timed_out = false;
                     anim_done = false;
+                    cover_sent.clear();
+                    cover_timed_out_ids.clear();
+                    cover_landed.retain(|(id, _), _| s.tiles.iter().any(|t| t.id == *id));
+                    cover_done.retain(|id, _| s.tiles.iter().any(|t| t.id == *id));
+                    live_refresh_us =
+                        planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
+                    refresh_checked = Instant::now();
                     begin = Instant::now();
                     last = begin;
                     frame_of_scene = 0;
@@ -881,6 +1017,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 scene = None;
                 continue;
             }
+            if refresh_checked.elapsed() >= Duration::from_millis(100) {
+                refresh_checked = Instant::now();
+                live_refresh_us =
+                    planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
+            }
             let time = Instant::now();
             let t = if s.duration == 0 {
                 1.
@@ -891,7 +1032,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 )
             };
             let mut placements = vec![];
+            let mut cover_placements = vec![];
             let mut settled_tiles = vec![];
+            let mut any_cover_active = false;
             let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
             let open_handoff = s.action == "open_close"
                 && t >= 1.
@@ -901,6 +1044,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             for (name, host) in &mut hosts {
                 let mut lines = vec![];
                 let mut backing = vec![];
+                let mut cards: Vec<CardDraw> = vec![];
                 let mut full = false;
                 let mut keep = std::collections::HashSet::new();
                 let mut host_hits = vec![];
@@ -910,15 +1054,105 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     {
                         continue;
                     }
-                    let r = interpolate(origins[&tile.id], tile.rect, t);
+                    let bound = intersect(tile.bound, host.b).unwrap_or(host.b);
+                    let can_cover = !tile.pinned
+                        && !tile.hidden
+                        && !tile.preview
+                        && !tile.fullscreen
+                        && !s.live
+                        && intersect(tile.rect, bound) == Some(tile.rect);
+                    let mut covered_visual = false;
+                    let mut skip_cover_motion = false;
+                    if can_cover
+                        && let Some(started) = tile.cover
+                    {
+                        if cover_done.get(&tile.id) == Some(&started) {
+                            skip_cover_motion = true;
+                        } else {
+                            let frame_ready = win32::frame(tile.id).is_some_and(|got| {
+                                (got.x - tile.rect.x).abs() <= 2
+                                    && (got.y - tile.rect.y).abs() <= 2
+                                    && got.w >= tile.rect.w - 2
+                                    && got.h >= tile.rect.h - 2
+                            });
+                            let landed_for_ms = if frame_ready {
+                                let at = *cover_landed
+                                    .entry((tile.id, started))
+                                    .or_insert_with(Instant::now);
+                                Some(at.elapsed().as_millis() as u64)
+                            } else {
+                                None
+                            };
+                            let source_size_matches = pictures
+                                .get(&(tile.id, tile.cookie, name.clone()))
+                                .is_some_and(|src| {
+                                    src.bitmap.is_some()
+                                        && (src.size.Width - tile.rect.w).abs() <= 24
+                                        && (src.size.Height - tile.rect.h).abs() <= 24
+                                });
+                            let vis = planor::cover::eval_cover(
+                                cover_cfg,
+                                started.elapsed().as_millis() as u64,
+                                landed_for_ms,
+                                source_size_matches,
+                            );
+                            if vis.active {
+                                covered_visual = true;
+                                any_cover_active = true;
+                                next.insert(tile.id, tile.rect);
+                                cards.push(CardDraw {
+                                    rect: Rect {
+                                        x: tile.rect.x - host.b.x,
+                                        y: tile.rect.y - host.b.y,
+                                        ..tile.rect
+                                    },
+                                    spinner_alpha: vis.spinner_alpha,
+                                    spinner_angle_rad: vis.spinner_angle_rad,
+                                });
+                                if let Some(color) = tile.color {
+                                    lines.push((
+                                        Rect {
+                                            x: tile.rect.x - host.b.x,
+                                            y: tile.rect.y - host.b.y,
+                                            ..tile.rect
+                                        },
+                                        color,
+                                    ));
+                                }
+                                cover_placements.push((tile.id, tile.rect));
+                                if t >= 1. && !s.live {
+                                    settled_tiles.push(planor::SettledTile {
+                                        id: tile.id,
+                                        rect: tile.rect,
+                                        bound,
+                                        expect_on_screen: false,
+                                        focused: false,
+                                    });
+                                }
+                            } else {
+                                cover_done.insert(tile.id, started);
+                                cover_landed.remove(&(tile.id, started));
+                                skip_cover_motion = true;
+                                if vis.timed_out {
+                                    cover_timed_out_ids.insert(tile.id);
+                                }
+                            }
+                        }
+                    }
+                    if covered_visual {
+                        continue;
+                    }
+                    let (o, r) = if skip_cover_motion {
+                        (tile.rect, tile.rect)
+                    } else {
+                        (origins[&tile.id], interpolate(origins[&tile.id], tile.rect, t))
+                    };
                     next.insert(tile.id, r);
                     // While moving, the stand-in keeps the window's real size and only its position
                     // glides; scaling it to the in-between rectangle stretched the contents.
-                    let o = origins[&tile.id];
                     let rs = if t < 1. { Rect { w: o.w, h: o.h, ..r } } else { r };
-                    let bound = intersect(tile.bound, host.b).unwrap_or(host.b);
                     let clip = if tile.hidden { None } else { intersect(rs, bound) };
-                    let moving = t < 1. && origins[&tile.id] != tile.rect;
+                    let moving = !skip_cover_motion && t < 1. && o != tile.rect;
                     let live_proxy = s.live && !tile.pinned && (live_ids.contains(&tile.id) || origins[&tile.id] != tile.rect);
                     if live_proxy {
                         live_ids.insert(tile.id);
@@ -1028,10 +1262,18 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             .map(|r| (Rect { x: r.x - host.b.x, y: r.y - host.b.y, ..r }, z.color, z.alpha))
                     })
                     .collect();
-                if full || (keep.is_empty() && lines.is_empty() && fills.is_empty()) {
-                    ShowWindow(host.h, SW_HIDE);
+                if full || (keep.is_empty() && lines.is_empty() && fills.is_empty() && cards.is_empty()) {
+                    if host.visible {
+                        ShowWindow(host.h, SW_HIDE);
+                        host.visible = false;
+                        host.last_draw = None;
+                    }
                 } else {
-                    ShowWindow(host.h, SW_SHOWNOACTIVATE);
+                    if !host.visible {
+                        ShowWindow(host.h, SW_SHOWNOACTIVATE);
+                        host.visible = true;
+                        host.last_draw = None;
+                    }
                     // Cut unmanaged windows out of the overlay (SetWindowRgn); only when they changed.
                     let mine: Vec<Rect> = s
                         .holes
@@ -1060,22 +1302,40 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                     if let Some(surface) = host.surface.as_mut() {
                         let dpi = GetDpiForWindow(host.h) as f32 / 96.;
-                        let t = Instant::now();
-                        let drawn = {
-                            let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
-                            surface.draw(&backing, &fills, &lines, s.width * dpi, s.radius * dpi)
-                        };
-                        if t.elapsed().as_millis() >= 100 {
-                            diag::trace(format!("SLOW render draw: {} ms", t.elapsed().as_millis()))
-                        }
-                        if let Err(e) = drawn {
-                            eprintln!("border draw: {e}");
-                            host.surface = None;
+                        let sig = DrawSig::new(&fills, &cards, &lines, s.width * dpi, s.radius * dpi, dpi);
+                        if !backing.is_empty() || host.last_draw.as_ref() != Some(&sig) {
+                            let t = Instant::now();
+                            let drawn = {
+                                let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
+                                surface.draw(&backing, &fills, &cards, &lines, s.width * dpi, s.radius * dpi, dpi)
+                            };
+                            if t.elapsed().as_millis() >= 100 {
+                                diag::trace(format!("SLOW render draw: {} ms", t.elapsed().as_millis()))
+                            }
+                            if let Err(e) = drawn {
+                                eprintln!("border draw: {e}");
+                                host.surface = None;
+                                host.last_draw = None;
+                            } else if backing.is_empty() {
+                                host.last_draw = Some(sig);
+                            } else {
+                                host.last_draw = None;
+                            }
                         }
                     }
                 }
             }
             win32::set_peeks(hits);
+            if !cover_placements.is_empty() {
+                let unsent: Vec<(isize, Rect)> = cover_placements
+                    .iter()
+                    .copied()
+                    .filter(|&(id, _)| cover_sent.insert((s.epoch, id)))
+                    .collect();
+                if !unsent.is_empty() {
+                    win32::place_async(&unsent);
+                }
+            }
             let start = Instant::now();
             let mut retries = 0;
             let mut place_ok = false;
@@ -1121,7 +1381,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 rejected.clear();
                 if t >= 1. && !open_handoff && !open_timed_out && result.is_ok() {
                     for &(id, want) in &placements {
-                        if want.x != park {
+                        if want.x != park && !cover_timed_out_ids.contains(&id) {
                             if let Some(got) = win32::frame(id) {
                                 if got.w > want.w + 1 || got.h > want.h + 1 {
                                     rejected.push((id, got))
@@ -1148,7 +1408,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             if !rejected.is_empty() {
                 win32::emit(win32::Event::Rejected(s.epoch, rejected.clone()));
             }
-            if place_ok && (!placements.is_empty() || t >= 1.) {
+            if place_ok && (!placements.is_empty() || !cover_placements.is_empty() || t >= 1.) {
                 crate::perf::mark_first_place_done();
             }
             if place_ok && !gesture_recorded {
@@ -1167,6 +1427,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             if place_ok
                 && t >= 1.
                 && !waiting_open_landing
+                && !any_cover_active
                 && rejected.is_empty()
                 && parked_checked_epoch != s.epoch
                 && !settled_tiles.is_empty()
@@ -1213,28 +1474,35 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             // Animation smoothness: the interval between two presented frames of the same animated scene. A
             // frame later than 1.5 refresh periods is a visible hitch.
             if s.duration > 0 && frame_of_scene > 0 && !anim_done {
-                crate::perf::record_frame(s.action, last.elapsed().as_micros() as u64);
+                crate::perf::record_frame_with_refresh(s.action, last.elapsed().as_micros() as u64, live_refresh_us);
             }
             if t >= 1. {
                 anim_done = true;
             }
             if s.live && frame_of_scene == 0 {
                 // Under the fingers every scene is one frame: the gap between their presents is the smoothness.
-                if let Some(prev) = last_live_present.filter(|p| p.elapsed() < Duration::from_millis(120)) {
-                    crate::perf::record_frame("live", prev.elapsed().as_micros() as u64);
+                let cutoff = Duration::from_millis(planor::pacing::live_gap_cutoff_ms(live_refresh_us));
+                if let Some(prev) = last_live_present.filter(|p| p.elapsed() < cutoff) {
+                    crate::perf::record_frame_with_refresh("live", prev.elapsed().as_micros() as u64, live_refresh_us);
                 }
                 last_live_present = Some(Instant::now());
             }
             frame_of_scene += 1;
             last = Instant::now();
-            if t >= 1. && !waiting_open_landing {
-                settled = timestamp() + 330_000;
+            if t >= 1. && !waiting_open_landing && !any_cover_active {
+                settled = timestamp() + planor::pacing::settled_capture_delay_100ns(live_refresh_us);
                 let current_epoch = s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
                 scene = None;
                 if current_epoch {
+                    let verify_items: Vec<(isize, Rect)> = placements
+                        .iter()
+                        .filter(|p| p.1.x != park)
+                        .chain(cover_placements.iter())
+                        .copied()
+                        .collect();
                     verify = Some((
                         Instant::now() + Duration::from_millis(250),
-                        placements.iter().filter(|p| p.1.x != park).copied().collect(),
+                        verify_items,
                         2,
                     ))
                 }

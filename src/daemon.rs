@@ -231,6 +231,8 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub drag: Option<DragSession>,
     pub last_scan: Instant,
     pub placed: HashMap<isize, (u64, Rect)>,
+    pub covering: HashMap<isize, Instant>,
+    pub max_refresh_hz: f64,
     pub diag: diag::Telemetry,
 }
 impl<B: WindowBackend> Engine<B> {
@@ -243,6 +245,7 @@ impl<B: WindowBackend> Engine<B> {
     ) -> Self {
         let diag_enabled = cfg["diagnostics"]["enabled"].as_bool() == Some(true);
         let desktop = backend.current_desktop();
+        let max_refresh_hz = backend.max_refresh_hz();
         Self {
             backend,
             pad: None,
@@ -290,6 +293,8 @@ impl<B: WindowBackend> Engine<B> {
             drag: None,
             last_scan: Instant::now(),
             placed: Default::default(),
+            covering: HashMap::new(),
+            max_refresh_hz,
         }
     }
     #[cfg(test)]
@@ -327,10 +332,15 @@ impl<B: WindowBackend> Engine<B> {
         }
         self.dirty = true
     }
-    fn add(&mut self, id: isize) {
-        self.add_with_frame(id, None)
+    fn mark_cover(&mut self, id: isize) {
+        if self.cfg["animation"]["placeholder"].as_bool() != Some(false) {
+            self.covering.insert(id, Instant::now());
+        }
     }
-    fn add_with_frame(&mut self, id: isize, precomputed_rect: Option<Rect>) {
+    fn add(&mut self, id: isize) {
+        self.add_with_frame(id, None, true)
+    }
+    fn add_with_frame(&mut self, id: isize, precomputed_rect: Option<Rect>, cover_newborn: bool) {
         if self.blocked()
             || self.owning(id).is_some()
             || self.skipped.contains(&id)
@@ -378,6 +388,9 @@ impl<B: WindowBackend> Engine<B> {
         s.insert(id, self.backend.minimum(id, area.horizontal()));
         self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
         self.born.insert(id, (Instant::now(), 0));
+        if cover_newborn {
+            self.mark_cover(id);
+        }
         self.reveal()
     }
     /// A window that just appeared and then moved itself (apps restore their saved position after showing,
@@ -983,7 +996,7 @@ impl<B: WindowBackend> Engine<B> {
         let before: HashSet<isize> = self.journal.entries.keys().copied().collect();
         self.journal.begin_batch();
         for (id, rect) in candidates {
-            self.add_with_frame(id, rect)
+            self.add_with_frame(id, rect, false)
         }
         if self.journal.end_batch().is_err() {
             let unsaved: Vec<isize> = self
@@ -1016,6 +1029,7 @@ impl<B: WindowBackend> Engine<B> {
     pub(crate) fn topology(&mut self) {
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonTopology);
         self.monitors_checked = Instant::now();
+        self.max_refresh_hz = self.backend.max_refresh_hz();
         let old = std::mem::replace(&mut self.displays, self.backend.monitors());
         for ((_, name), s) in &mut self.strips {
             if let Some((_, area, _)) = self.displays.iter().find(|m| &m.0 == name) {
@@ -1096,6 +1110,7 @@ impl<B: WindowBackend> Engine<B> {
         }
         self.dirty = false;
         self.seq += 1;
+        self.covering.retain(|_, t| t.elapsed() < Duration::from_millis(500));
         for s in self.strips.values_mut() {
             s.fill_gaps()
         }
@@ -1213,14 +1228,16 @@ impl<B: WindowBackend> Engine<B> {
                     } else {
                         None
                     };
+                    let preview = strip.columns[i].members[strip.columns[i].active] != id;
+                    let hidden = !strip.columns[i].shown(strip.columns[i].members.iter().position(|&m| m == id).unwrap_or(0));
                     tiles.push(render::Tile {
                         id,
                         rect,
                         monitor: name.clone(),
                         pinned: false,
                         fullscreen,
-                        preview: strip.columns[i].members[strip.columns[i].active] != id,
-                        hidden: !strip.columns[i].shown(strip.columns[i].members.iter().position(|&m| m == id).unwrap_or(0)),
+                        preview,
+                        hidden,
                         bound: if fullscreen {
                             self.displays.iter().find(|m| &m.0 == name).map(|m| m.2).unwrap_or(strip.area)
                         } else {
@@ -1228,6 +1245,11 @@ impl<B: WindowBackend> Engine<B> {
                         },
                         color: c,
                         cookie: saved.cookie,
+                        cover: if !fullscreen && !preview && !hidden {
+                            self.covering.get(&id).copied()
+                        } else {
+                            None
+                        },
                     });
                     self.placed.insert(id, (self.seq, rect));
                 }
@@ -1250,6 +1272,7 @@ impl<B: WindowBackend> Engine<B> {
                         preview: false,
                         hidden: false,
                         bound: rect,
+                        cover: None,
                     })
                 }
             }
@@ -1406,7 +1429,7 @@ impl<B: WindowBackend> Engine<B> {
         let _ = self.clear();
         if self.pinned.remove(&id) {
             self.backend.set_topmost(id, false);
-            self.add(id)
+            self.add_with_frame(id, None, false)
         } else if let Some(k) = self.owning(id) {
             self.backend.set_topmost(id, true);
             self.pinned.insert(id);
@@ -1813,10 +1836,11 @@ impl<B: WindowBackend> Engine<B> {
         p.cursor.0 = (p.cursor.0 + dx * gain).clamp(l, r);
         p.cursor.1 = (p.cursor.1 + dy * gain).clamp(t, b);
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
-        // Asynchronous and rate-limited (about 120 per second, latest position wins): a heavy window
-        // (a browser) cannot keep up with every touchpad report, and a queue of stale moves is what
-        // made the window trail the fingers by a growing amount.
-        if now.duration_since(p.moved) >= Duration::from_millis(8) {
+        // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
+        // window cannot keep up with every touchpad report, and a queue of stale moves would make the
+        // window trail the fingers.
+        let min_move_us = planor::pacing::pad_move_min_interval_us(self.max_refresh_hz);
+        if now.duration_since(p.moved) >= Duration::from_micros(min_move_us) {
             p.moved = now;
             let _gspan = perf::SpanGuard::new(perf::SpanKind::GestureToPlace);
             self.backend.move_window_async(
@@ -2087,9 +2111,10 @@ impl<B: WindowBackend> Engine<B> {
             s.insert(id, self.backend.minimum(id, area.horizontal()))
         }
         if dest != d.key {
-            // Crossing monitors: snap into the new slot at once. Animating the whole way across
-            // monitors (and DPI boundaries) is what made flung windows wander and stall.
+            // Crossing monitors: snap into the new slot at once, behind a placeholder cover while
+            // the app handles WM_DPICHANGED and finishes repainting.
             self.instant = true;
+            self.mark_cover(id);
         }
         self.active = dest.1.clone();
         let s = self.strips.get_mut(&dest).unwrap();
@@ -2220,7 +2245,7 @@ impl<B: WindowBackend> Engine<B> {
                     self.input_qpc_us = None;
                 }
             }
-            Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.dirty=true;},
+            Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.covering.remove(&id);self.dirty=true;},
             Event::Window(e, id) if !self.blocked() => match e {
                 EVENT_OBJECT_SHOW | EVENT_SYSTEM_MINIMIZEEND => {
                     if self.cfg["layout"]["spawn_on_cursor_monitor"].as_bool() == Some(true)
@@ -2274,6 +2299,7 @@ impl<B: WindowBackend> Engine<B> {
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none() => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
+                    self.covering.remove(&id);
                     if !self.orphans.contains(&id) {
                         if let Some(k) = self.owning(id) {
                             let focused =
@@ -2384,6 +2410,7 @@ pub fn run() -> Result<()> {
     let (reload, rx) = crossbeam_channel::unbounded();
     win32::events(tx, cfg.clone(), rx);
     let desktop = backend.current_desktop();
+    let max_refresh_hz = backend.max_refresh_hz();
     let mut engine = Engine {
         backend,
         pad: None,
@@ -2431,6 +2458,8 @@ pub fn run() -> Result<()> {
         drag: None,
         last_scan: Instant::now(),
         placed: Default::default(),
+        covering: HashMap::new(),
+        max_refresh_hz,
     };
     engine.topology();
     if engine.cfg["layout"]["tile_existing_on_startup"].as_bool() == Some(true) {
@@ -2441,9 +2470,11 @@ pub fn run() -> Result<()> {
     }
     let tick = crossbeam_channel::tick(Duration::from_millis(32));
     // Frame-rate steps while something moves by itself (momentum, edge scroll during a drag); a
-    // never-firing channel otherwise, so an idle daemon does not wake 120 times a second.
-    let fast = crossbeam_channel::tick(Duration::from_millis(8));
+    // never-firing channel otherwise, so an idle daemon does not wake unnecessarily.
+    let mut fast_ms = planor::pacing::fast_tick_ms(engine.max_refresh_hz);
+    let mut fast = crossbeam_channel::tick(Duration::from_millis(fast_ms));
     let never = crossbeam_channel::never::<Instant>();
+    let mut _hi_res: Option<win32::HighResTimer> = None;
     let result = (|| -> Result<()> {
         loop {
             perf::heartbeat_daemon();
@@ -2487,6 +2518,18 @@ pub fn run() -> Result<()> {
                 }
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
+            }
+            let want_ms = planor::pacing::fast_tick_ms(engine.max_refresh_hz);
+            if want_ms != fast_ms {
+                fast_ms = want_ms;
+                fast = crossbeam_channel::tick(Duration::from_millis(fast_ms));
+            }
+            if engine.wants_fast_tick() {
+                if _hi_res.is_none() {
+                    _hi_res = Some(win32::HighResTimer::acquire());
+                }
+            } else {
+                _hi_res = None;
             }
             crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}let _span=perf::SpanGuard::new(perf::SpanKind::DaemonEvent);engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();let _span=perf::SpanGuard::new(perf::SpanKind::DaemonTick);engine.tick()?;slow("tick",t)}},recv(if engine.wants_fast_tick(){&fast}else{&never})->_=>{if !server.closing{engine.fast_tick()}}}
         }

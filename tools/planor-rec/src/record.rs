@@ -795,11 +795,36 @@ pub fn limit_reached(
 
 // ---- Run ---------------------------------------------------------------------------------------
 
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
+struct HighResTimer(bool);
+
+impl HighResTimer {
+    fn acquire(enabled: bool) -> Self {
+        Self(enabled && unsafe { timeBeginPeriod(1) == 0 })
+    }
+}
+
+impl Drop for HighResTimer {
+    fn drop(&mut self) {
+        if self.0 {
+            unsafe {
+                timeEndPeriod(1);
+            }
+        }
+    }
+}
+
 pub fn run(args: RecordArgs) -> util::anyhow_lite::Result<()> {
     let out = args.out;
     util::ensure_dir(&out)?;
     let out = std::path::absolute(&out).unwrap_or(out);
     let fps = args.fps.clamp(1, 240);
+    let _hi_res = HighResTimer::acquire(fps > 60);
     util::run_at_full_speed();
     capture::dpi_aware();
     let qpc_freq = qpc_frequency();

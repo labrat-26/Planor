@@ -201,7 +201,7 @@ fn max_refresh_hz() -> u32 {
     }
     let mut best = 0u32;
     unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut best as *mut u32 as isize) };
-    if best == 0 { 60 } else { best.clamp(24, 360) }
+    if best == 0 { 60 } else { best.clamp(10, 360) }
 }
 fn main() {
     capture::dpi_aware();

@@ -38,6 +38,8 @@ open_close = true
 resize = true
 drag_reflow = true
 stack_switch = true
+# Cover newly opened or cross-monitor windows on-screen behind a dark card (with a spinner if >120 ms) while they resize.
+placeholder = true
 
 [touchpad]
 three_finger_enabled = true
