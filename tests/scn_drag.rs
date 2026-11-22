@@ -303,7 +303,11 @@ fn monitor_roundtrip(mon: usize, vertical: bool, label: &str) {
     let mut d = Daemon::new(label);
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
 
     let res: [(usize, &Sentinel); 2] = [(0, &res_a), (1, &res_b)];
     check_layout(&res, wr, vertical, &format!("{kind} pre-drag residents on monitor {mon}"));
@@ -395,7 +399,11 @@ fn reorder_before_after() {
     let mut d = Daemon::new("s4-reorder");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     // Focus window 0 so the strip scrolls to the start; a second press is a no-op at the strip start.
     for _ in 0..2 {
         press(&[ALT], LEFT);
@@ -462,7 +470,11 @@ fn drop_on_center_stacks() {
     let mut d = Daemon::new("s4-stack");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
@@ -523,7 +535,11 @@ fn shift_freezes_reflow() {
     let mut d = Daemon::new("s4-shift");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     for _ in 0..3 {
         press(&[ALT], LEFT);
     }
@@ -570,7 +586,11 @@ fn drag_out_of_stack() {
     let mut d = Daemon::new("s4-unstack");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     for _ in 0..3 {
         press(&[ALT], LEFT);
     }
@@ -660,7 +680,11 @@ fn drag_cancel_escape() {
     let mut d = Daemon::new("s4-escape");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     for _ in 0..3 {
         press(&[ALT], LEFT);
     }
@@ -713,7 +737,11 @@ fn resize_by_edge_drag() {
     let mut d = Daemon::new("s4-resize");
     let mut m = Mouse::begin();
     d.start();
-    thread::sleep(SETTLE);
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     for _ in 0..2 {
         press(&[ALT], LEFT);
     }

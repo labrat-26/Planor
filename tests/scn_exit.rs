@@ -264,7 +264,11 @@ fn stop_with_many_windows() {
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-stop-many");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     scroll_right(3);
     stop_checked(&mut d);
     restored(&ws, &before);
@@ -282,7 +286,11 @@ fn panic_hotkey() {
     let before = snapshot(&ws);
     let mut d = Daemon::new_with_hooks("scn-exit-panic");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     press(&[CTRL, ALT, SHIFT], BACKSPACE);
     let status = wait_exit(&mut d, 5);
     assert!(
@@ -305,7 +313,11 @@ fn kill_then_restart_recovers() {
     let labels: Vec<usize> = (0..ws.len()).collect();
     let mut d = Daemon::new("scn-exit-kill-restart");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     scroll_right(3);
     d.kill();
     assert!(
@@ -338,7 +350,11 @@ fn kill_twice() {
 
     // First kill: tiled and parked, then restart without tiling. Restart must restore everything.
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     scroll_right(3);
     d.kill();
     wait_no_planor(&d, "after kill 1");
@@ -357,7 +373,11 @@ fn kill_twice() {
     // Second kill: re-tile so windows are parked again, then kill before any stop.
     set_tile_on_startup(&d, true);
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     scroll_right(3);
     d.kill();
     wait_no_planor(&d, "after kill 2");
@@ -385,7 +405,11 @@ fn stop_during_animation() {
     let before = snapshot(&ws);
     let mut d = Daemon::new_animated("scn-exit-animation");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     send_chord(&[ALT], RIGHT);
     thread::sleep(Duration::from_millis(100));
     stop_checked(&mut d);
@@ -404,7 +428,11 @@ fn close_some_windows_then_stop() {
     let before_all = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-close");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
 
     // Close windows 1 and 4 while tiled; keep the other four with their original indices.
     let mut kept = Vec::new();
@@ -445,7 +473,11 @@ fn minimized_window_stop() {
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-minimized");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     unsafe { ShowWindow(ws[2].hwnd as _, SW_MINIMIZE) };
     thread::sleep(Duration::from_millis(300));
     assert!(
@@ -477,7 +509,11 @@ fn maximized_before_start() {
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-maximized");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     stop_checked(&mut d);
     restored(&ws, &before);
     assert!(
@@ -563,7 +599,11 @@ fn stop_without_daemon_rescues_windows() {
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-stop-nodaemon");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     scroll_right(3);
     d.kill();
     wait_no_planor(&d, "stop without daemon (after kill)");
@@ -707,7 +747,11 @@ fn exit_restores_windows_on_many_monitors() {
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-many-monitors");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "exit daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
     let moved = ws
         .iter()
         .zip(before.iter())

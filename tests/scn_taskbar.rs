@@ -213,7 +213,11 @@ fn tiles_stay_inside_work_area() {
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
     let mut d = Daemon::new("s6-work");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "taskbar daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     check_inside_work_area(&ws, &mons_v, "after settle");
     for step in 1..=2 {
         press(&[ALT], RIGHT);
@@ -235,7 +239,11 @@ fn taskbar_hit_test_passes_through() {
     let _ws = [Sentinel::new(0, 0), Sentinel::new(1, 0)];
     let mut d = Daemon::new("s6-hit");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "taskbar daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let pid = d.p.as_ref().unwrap().id();
     let _cursor = cursor_restore();
 
@@ -385,7 +393,11 @@ fn overlay_click_through_everywhere_but_peek() {
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
     let mut d = Daemon::new("s6-clk");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "taskbar daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let pid = d.p.as_ref().unwrap().id();
     let _cursor = cursor_restore();
 
@@ -436,7 +448,11 @@ fn fullscreen_covers_taskbar_and_is_scrollable_out() {
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
     let mut d = Daemon::new("s6-full");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "taskbar daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let _cursor = cursor_restore();
 
     let mons_v = mons();
@@ -541,7 +557,11 @@ fn start_menu_open_keeps_layout() {
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
     let mut d = Daemon::new("s6-start");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "taskbar daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let before: Vec<RECT> = ws.iter().map(|w| w.visible()).collect();
 
     let _esc = StartMenuGuard;

@@ -91,15 +91,15 @@ fn go_internal() -> DisplayGuard {
     guard
 }
 
-/// Restore the extended layout and wait until the original monitor count is back, then settle 6 s.
+/// Restore the extended layout and wait until the original monitor count is back, then settle 500 ms.
 fn restore_displays(guard: DisplayGuard, count: usize) {
     drop(guard);
     assert!(
-        eventually(10, || mons().len() == count),
+        wait_until(Duration::from_secs(8), || mons().len() == count),
         "after DisplaySwitch /extend: expected {count} monitors, observed {}",
         mons().len()
     );
-    thread::sleep(Duration::from_secs(6));
+    thread::sleep(Duration::from_millis(500));
 }
 
 /// Shared body for offline_15s_round_trip and short_blip_3s.
@@ -113,7 +113,11 @@ fn offline_round_trip(label: &str, offline_secs: u64) {
     let ws = build_sentinels(&m0);
     let mut d = Daemon::new(label);
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 0, Duration::from_millis(2500)),
+        "display test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let rects: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
     let home: Vec<Option<usize>> = ws.iter().map(monitor_of).collect();
     let reach0: Vec<bool> = ws.iter().map(reachable).collect();
@@ -283,7 +287,11 @@ fn offline_then_stop() {
     let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
     let mut d = Daemon::new("s5-offstop");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 0, Duration::from_millis(2500)),
+        "display test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
 
     let guard = go_internal();
     thread::sleep(Duration::from_secs(3));
@@ -325,7 +333,11 @@ fn offline_then_kill_recover() {
     let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
     let mut d = Daemon::new("s5-offkill");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 0, Duration::from_millis(2500)),
+        "display test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
 
     let guard = go_internal();
     thread::sleep(Duration::from_secs(3));
@@ -344,7 +356,11 @@ fn offline_then_kill_recover() {
     )
     .unwrap();
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 0, Duration::from_millis(2500)),
+        "display test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
 
     let restored = eventually(5, || {
         ws.iter().enumerate().all(|(i, w)| {
@@ -399,7 +415,11 @@ fn topology_events_while_dragging() {
     let ws = build_sentinels(&m0);
     let mut d = Daemon::new("s5-drag");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 0, Duration::from_millis(2500)),
+        "display test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let home: Vec<Option<usize>> = ws.iter().map(monitor_of).collect();
     let origin: Vec<usize> = (0..ws.len()).map(|i| origin_of(i, n)).collect();
     let prim = (0..ws.len())

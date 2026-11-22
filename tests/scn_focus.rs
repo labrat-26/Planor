@@ -20,8 +20,12 @@ const SEQ_KEYS: &[(&str, &[u8], u8)] = &[
     ("Alt+Shift+Right", &[ALT, SHIFT], RIGHT),
 ];
 
-fn settle() {
-    thread::sleep(Duration::from_millis(1500));
+fn settle(d: &Daemon) {
+    assert!(
+        wait_settled(d, 1, Duration::from_millis(2500)),
+        "focus test daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
 }
 
 /// Give `w` the foreground. Alt is tapped first so Windows allows SetForegroundWindow from this process.
@@ -152,7 +156,7 @@ fn focus_walk(n: usize) {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new(&format!("focuswalk{n}"));
     d.start();
-    settle();
+    settle(&d);
     start_at_window_0(&ws);
     for step in 0..n - 1 {
         press(&[ALT], RIGHT);
@@ -205,7 +209,7 @@ fn focused_window_never_parked() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("neverparked");
     d.start();
-    settle();
+    settle(&d);
     assert!(focus_window(&ws[0]), "setup: could not give window 0 the foreground");
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut seq: Vec<&str> = Vec::new();
@@ -250,7 +254,7 @@ fn system_focus_then_keys() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("sysfocuskeys");
     d.start();
-    settle();
+    settle(&d);
     let mut rng: u64 = 0x2545_F491_4F6C_DD1D;
     let target = (next_rand(&mut rng) % n as u64) as usize;
     if let Err(msg) = system_focus(&ws, target) {
@@ -303,7 +307,7 @@ fn window_sizes_stable_while_scrolling() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("sizes");
     d.start();
-    settle();
+    settle(&d);
     let start: Vec<(i32, i32)> = ws.iter().map(size_of_window).collect();
     let script: [(u8, &str); 8] = [
         (RIGHT, "Alt+Right"),
@@ -343,7 +347,7 @@ fn stack_cycle() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("stack");
     d.start();
-    settle();
+    settle(&d);
     start_at_window_0(&ws);
     press(&[ALT], RIGHT);
     expect_focus(&ws, 1, "Alt+Right to window 1 before grouping");
@@ -414,7 +418,7 @@ fn move_reorders() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("moveorder");
     d.start();
-    settle();
+    settle(&d);
     start_at_window_0(&ws);
     press(&[ALT], RIGHT);
     expect_focus(&ws, 1, "Alt+Right to window 1 before moving");
@@ -458,7 +462,7 @@ fn system_focus_reveals_every_window() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("sysfocus");
     d.start();
-    settle();
+    settle(&d);
     let parked = ws.iter().filter(|w| !reachable(w)).count();
     assert!(
         parked > 0,
@@ -488,7 +492,7 @@ fn pin_toggle() {
     let ws: Vec<Sentinel> = (0..n).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("pin");
     d.start();
-    settle();
+    settle(&d);
     start_at_window_0(&ws);
     press(&[ALT], RIGHT);
     expect_focus(&ws, 1, "Alt+Right to window 1 before pinning");
@@ -594,7 +598,7 @@ fn monitor_hotkeys() {
         .collect();
     let mut d = Daemon::new("monitors");
     d.start();
-    settle();
+    settle(&d);
     assert!(focus_window(&ws[0]), "setup: could not give window 0 (primary) the foreground");
     assert_eq!(
         monitor_of(&ws[0]),

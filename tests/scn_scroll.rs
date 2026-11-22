@@ -451,7 +451,11 @@ fn scroll_boxes_constant_size() {
     let hw = hwnds(&ws);
     let mut d = Daemon::new_animated("scroll-size");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     // Sentinel 0 is parked at start: bring it on screen first, so every sentinel has a settled reference.
     focus_to(&ws, 0);
     let cap = open_primary(mon);
@@ -509,7 +513,11 @@ fn scroll_monotonic_and_gapped() {
     let hw = hwnds(&ws);
     let mut d = Daemon::new_animated("scroll-mono");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     // Sentinels 0 and 1 fit the monitor side by side, so stepping from 0 to 1 never moves the strip. The scroll
     // that has to be measured is the step from 1 into sentinel 2, which is parked until the strip slides.
     focus_to(&ws, 0);
@@ -592,7 +600,11 @@ fn settled_layout_geometry() {
     assert_on_primary(&ws, mon);
     let mut d = Daemon::new("scroll-geom");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     let gap = GAP_PX;
     // Start is focus on the last window (sentinel 2), so Alt+Left moves the strip; checkpoints follow the focus.
     assert_geometry(&ws, work, gap, "settled at start");
@@ -621,7 +633,11 @@ fn resize_then_scroll() {
     assert_on_primary(&ws, mon);
     let mut d = Daemon::new("scroll-resize");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
 
     // Original lengths: each window is measured while it is on screen.
     let mut orig = [0i32; N];
@@ -689,7 +705,11 @@ fn peek_visible() {
     let hw = hwnds(&ws);
     let mut d = Daemon::new("scroll-peek");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     // Focus on the last window (the start state), then the middle, then the first window.
     focus_to(&ws, N - 1);
     let cap = open_primary(mon);
@@ -710,7 +730,11 @@ fn scroll_no_shrink_or_offset_6_windows() {
     let hw = hwnds(&ws);
     let mut d = Daemon::new_animated("scroll-six");
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "scroll daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     focus_to(&ws, N - 1);
     let cap = open_primary(mon);
 

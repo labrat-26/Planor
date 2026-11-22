@@ -280,7 +280,7 @@ impl Daemon {
     }
     fn new(label: &str) -> Self {
         let test_mode = std::env::var("PLANOR_TEST_MODE").as_deref() != Ok("0");
-        let animated = std::env::var("PLANOR_NO_ANIM").as_deref() != Ok("1");
+        let animated = std::env::var("PLANOR_KEEP_ANIM").as_deref() == Ok("1");
         Self::create(label, test_mode, animated)
     }
     fn new_animated(label: &str) -> Self {
@@ -288,7 +288,7 @@ impl Daemon {
         Self::create(label, test_mode, true)
     }
     fn new_with_hooks(label: &str) -> Self {
-        let animated = std::env::var("PLANOR_NO_ANIM").as_deref() != Ok("1");
+        let animated = std::env::var("PLANOR_KEEP_ANIM").as_deref() == Ok("1");
         Self::create(label, false, animated)
     }
     fn register_active(&self) {
@@ -393,6 +393,32 @@ fn wait(mut f: impl FnMut() -> bool) {
         assert!(Instant::now() < until, "window state timeout");
         thread::sleep(Duration::from_millis(30))
     }
+}
+fn wait_until<F: FnMut() -> bool>(timeout: Duration, mut pred: F) -> bool {
+    let until = Instant::now() + timeout;
+    loop {
+        if pred() {
+            return true;
+        }
+        if Instant::now() >= until {
+            return false;
+        }
+        thread::sleep(Duration::from_millis(15));
+    }
+}
+fn wait_settled(d: &Daemon, expected_windows: usize, timeout: Duration) -> bool {
+    wait_until(timeout, || {
+        let out = d.call_output(&["state", "--json"]);
+        if !out.status.success() {
+            return false;
+        }
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
+            return false;
+        };
+        let animating = v["animating"].as_bool().unwrap_or(true);
+        let tiles = v["tiles"].as_array().map(|a| a.len()).unwrap_or(0);
+        !animating && tiles >= expected_windows
+    })
 }
 fn focus_key(vk: u8) {
     send_chord_raw(&[ALT], vk);

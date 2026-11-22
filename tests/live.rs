@@ -339,11 +339,13 @@ wait(||{let [x,y,r,b]=dialog.rect();x>=area.left&&y>=area.top&&r<=area.right&&b<
 fn state_json_matches_real_windows() {
     aware();
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
-    let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
     let mut d = Daemon::new("state-json");
     d.start();
-    wait(|| ws.iter().zip(&before).all(|(w, b)| w.rect() != *b));
-    thread::sleep(Duration::from_millis(250));
+    assert!(
+        wait_settled(&d, ws.len(), Duration::from_millis(2500)),
+        "state-json daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
 
     let out = d.call_output(&["state", "--json"]);
     assert!(
@@ -409,11 +411,13 @@ fn state_json_matches_real_windows() {
 fn perf_spans_and_budgets() {
     aware();
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
-    let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
     let mut d = Daemon::new("perf-check");
     d.start();
-    wait(|| ws.iter().zip(&before).all(|(w, b)| w.rect() != *b));
-    thread::sleep(Duration::from_millis(250));
+    assert!(
+        wait_settled(&d, ws.len(), Duration::from_millis(2500)),
+        "perf-check daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(80));
 
     // Exercise warm scene + gesture-to-place path via IPC keys.
     press(&[ALT], LEFT);

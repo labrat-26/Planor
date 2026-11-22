@@ -127,7 +127,11 @@ fn border_never_paints_over_an_unmanaged_window() {
     // SAFETY: single-threaded test setup; the daemon child inherits the variable.
     unsafe { std::env::set_var("PLANOR_HOLES", "ExternalTestCover") };
     d.start();
-    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wait_settled(&d, 2, Duration::from_millis(2500)),
+        "overlay-holes daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
     // Control: with nothing covering it the focus border is on screen, so a zero below means something.
     assert!(
         eventually(4, || count_two(&cap, FOCUS_RGB, COVER_RGB).is_some_and(|c| c.0 > 0)),
