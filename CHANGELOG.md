@@ -2,7 +2,7 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-22
 
 ### Added
 - **Tray icon**: Planor shows an icon in the notification area with Pause/Resume, Configure and Exit (not in test mode).
