@@ -55,14 +55,18 @@ If you have used a phone's home screen, you already know the idea: swipe to see 
 
 4. **Try it.** Press <kbd>Alt</kbd>+<kbd>→</kbd> to move focus to the next window. Open a new app and watch it join the strip.
 
-> 🔓 **No administrator rights needed.** Planor is a single file that runs as your normal user. There is no installer and no "Run as administrator" prompt. It keeps its settings in `%APPDATA%\planor`, and `autostart` uses your own per-user startup entry, so nothing system-wide is changed.
+> 🔓 **No administrator rights needed.** Planor is a single file that runs as your normal user. There is no setup wizard and no "Run as administrator" prompt (the optional Install button just copies the file into your own profile). It keeps its settings in `%APPDATA%\planor`, and `autostart` uses your own per-user startup entry, so nothing system-wide is changed.
 
 That is all. For the smoothest experience, spend five minutes on the [recommended Windows settings](#-recommended-windows-settings-five-minutes-once) below (the main one: turn off Windows' own touchpad gestures). Then the next sections explain what you can do.
 
-### Start Planor automatically when you sign in
+### Settings, the tray icon, and starting Planor when you sign in
+
+While Planor runs it shows an icon in the notification area (near the clock). Click it for **Pause**, **Configure** and **Exit**. **Configure** opens the settings window (you can also run `.\planor.exe settings`): every option, the app rules, a colour picker, and an **Install** page. Changes apply right away and match your Windows light or dark theme.
+
+To start Planor with Windows, open **Configure > Install**, press **Install** (this copies Planor to `%LOCALAPPDATA%\Planor` for your user only), then switch on **Start Planor when I sign in**. The same page can uninstall it again.
 
 ```powershell
-.\planor.exe autostart on     # and "off" to undo it
+.\planor.exe autostart on     # same switch, but only from the installed copy; "off" undoes it
 ```
 
 ### Stop it any time
@@ -248,8 +252,8 @@ Run these from a terminal with `planor.exe <command>`.
 | `pin` | Pin or unpin the focused window |
 | `pull-orphans` | Fetch back any window that got lost off-screen |
 | `reload` | Re-read your settings file |
-| `config` | Open the friendly settings editor |
-| `autostart on` / `off` | Start with Windows, or don't |
+| `settings` (also `config`) | Open the settings window |
+| `autostart on` / `off` | Start with Windows, or don't (needs the installed copy; the window's Install page does the same) |
 | `state --json` | Show what Planor currently thinks of your windows |
 
 ---
