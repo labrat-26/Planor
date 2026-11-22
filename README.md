@@ -168,7 +168,7 @@ The animation shows a portrait monitor on the left and a landscape one on the ri
 
 Hold <kbd>Win</kbd> and turn the mouse wheel to scroll a portrait strip up and down. <kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> steps focus along it.
 
-### 4. New windows tile themselves
+### 4. New windows tile themselves, and travel between monitors
 
 You never have to arrange anything. Planor decides the layout as windows open, on landscape and portrait monitors alike. Below, both monitors get the same three apps at the same moments (on the portrait one, the split is top and bottom):
 
@@ -183,9 +183,7 @@ You never have to arrange anything. Planor decides the layout as windows open, o
 
 Close a window and the others close the gap. Want a different split or size? Change `default_tile_share` and `first_pair_split` in the [settings](#-making-it-yours).
 
-### 5. Throw a window to another monitor
-
-Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor. In the animation, the portrait monitor sits on the left: the window is flicked onto it, then flicked back to the landscape monitor.
+**Not on the right monitor?** New windows open on the monitor under your mouse pointer, and you can move them to another monitor any time. Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor. In the animation, the portrait monitor sits on the left: the window is flicked onto it, then flicked back to the landscape monitor.
 
 <p align="center">
   <img src="docs/img/fling.svg" alt="Animation: a window is flicked left onto the portrait monitor and back to the landscape monitor" width="800">
@@ -193,7 +191,7 @@ Carry a window with four fingers and **flick** it sideways as you lift. It flies
 
 You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <kbd>Alt</kbd>+<kbd>[</kbd> to jump focus between monitors.
 
-### 6. What the coloured outlines mean
+### 5. What the coloured outlines mean
 
 | Outline | Meaning |
 |---|---|
