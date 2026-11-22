@@ -11,6 +11,9 @@ All notable changes to Planor and its developer tooling harness are documented h
 ### Fixed
 - **Sideways three-finger swipes sometimes did nothing** (found by the owner's first recording): the axis was locked after 3 units of travel, and fingers that settle downwards as they land locked a sideways swipe vertical. Now locked after 3 units only when one axis leads 1.5x, else at `axis_lock_deadzone`. Fixture `owner-mixed-3and4-finger.jsonl` (12 real gestures) replays on both orientations; `tests/core.rs::axis_lock_waits_for_a_clear_direction_owner_recording`.
 
+### Group zone: the middle half of the window
+- Owner's decision after the grouping session (a 120 px box was hit by 5 of 12 real four-finger drops): the stack zone covers 50 % of the window's width and height, centred (`layout.stack_zone_percent = 50`, replaces `stack_zone_px`). Outside it, a drop on the same monitor still swaps. Test `drop_zone_is_the_middle_half_of_the_window_owner_decision` replaces the 120 px decision test (stale against the new decision); the swap drop points in two sim tests moved from 1/4 and 1/5 to 1/8 of the target, outside the new zone.
+
 ### From the owner's top-up recording (63 gestures, Planor live)
 - **Win + wheel is for the mouse only** (owner's choice): only whole notches (multiples of 120) count; the touchpad's fine scroll steps (-3, -7, ... and -5355 in its own momentum) pass through to the app. At most two notches per event. Guide top-up steps now ask for the mouse.
 - **Fling threshold 1500 -> 900 units/s**: the owner's real flicks ran at about 1000-1100 units/s and never counted as flicks.

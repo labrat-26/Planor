@@ -483,8 +483,8 @@ mod tests {
             assert!(m.sections.contains(&s.to_string()), "section {s}: {:?}", m.sections);
         }
         assert!(!m.sections.contains(&"rules".to_string()), "[[rules]] stays in the file");
-        let z = idx(&m, "layout", "stack_zone_px");
-        assert_eq!(m.value(z), toml::Value::Integer(120));
+        let z = idx(&m, "layout", "stack_zone_percent");
+        assert_eq!(m.value(z), toml::Value::Integer(50));
         assert!(m.entries[z].help.contains("stack zone"), "help: {}", m.entries[z].help);
     }
 
@@ -525,9 +525,9 @@ mod tests {
 
     #[test]
     fn a_user_file_with_only_a_few_keys_and_an_invalid_one() {
-        let m = Model::from_text(Path::new("p.toml"), "[layout]\ngap_px = 12\nstack_zone_px = -3\n").unwrap();
+        let m = Model::from_text(Path::new("p.toml"), "[layout]\ngap_px = 12\nstack_zone_percent = -3\n").unwrap();
         assert_eq!(m.value(idx(&m, "layout", "gap_px")), toml::Value::Integer(12));
-        assert_eq!(m.value(idx(&m, "layout", "stack_zone_px")), toml::Value::Integer(120), "invalid -> default, as the daemon does");
+        assert_eq!(m.value(idx(&m, "layout", "stack_zone_percent")), toml::Value::Integer(50), "invalid -> default, as the daemon does");
         assert_eq!(m.value(idx(&m, "borders", "width_px")), toml::Value::Integer(2), "missing -> default");
     }
 

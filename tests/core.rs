@@ -744,22 +744,18 @@ fn mockup_spec_states_match_layout() {
 }
 
 #[test]
-fn drop_zone_is_a_small_centre_box_owner_decision_n012() {
-    // Owner decision (note N-012, 2026-11-22) supersedes the mockup's outer 20% / middle 60% bands: the stack
-    // zone is a small box in the middle of the window (stack_zone_px, at most a third either way) and every
-    // other point of a window swaps.
+fn drop_zone_is_the_middle_half_of_the_window_owner_decision() {
+    // Owner decisions: N-012 (2026-11-22) replaced the mockup's outer 20 % / middle 60 % bands with a centre box;
+    // after a 120 px box was hit by only 5 of 12 real four-finger drops, the owner chose "way bigger, like 50 %
+    // of the window in the center". Everything else on a window swaps.
     let r = Rect { x: 100, y: 50, w: 1200, h: 900 };
-    assert_eq!(stack_zone(r, 120), Rect { x: 640, y: 440, w: 120, h: 120 });
-    let small = Rect { x: 0, y: 0, w: 240, h: 150 };
-    assert_eq!(stack_zone(small, 120), Rect { x: 80, y: 50, w: 80, h: 50 }, "never more than a third");
-    let z = stack_zone(r, 120);
-    let area = (z.w * z.h) as f64 / (r.w * r.h) as f64;
-    assert!(area < 0.02, "the zone covers {:.1}% of the window, expected < 2%", area * 100.);
-}
-
-// ---- Section 3.4 & 9.7: Input replay and golden gesture fixture tests ----
-
-#[test]
+    assert_eq!(stack_zone(r, 50), Rect { x: 400, y: 275, w: 600, h: 450 });
+    let z = stack_zone(r, 50);
+    assert_eq!((z.x + z.w / 2, z.y + z.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "centred");
+    let quarter = (z.w * z.h) as f64 / (r.w * r.h) as f64;
+    assert!((quarter - 0.25).abs() < 0.01, "half the width and half the height: a quarter of the area");
+    assert_eq!(stack_zone(r, 500), stack_zone(r, 95), "never the whole window: there must be room to swap");
+}#[test]
 fn replay_three_finger_scroll_pad_trace_matches_within_tolerance() {
     let raw = include_str!("fixtures/gestures/three_finger_scroll_right.pad.log");
     let events = replay::parse_pad_trace(raw);

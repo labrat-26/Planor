@@ -463,11 +463,13 @@ pub enum Drag {
     /// Exchange places with the target.
     Swap,
 }
-/// The stack zone: a small box in the middle of a window, `side` px square at most and never more than a
-/// third of the window either way. Shown filled while a window is being dragged.
-pub fn stack_zone(r: Rect, side: i32) -> Rect {
-    let w = side.min(r.w / 3).max(1);
-    let h = side.min(r.h / 3).max(1);
+/// The stack zone: a box in the middle of a window covering `percent` of its width and of its height (owner's
+/// choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger drops). Shown filled
+/// while a window is being dragged.
+pub fn stack_zone(r: Rect, percent: i32) -> Rect {
+    let p = percent.clamp(5, 95);
+    let w = (r.w * p / 100).max(1);
+    let h = (r.h * p / 100).max(1);
     Rect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h }
 }
 /// What a drop does. Purely positional (no speed or dwell), so it never flickers:

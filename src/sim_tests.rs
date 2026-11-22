@@ -968,9 +968,9 @@ fn n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientat
         let (a, b) = (visible[0], visible[1]);
         let order = |h: &SimHarness| h.engine.strips[&key].columns.iter().map(|c| c.members[0]).collect::<Vec<_>>();
         let before = order(&h);
-        // Off-centre on b (a quarter of the way in): swap. Nothing dodges while dragging.
+        // Off-centre on b (outside the middle half, an eighth of the way in): swap. Nothing dodges while dragging.
         let rb = h.rect(b);
-        mouse_drag(&mut h, a, (rb.x + rb.w / 4, rb.y + rb.h / 4));
+        mouse_drag(&mut h, a, (rb.x + rb.w / 8, rb.y + rb.h / 8));
         assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Swap), "{mon}: off-centre is a swap");
         let z = zones(&h);
         assert!(!z.is_empty(), "{mon}: stack zones are drawn while dragging");
@@ -1035,7 +1035,7 @@ fn n012_drop_across_monitors_goes_beside_and_the_zones_follow_the_cursor() {
     let port = (1, "MON2".to_string());
     let target = h.engine.strips[&port].columns[0].members[0];
     let rt = h.rect(target);
-    mouse_drag(&mut h, 101, (rt.x + rt.w / 5, rt.y + rt.h / 5));
+    mouse_drag(&mut h, 101, (rt.x + rt.w / 8, rt.y + rt.h / 8));
     let z = zones(&h);
     assert!(!z.is_empty() && z.iter().all(|z| z.monitor == "MON2"), "highlights moved to the portrait monitor: {z:?}");
     assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Before), "from another monitor: beside, no swap");

@@ -1115,7 +1115,7 @@ impl<B: WindowBackend> Engine<B> {
             if let (Some(k), Some(c)) = (&d.destination, color("drop_target_color")) {
                 if let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop) {
                     let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
-                    let side = self.cfg["layout"]["stack_zone_px"].as_integer().unwrap_or(120) as i32;
+                    let side = self.cfg["layout"]["stack_zone_percent"].as_integer().unwrap_or(50) as i32;
                     for (id, _, z) in drop_zones(s, peek, side, d.id) {
                         let hot = d.target == Some(id) && d.mode == planor::Drag::Stack;
                         zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot { 0.85 } else { 0.35 } });
@@ -1827,7 +1827,7 @@ impl<B: WindowBackend> Engine<B> {
         }
         let _ = velocity;
         let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
-        let side = self.cfg["layout"]["stack_zone_px"].as_integer().unwrap_or(120) as i32;
+        let side = self.cfg["layout"]["stack_zone_percent"].as_integer().unwrap_or(50) as i32;
         // Hit-test the visible part of each window (a group member beyond its peek is clipped away).
         let target = self.strips.get(&k).and_then(|s| {
             s.rects(peek)
