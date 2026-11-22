@@ -48,17 +48,61 @@ impl SaveScheduler {
 
 const SYNTAX_ERROR: &str = "planor.toml has a syntax error. Fix it in a text editor; the settings window will not overwrite it.";
 
-/// Set setting `i` to `v`. Starts from what is on disk (when nothing of ours is waiting to be saved) so a
-/// hand edit made while the window was open survives; refuses to touch a file that does not parse.
-pub fn apply_change(model: &mut Model, i: usize, v: toml::Value) -> std::result::Result<(), String> {
+/// Get the model ready for an edit: refuse a file that does not parse, and start from what is on disk
+/// (when nothing of ours is waiting to be saved) so a hand edit made while the window was open survives.
+fn prepare(model: &mut Model) -> std::result::Result<(), String> {
     if Model::load_error(&model.path).is_some() {
         return Err(SYNTAX_ERROR.into());
     }
     if !model.dirty && model.path.exists() {
         model.reload_from_disk().map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+/// Set setting `i` to `v` (validated like the daemon does, and hotkeys must be ones it can bind).
+pub fn apply_change(model: &mut Model, i: usize, v: toml::Value) -> std::result::Result<(), String> {
+    if model.entries[i].section == "hotkeys"
+        && let Some(s) = v.as_str()
+        && !crate::settings_model::hotkey_valid(s)
+    {
+        return Err("not a hotkey Planor can bind; press a key combination such as Alt+Left".into());
+    }
+    prepare(model)?;
     model.set(i, v)
 }
+/// Replace the `[[rules]]` rows.
+pub fn apply_rules(model: &mut Model, rules: &[crate::settings_model::Rule]) -> std::result::Result<(), String> {
+    prepare(model)?;
+    model.set_rules(rules)
+}
+
+/// The text for a captured key chord, in the style of `planor.example.toml` ("Ctrl+Alt+Shift+Backspace").
+/// `None` for a key Planor cannot bind, or a chord with no modifier (a bare key would hijack typing).
+pub fn hotkey_text(ctrl: bool, alt: bool, shift: bool, win: bool, vk: u32) -> Option<String> {
+    let key = match vk {
+        0x25 => "Left".to_string(),
+        0x26 => "Up".to_string(),
+        0x27 => "Right".to_string(),
+        0x28 => "Down".to_string(),
+        0x08 => "Backspace".to_string(),
+        0xDB => "[".to_string(),
+        0xDD => "]".to_string(),
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk)?.to_string(),
+        _ => return None,
+    };
+    if !(ctrl || alt || shift || win) {
+        return None;
+    }
+    let mut parts = vec![];
+    for (on, name) in [(ctrl, "Ctrl"), (alt, "Alt"), (shift, "Shift"), (win, "Win")] {
+        if on {
+            parts.push(name.to_string());
+        }
+    }
+    parts.push(key);
+    Some(parts.join("+"))
+}
+
 /// Write the file unless it is currently invalid.
 pub fn save_guarded(model: &mut Model) -> std::result::Result<(), String> {
     if Model::load_error(&model.path).is_some() {
@@ -85,9 +129,9 @@ use windows_sys::Win32::{
     Graphics::{Gdi::*, GdiPlus::*},
     System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
     UI::{
-        Controls::*,
+        Controls::{Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW}, *},
         HiDpi::*,
-        Input::KeyboardAndMouse::{EnableWindow, GetFocus, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_UP},
+        Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_UP},
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::*,
     },
@@ -98,6 +142,10 @@ const ROW_BASE: usize = 1000;
 const TIMER_SAVE: usize = 1;
 const TIMER_REBUILD: usize = 2;
 const INSTALL_PAGE: &str = "Install";
+const RULES_PAGE: &str = "Rules";
+const RULE_BASE: usize = 5000;
+const ADD_BASE: usize = 6000;
+const ADD_ERR: usize = 100_000;
 
 struct Fonts {
     title: HFONT,
@@ -112,6 +160,7 @@ struct Brushes {
 }
 struct Row {
     entry: Option<usize>,
+    err_key: Option<usize>,
     card: RECT,
     title: String,
     title_rc: RECT,
@@ -147,6 +196,8 @@ struct State {
     errors: HashMap<usize, String>,
     hover: HWND,
     nav_hover: Option<usize>,
+    new_matcher: crate::settings_model::RuleMatch,
+    new_action: crate::settings_model::RuleAction,
     scheduler: SaveScheduler,
     stamp: Option<(std::time::SystemTime, u64)>,
     quiet: bool,
@@ -462,6 +513,7 @@ fn build_page(st: &mut State) {
         let card = rect(card_l, y, card_r, y + h);
         st.rows.push(Row {
             entry: None,
+            err_key: None,
             card,
             title: "Install".into(),
             title_rc: rect(card_l + pad, y + pad, card_r - pad, y + pad + s(20)),
@@ -473,6 +525,8 @@ fn build_page(st: &mut State) {
             reset: std::ptr::null_mut(),
         });
         y += h + gap;
+    } else if page == RULES_PAGE {
+        y = build_rules(st, y);
     } else {
         for i in st.model.in_section(&page) {
             let entry = st.model.entries[i].clone();
@@ -514,6 +568,9 @@ fn build_page(st: &mut State) {
                     };
                     ctl = child(st, "EDIT", &shown, ES_AUTOHSCROLL as u32 | WS_TABSTOP, 0, rect(inner_l, cy + (ctl_h - eh) / 2, ctl_rc.right - s(12), cy + (ctl_h - eh) / 2 + eh), base, body);
                     field = Some(ctl_rc);
+                    if matches!(other, Control::Hotkey) {
+                        unsafe { SetWindowSubclass(ctl, Some(hotkey_proc), 3, 0) };
+                    }
                     if matches!(other, Control::Number { .. }) {
                         unsafe { SetWindowSubclass(ctl, Some(edit_proc), 1, i) };
                     }
@@ -529,6 +586,7 @@ fn build_page(st: &mut State) {
             }
             st.rows.push(Row {
                 entry: Some(i),
+                err_key: Some(i),
                 card,
                 title,
                 title_rc: rect(card_l + pad, top, card_l + pad + text_w, top + s(20)),
@@ -546,6 +604,104 @@ fn build_page(st: &mut State) {
     st.quiet = false;
     apply_scroll(st);
     unsafe { InvalidateRect(st.page, std::ptr::null(), 1) };
+}
+
+/// Card geometry shared by the Rules page: text on the left, controls on the right.
+struct Geo {
+    card: RECT,
+    title_rc: RECT,
+    desc_rc: RECT,
+    ctl: RECT,
+    reset: RECT,
+    h: i32,
+}
+fn geo(st: &State, y: i32, desc: &str, ctl_w: i32, reset_w: i32) -> Geo {
+    let s = |px: i32| mul(px, st.dpi);
+    let (margin, pad) = (s(36), s(16));
+    let (l, r) = (margin, (st.page_w - margin).max(margin + s(420)));
+    let text_w = (r - l - 2 * pad - ctl_w - reset_w - s(24)).max(s(160));
+    let desc_h = if desc.is_empty() { 0 } else { measure_height(st, st.fonts.small, desc, text_w) };
+    let block = s(20) + if desc_h > 0 { s(2) + desc_h } else { 0 };
+    let h = (pad * 2 + block).max(s(56));
+    let top = y + (h - block) / 2;
+    let cy = y + (h - s(32)) / 2;
+    let ctl = rect(r - pad - ctl_w, cy, r - pad, cy + s(32));
+    Geo {
+        card: rect(l, y, r, y + h),
+        title_rc: rect(l + pad, top, l + pad + text_w, top + s(20)),
+        desc_rc: rect(l + pad, top + s(22), l + pad + text_w, top + s(22) + desc_h.max(s(16))),
+        reset: rect(ctl.left - s(8) - reset_w, cy, ctl.left - s(8), cy + s(32)),
+        ctl,
+        h,
+    }
+}
+
+/// The Rules page: one card per `[[rules]]` row, then the group that adds a new one. Returns the next y.
+fn build_rules(st: &mut State, mut y: i32) -> i32 {
+    let dpi = st.dpi;
+    let s = |px: i32| mul(px, dpi);
+    let gap = s(6);
+    let body = st.fonts.body;
+    let hover_button = |h: HWND| unsafe { SetWindowSubclass(h, Some(hover_proc), 2, 0) };
+    let push = |st: &mut State, g: &Geo, title: &str, desc: &str, field: bool, ctl: HWND, reset: HWND, err_key: Option<usize>| {
+        st.rows.push(Row {
+            entry: None,
+            err_key,
+            card: g.card,
+            title: title.into(),
+            title_rc: g.title_rc,
+            desc: desc.into(),
+            desc_rc: g.desc_rc,
+            field: field.then_some(g.ctl),
+            swatch: false,
+            ctl,
+            reset,
+        });
+    };
+    let rules = st.model.rules();
+    if rules.is_empty() {
+        let g = geo(st, y, "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.", 0, 0);
+        push(st, &g, "No rules", "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.", false, std::ptr::null_mut(), std::ptr::null_mut(), None);
+        y += g.h + gap;
+    }
+    for (n, r) in rules.iter().enumerate() {
+        let desc = format!("Matches by {}", r.matcher.key());
+        let g = geo(st, y, &desc, s(120), s(84));
+        let base = RULE_BASE + n * 4;
+        let action = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, base, body);
+        let remove = child(st, "BUTTON", "Remove", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.reset, base + 1, body);
+        hover_button(action);
+        hover_button(remove);
+        push(st, &g, &r.value, &desc, false, action, remove, None);
+        y += g.h + gap;
+    }
+    y += s(18);
+    // Match by
+    let g1 = geo(st, y, "Whether the rule looks at the program's file name or the window's class.", s(160), 0);
+    let b1 = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g1.ctl, ADD_BASE, body);
+    hover_button(b1);
+    push(st, &g1, "New rule: match by", "Whether the rule looks at the program's file name or the window's class.", true, b1, std::ptr::null_mut(), None);
+    y += g1.h + gap;
+    // Name
+    let desc = "For example Taskmgr.exe, or a window class such as Shell_Dialog.";
+    let g2 = geo(st, y, desc, s(220), 0);
+    let eh = s(20);
+    let edit = child(st, "EDIT", "", ES_AUTOHSCROLL as u32 | WS_TABSTOP, 0, rect(g2.ctl.left + s(12), g2.ctl.top + (s(32) - eh) / 2, g2.ctl.right - s(12), g2.ctl.top + (s(32) - eh) / 2 + eh), ADD_BASE + 1, body);
+    push(st, &g2, "New rule: name", desc, true, edit, std::ptr::null_mut(), Some(ADD_ERR));
+    y += g2.h + gap;
+    // Action
+    let g3 = geo(st, y, "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.", s(160), 0);
+    let b3 = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g3.ctl, ADD_BASE + 2, body);
+    hover_button(b3);
+    push(st, &g3, "New rule: action", "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.", true, b3, std::ptr::null_mut(), None);
+    y += g3.h + gap;
+    // Add
+    let g4 = geo(st, y, "", s(120), 0);
+    let b4 = child(st, "BUTTON", "Add rule", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g4.ctl, ADD_BASE + 3, body);
+    hover_button(b4);
+    push(st, &g4, "Add the new rule", "", false, b4, std::ptr::null_mut(), None);
+    y += g4.h + gap;
+    y
 }
 
 fn apply_scroll(st: &mut State) {
@@ -664,27 +820,118 @@ fn change(st: &mut State, i: usize, v: toml::Value) {
     }
 }
 
-fn choose(st: &mut State, i: usize, choices: &'static [&'static str]) {
-    let Some(r) = row_of(st, i) else { return };
-    let current = st.model.value(i);
+/// Show `items` in a menu under `button` (the current one ticked) and return the index picked.
+fn popup(st: &State, button: HWND, items: &[&str], current: Option<usize>) -> Option<usize> {
     unsafe {
         let menu = CreatePopupMenu();
-        for (n, c) in choices.iter().enumerate() {
-            let flags = MF_STRING | if current.as_str() == Some(c) { MF_CHECKED } else { 0 };
-            AppendMenuW(menu, flags, n + 1, wide(c).as_ptr());
+        for (n, item) in items.iter().enumerate() {
+            let flags = MF_STRING | if current == Some(n) { MF_CHECKED } else { 0 };
+            AppendMenuW(menu, flags, n + 1, wide(item).as_ptr());
         }
-        let mut at = POINT { x: 0, y: (r.field.map_or(0, |f| f.bottom - f.top)) };
-        ClientToScreen(r.ctl, &mut at);
+        let mut rc: RECT = std::mem::zeroed();
+        GetClientRect(button, &mut rc);
+        let mut at = POINT { x: 0, y: rc.bottom };
+        ClientToScreen(button, &mut at);
         let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y + 2, 0, st.hwnd, std::ptr::null());
         DestroyMenu(menu);
-        if picked > 0 {
-            change(st, i, toml::Value::String(choices[picked as usize - 1].to_string()));
+        (picked > 0).then(|| picked as usize - 1)
+    }
+}
+
+fn choose(st: &mut State, i: usize, choices: &'static [&'static str]) {
+    let Some(ctl) = row_of(st, i).map(|r| r.ctl) else { return };
+    let current = st.model.value(i);
+    let at = choices.iter().position(|c| current.as_str() == Some(c));
+    if let Some(n) = popup(st, ctl, choices, at) {
+        change(st, i, toml::Value::String(choices[n].to_string()));
+    }
+}
+
+fn matcher_names() -> [&'static str; 2] {
+    ["Process", "Class"]
+}
+fn action_names() -> [&'static str; 3] {
+    ["Ignore", "Float", "Tile"]
+}
+fn matcher_at(n: usize) -> crate::settings_model::RuleMatch {
+    if n == 0 { crate::settings_model::RuleMatch::Process } else { crate::settings_model::RuleMatch::Class }
+}
+
+fn rules_change(st: &mut State, rules: Vec<crate::settings_model::Rule>) {
+    match apply_rules(&mut st.model, &rules) {
+        Ok(()) => {
+            st.errors.remove(&ADD_ERR);
+            start_save_timer(st);
+        }
+        Err(e) => {
+            st.errors.insert(ADD_ERR, e);
+        }
+    }
+    build_page(st);
+}
+
+/// Clicks on the Rules page: change a rule's action, remove it, or fill in and add a new one.
+fn rules_command(st: &mut State, id: usize, code: u32) {
+    use crate::settings_model::{Rule, RuleAction};
+    if code != BN_CLICKED {
+        return;
+    }
+    let page = st.page;
+    let item = |id: usize| unsafe { GetDlgItem(page, id as i32) };
+    if id >= ADD_BASE {
+        match id - ADD_BASE {
+            0 => {
+                let cur = (st.new_matcher == crate::settings_model::RuleMatch::Class) as usize;
+                if let Some(n) = popup(st, item(id), &matcher_names(), Some(cur)) {
+                    st.new_matcher = matcher_at(n);
+                    unsafe { InvalidateRect(item(id), std::ptr::null(), 0) };
+                }
+            }
+            2 => {
+                let cur = RuleAction::ALL.iter().position(|a| *a == st.new_action);
+                if let Some(n) = popup(st, item(id), &action_names(), cur) {
+                    st.new_action = RuleAction::ALL[n];
+                    unsafe { InvalidateRect(item(id), std::ptr::null(), 0) };
+                }
+            }
+            3 => {
+                let name = text_of(item(ADD_BASE + 1)).trim().to_string();
+                if name.is_empty() {
+                    st.errors.insert(ADD_ERR, "Type the process name (like Taskmgr.exe) or window class first.".into());
+                    build_page(st);
+                    return;
+                }
+                let mut rules = st.model.rules();
+                rules.push(Rule { matcher: st.new_matcher, value: name, action: st.new_action });
+                rules_change(st, rules);
+            }
+            _ => (),
+        }
+    } else {
+        let (n, slot) = ((id - RULE_BASE) / 4, (id - RULE_BASE) % 4);
+        let mut rules = st.model.rules();
+        if n >= rules.len() {
+            return;
+        }
+        if slot == 1 {
+            rules.remove(n);
+            rules_change(st, rules);
+        } else if slot == 0 {
+            let cur = RuleAction::ALL.iter().position(|a| *a == rules[n].action);
+            if let Some(pick) = popup(st, item(id), &action_names(), cur) {
+                rules[n].action = RuleAction::ALL[pick];
+                rules_change(st, rules);
+            }
         }
     }
 }
 
 fn row_command(st: &mut State, id: usize, code: u32) {
     if st.quiet || id < ROW_BASE {
+        return;
+    }
+    if id >= RULE_BASE {
+        rules_command(st, id, code);
         return;
     }
     let (i, slot) = ((id - ROW_BASE) / 4, (id - ROW_BASE) % 4);
@@ -749,6 +996,12 @@ fn retheme(st: &mut State) {
 
 // ---- painting ------------------------------------------------------------------------------------------
 
+fn is_edit(h: HWND) -> bool {
+    let mut buf = [0u16; 16];
+    let n = unsafe { GetClassNameW(h, buf.as_mut_ptr(), 16) }.max(0) as usize;
+    String::from_utf16_lossy(&buf[..n]).eq_ignore_ascii_case("EDIT")
+}
+
 fn paint_page(st: &State, c: &Canvas, clip: RECT) {
     let (pal, dpi) = (st.pal, st.dpi);
     let s = |px: i32| mul(px, dpi);
@@ -760,7 +1013,7 @@ fn paint_page(st: &State, c: &Canvas, clip: RECT) {
             continue;
         }
         c.rrect(row.card, s(4) as f32, Some(pal.card), Some((pal.border, 1.0)));
-        let error = row.entry.and_then(|i| st.errors.get(&i));
+        let error = row.err_key.and_then(|k| st.errors.get(&k));
         // a card with no description makes room for the error line by lifting its title
         let lift = if error.is_some() && row.desc.is_empty() { s(10) } else { 0 };
         let up = |r: RECT| rect(r.left, r.top - lift, r.right, r.bottom - lift);
@@ -770,15 +1023,17 @@ fn paint_page(st: &State, c: &Canvas, clip: RECT) {
             None if !row.desc.is_empty() => c.text(&row.desc, row.desc_rc, st.fonts.small, pal.subtext, DT_LEFT | DT_WORDBREAK),
             None => (),
         }
-        let (Some(f), Some(i)) = (row.field, row.entry) else { continue };
-        if matches!(control_for(&st.model.entries[i]), Control::Choice(_)) {
-            continue; // the drop-down paints itself
+        let Some(f) = row.field else { continue };
+        let own_paint = matches!(row.entry.map(|i| control_for(&st.model.entries[i])), Some(Control::Choice(_)))
+            || (row.entry.is_none() && !is_edit(row.ctl));
+        if own_paint {
+            continue; // a drop-down paints itself
         }
         let focused = unsafe { GetFocus() } == row.ctl;
         c.rrect(f, s(4) as f32, Some(pal.field), Some((if error.is_some() { pal.error } else { pal.border }, 1.0)));
         let line = if error.is_some() { pal.error } else if focused { st.accent } else { pal.field_line };
         c.fill(rect(f.left + s(3), f.bottom - if focused { s(2) } else { 1 }, f.right - s(3), f.bottom), line);
-        if row.swatch {
+        if let (true, Some(i)) = (row.swatch, row.entry) {
             let hex = st.model.value(i);
             let hex = hex.as_str().unwrap_or("#000000");
             if let Some(color) = theme::hex_to_colorref(hex) {
@@ -788,50 +1043,80 @@ fn paint_page(st: &State, c: &Canvas, clip: RECT) {
     }
 }
 
+fn paint_dropdown(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool) {
+    let (pal, dpi) = (st.pal, st.dpi);
+    let s = |px: i32| mul(px, dpi);
+    c.rrect(rc, s(4) as f32, Some(if hot { pal.hover } else { pal.field }), Some((pal.border, 1.0)));
+    c.fill(rect(rc.left + s(3), rc.bottom - 1, rc.right - s(3), rc.bottom), pal.field_line);
+    c.text(text, rect(rc.left + s(12), rc.top, rc.right - s(36), rc.bottom), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    c.text("\u{E70D}", rect(rc.right - s(32), rc.top, rc.right - s(10), rc.bottom), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+/// A flat text button: accent-coloured text with a hover fill, or (`filled`) an accent-filled button.
+fn paint_text_button(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool, filled: bool) {
+    let (pal, dpi) = (st.pal, st.dpi);
+    let radius = mul(4, dpi) as f32;
+    if filled {
+        c.rrect(rc, radius, Some(st.accent), None);
+        c.text(text, rc, st.fonts.body, if st.dark { 0 } else { 0xFFFFFF }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+        if hot {
+            c.rrect(rc, radius, Some(pal.hover), None);
+        }
+        c.text(text, rc, st.fonts.body, st.accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
 fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
     let id = d.CtlID as usize;
     if id < ROW_BASE {
         return;
     }
-    let (i, slot) = ((id - ROW_BASE) / 4, (id - ROW_BASE) % 4);
     let (pal, dpi) = (st.pal, st.dpi);
     let s = |px: i32| mul(px, dpi);
     let rc = d.rcItem;
     let hover = st.hover == d.hwndItem;
     let pressed = d.itemState & ODS_SELECTED != 0;
+    let hot = hover || pressed;
     let focus = d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0;
     buffered(d.hDC, rc, |c| {
         c.fill(rc, pal.card);
-        if slot == 1 {
-            if hover || pressed {
-                c.rrect(rc, s(4) as f32, Some(pal.hover), None);
+        if id >= ADD_BASE {
+            match id - ADD_BASE {
+                0 => paint_dropdown(st, c, rc, matcher_names()[(st.new_matcher == crate::settings_model::RuleMatch::Class) as usize], hot),
+                2 => paint_dropdown(st, c, rc, action_names()[crate::settings_model::RuleAction::ALL.iter().position(|a| *a == st.new_action).unwrap_or(0)], hot),
+                _ => paint_text_button(st, c, rc, "Add rule", hot, true),
             }
-            c.text("Reset", rc, st.fonts.body, st.accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else if id >= RULE_BASE {
+            let (n, slot) = ((id - RULE_BASE) / 4, (id - RULE_BASE) % 4);
+            if slot == 1 {
+                paint_text_button(st, c, rc, "Remove", hot, false);
+            } else if let Some(r) = st.model.rules().get(n) {
+                paint_dropdown(st, c, rc, action_names()[crate::settings_model::RuleAction::ALL.iter().position(|a| *a == r.action).unwrap_or(0)], hot);
+            }
         } else {
-            match control_for(&st.model.entries[i]) {
-                Control::Check => {
-                    let on = st.model.value(i).as_bool() == Some(true);
-                    let (w, h) = (s(40), s(20));
-                    let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
-                    c.text(if on { "On" } else { "Off" }, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, pal.text, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                    let cy = sw.top + h / 2;
-                    let knob = if hover || pressed { s(14) } else { s(12) };
-                    if on {
-                        c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
-                        c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
-                    } else {
-                        c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
-                        c.circle(sw.left + s(10), cy, knob, pal.track);
+            let (i, slot) = ((id - ROW_BASE) / 4, (id - ROW_BASE) % 4);
+            if slot == 1 {
+                paint_text_button(st, c, rc, "Reset", hot, false);
+            } else {
+                match control_for(&st.model.entries[i]) {
+                    Control::Check => {
+                        let on = st.model.value(i).as_bool() == Some(true);
+                        let (w, h) = (s(40), s(20));
+                        let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
+                        c.text(if on { "On" } else { "Off" }, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, pal.text, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+                        let cy = sw.top + h / 2;
+                        let knob = if hot { s(14) } else { s(12) };
+                        if on {
+                            c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
+                            c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
+                        } else {
+                            c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
+                            c.circle(sw.left + s(10), cy, knob, pal.track);
+                        }
                     }
+                    Control::Choice(_) => paint_dropdown(st, c, rc, st.model.value(i).as_str().unwrap_or(""), hot),
+                    _ => (),
                 }
-                Control::Choice(_) => {
-                    c.rrect(rc, s(4) as f32, Some(if hover || pressed { pal.hover } else { pal.field }), Some((pal.border, 1.0)));
-                    c.fill(rect(rc.left + s(3), rc.bottom - 1, rc.right - s(3), rc.bottom), pal.field_line);
-                    let v = st.model.value(i);
-                    c.text(v.as_str().unwrap_or(""), rect(rc.left + s(12), rc.top, rc.right - s(36), rc.bottom), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-                    c.text("\u{E70D}", rect(rc.right - s(32), rc.top, rc.right - s(10), rc.bottom), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                }
-                _ => (),
             }
         }
         if focus {
@@ -927,6 +1212,56 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
     }
 }
 
+/// A hotkey box: it records the key combination pressed instead of accepting typed text.
+unsafe extern "system" fn hotkey_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+    unsafe {
+        match msg {
+            WM_KEYDOWN | WM_SYSKEYDOWN => {
+                let vk = wp as u32;
+                let down = |k: u16| GetKeyState(k as i32) < 0;
+                if vk == 0x09 || (vk == 0x73 && down(VK_MENU)) {
+                    return DefSubclassProc(hwnd, msg, wp, lp); // Tab moves on, Alt+F4 still closes
+                }
+                if matches!(vk as u16, VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN) {
+                    return 0;
+                }
+                if let Some(text) = hotkey_text(down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT), down(VK_LWIN) || down(VK_RWIN), vk) {
+                    set_text(hwnd, &text); // EN_CHANGE then validates and saves it
+                }
+                0
+            }
+            WM_CHAR | WM_SYSCHAR | WM_PASTE | WM_CUT | WM_CLEAR => 0,
+            _ => DefSubclassProc(hwnd, msg, wp, lp),
+        }
+    }
+}
+
+/// Open the system colour chooser for a colour setting and, if confirmed, write the chosen `#RRGGBB`.
+fn pick_color(st: &mut State, i: usize) {
+    let initial = st.model.value(i).as_str().and_then(theme::hex_to_colorref).unwrap_or(0);
+    let mut custom = [0x00FF_FFFFu32; 16];
+    let chosen = unsafe {
+        let mut cc: CHOOSECOLORW = std::mem::zeroed();
+        cc.lStructSize = std::mem::size_of::<CHOOSECOLORW>() as u32;
+        cc.hwndOwner = st.hwnd;
+        cc.rgbResult = initial;
+        cc.lpCustColors = custom.as_mut_ptr();
+        cc.Flags = CC_RGBINIT | CC_FULLOPEN;
+        (ChooseColorW(&mut cc) != 0).then_some(cc.rgbResult)
+    };
+    if let (Some(color), Some(ctl)) = (chosen, row_of(st, i).map(|r| r.ctl)) {
+        set_text(ctl, &theme::colorref_to_hex(color));
+    }
+}
+/// The colour setting whose swatch (the left part of its field) is at (`x`, `y`) on the page.
+fn swatch_at(st: &State, x: i32, y: i32) -> Option<usize> {
+    let s = |px: i32| mul(px, st.dpi);
+    st.rows.iter().find_map(|r| {
+        let (f, i) = (r.field?, r.entry?);
+        (r.swatch && x >= f.left && x < f.left + s(36) && y >= f.top && y < f.bottom).then_some(i)
+    })
+}
+
 unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
     unsafe {
         let p = STATE.load(Ordering::Relaxed);
@@ -954,6 +1289,12 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 let hdc = BeginPaint(hwnd, &mut ps);
                 buffered(hdc, ps.rcPaint, |c| paint_page(s, c, ps.rcPaint));
                 EndPaint(hwnd, &ps);
+                0
+            }
+            WM_LBUTTONDOWN => {
+                if let Some(i) = swatch_at(s, (lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32) {
+                    pick_color(s, i);
+                }
                 0
             }
             WM_MOUSEWHEEL => SendMessageW(s.viewport, msg, wp, lp),
@@ -1153,6 +1494,7 @@ pub fn run(path: &Path) -> Result<()> {
     let dark = theme::system_is_dark();
     let pal = theme::palette(dark);
     let mut pages: Vec<String> = model.sections.clone();
+    pages.push(RULES_PAGE.into());
     pages.push(INSTALL_PAGE.into());
     register("PlanorSettings", Some(main_proc), CS_HREDRAW | CS_VREDRAW);
     register("PlanorViewport", Some(viewport_proc), 0);
@@ -1224,6 +1566,8 @@ pub fn run(path: &Path) -> Result<()> {
             errors: HashMap::new(),
             hover: std::ptr::null_mut(),
             nav_hover: None,
+            new_matcher: crate::settings_model::RuleMatch::Process,
+            new_action: crate::settings_model::RuleAction::Ignore,
             scheduler: SaveScheduler::new(Duration::from_millis(250)),
             stamp: stamp_of(path),
             quiet: false,
@@ -1334,6 +1678,65 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), broken, "the file is never overwritten");
     }
 
+
+    #[test]
+    fn hotkey_text_matches_example_style() {
+        assert_eq!(hotkey_text(false, true, false, false, 0x25).as_deref(), Some("Alt+Left"));
+        assert_eq!(hotkey_text(true, true, true, false, 0x08).as_deref(), Some("Ctrl+Alt+Shift+Backspace"));
+        assert_eq!(hotkey_text(false, true, true, false, 0x27).as_deref(), Some("Alt+Shift+Right"));
+        assert_eq!(hotkey_text(false, true, false, false, 0xDD).as_deref(), Some("Alt+]"));
+        assert_eq!(hotkey_text(false, true, false, false, 0x53).as_deref(), Some("Alt+S"));
+        assert_eq!(hotkey_text(true, false, false, true, 0x31).as_deref(), Some("Ctrl+Win+1"));
+    }
+
+    #[test]
+    fn hotkey_text_rejects_unsupported_keys_and_bare_keys() {
+        assert_eq!(hotkey_text(false, true, false, false, 0x74), None, "F5 cannot be bound");
+        assert_eq!(hotkey_text(false, false, false, false, 0x41), None, "a bare key would hijack typing");
+        assert_eq!(hotkey_text(true, false, false, false, 0x10), None, "Shift alone is not a key");
+    }
+
+    #[test]
+    fn hotkey_text_always_valid() {
+        let vks = [0x25, 0x26, 0x27, 0x28, 0x08, 0xDB, 0xDD].into_iter().chain(0x30..=0x39).chain(0x41..=0x5A);
+        for vk in vks {
+            for mods in 0..16u8 {
+                let (c, a, s, w) = (mods & 1 != 0, mods & 2 != 0, mods & 4 != 0, mods & 8 != 0);
+                if let Some(t) = hotkey_text(c, a, s, w, vk) {
+                    assert!(crate::settings_model::hotkey_valid(&t), "{t}");
+                } else {
+                    assert_eq!(mods, 0, "vk {vk:#x} with modifiers {mods} must be accepted");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bad_hotkey_is_rejected_by_apply_change() {
+        let p = temp("hotkey", "[hotkeys]\nfocus_left = \"Alt+Left\"\n");
+        let mut m = Model::load(&p).unwrap();
+        let i = idx(&m, "hotkeys", "focus_left");
+        assert!(apply_change(&mut m, i, toml::Value::String("Banana".into())).is_err());
+        assert!(!m.dirty);
+        apply_change(&mut m, i, toml::Value::String("Alt+H".into())).unwrap();
+        assert!(m.dirty);
+    }
+
+    #[test]
+    fn apply_rules_keeps_external_edits_and_refuses_a_broken_file() {
+        use crate::settings_model::{Rule, RuleAction, RuleMatch};
+        let p = temp("rules", "[layout]\ngap_px = 6\n");
+        let mut m = Model::load(&p).unwrap();
+        std::fs::write(&p, "[layout]\ngap_px = 9\n").unwrap();
+        let rule = Rule { matcher: RuleMatch::Process, value: "Calc.exe".into(), action: RuleAction::Float };
+        apply_rules(&mut m, &[rule]).unwrap();
+        save_guarded(&mut m).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("gap_px = 9") && text.contains("Calc.exe"), "{text}");
+        let broken = temp("rules-broken", "[layout\n");
+        let mut m2 = Model::from_text(&broken, crate::EXAMPLE).unwrap();
+        assert!(apply_rules(&mut m2, &[]).is_err());
+    }
     #[test]
     fn invalid_value_is_rejected_and_not_saved() {
         let p = temp("invalid", "[layout]\ngap_px = 6\n");
