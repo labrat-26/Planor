@@ -571,13 +571,20 @@ impl Gesture {
             self.last = pos;
             return if mx == 0. && my == 0. { Swipe::None } else { Swipe::DragMove(mx, my) };
         }
-        // Three fingers start scrolling almost at once (a small dead zone only to pick the axis).
+        // Three fingers start scrolling almost at once: the axis is picked after 3 units of travel when one
+        // axis clearly leads (1.5x), else once the travel reaches the full dead zone. Fingers settle as they
+        // land; the owner's recorded sideways swipe moved (3.1, -3.3) in its first 7 frames and was locked
+        // vertical by the old "first to 3 units" rule, so it never scrolled.
+        let full = deadzone;
         let deadzone = deadzone.min(3.);
         if self.horizontal.is_none() {
-            if dx.abs().max(dy.abs()) < deadzone {
+            let (ax, ay) = (dx.abs(), dy.abs());
+            let big = ax.max(ay);
+            let clear = big >= deadzone && big >= 1.5 * ax.min(ay);
+            if !clear && big < full {
                 return Swipe::None;
             }
-            self.horizontal = Some(dx.abs() >= dy.abs());
+            self.horizontal = Some(ax >= ay);
             self.last = origin;
         }
         let horizontal = self.horizontal.unwrap_or(true);

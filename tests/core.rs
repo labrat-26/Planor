@@ -999,3 +999,28 @@ fn gesture_survives_fingers_lifting_one_by_one() {
     assert_eq!(g.sample(&[(60., 50.); 4], 12., 100.), Swipe::Scroll(10.));
     assert_eq!(g.sample(&[], 12., 100.), Swipe::ScrollEnd);
 }
+
+#[test]
+fn axis_lock_waits_for_a_clear_direction_owner_recording() {
+    // First 8 centroids of gesture #5 in tests/fixtures/gestures/recorded/owner-mixed-3and4-finger.jsonl, a
+    // sideways swipe (+142, -22 overall) whose fingers settled downwards first. It was locked vertical.
+    let start = [(110.3, 94.2), (110.5, 93.8), (110.8, 93.2), (110.8, 93.2), (111.1, 92.6), (111.6, 92.0), (112.3, 91.4), (113.4, 90.9)];
+    let mut g = Gesture::default();
+    let mut first = None;
+    let mut c = start.to_vec();
+    for i in 1..=10 {
+        c.push((113.4 + 4. * i as f64, 90.9 - 0.4 * i as f64)); // then the swipe carries on to the right
+    }
+    for (x, y) in c {
+        match g.sample(&[(x, y); 3], 12., 60.) {
+            Swipe::None => (),
+            s if first.is_none() => first = Some(s),
+            _ => (),
+        }
+    }
+    assert!(matches!(first, Some(Swipe::Scroll(d)) if d > 0.), "sideways swipe must scroll sideways, got {first:?}");
+    // A clean swipe still starts at 3 units.
+    let mut g = Gesture::default();
+    g.sample(&[(0., 0.); 3], 12., 60.);
+    assert_eq!(g.sample(&[(3., 0.5); 3], 12., 60.), Swipe::Scroll(3.));
+}

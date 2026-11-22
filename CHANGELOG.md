@@ -8,6 +8,9 @@ All notable changes to Planor and its developer tooling harness are documented h
 - **`planor config`** (`src/config_tui.rs`, ratatui): terminal settings editor for `%APPDATA%planorplanor.toml`. Sections and settings with current values (changed ones highlighted, colour swatches), help text taken from `planor.example.toml`, the daemon's own validation (`valid_value`, `choices`, now shared), comment-preserving saves (`toml_edit`), and a reload sent to the running daemon. 4 tests incl. a rendered-screen keyboard flow.
 - **`planor gestures record <name>`**: the daemon captures every touchpad frame for N seconds into an `events.jsonl` fixture (meta line with the monitor and touchpad settings). Fixtures in `tests/fixtures/gestures/recorded/` are replayed by `sim_tests::recorded_gestures_replay_on_landscape_and_portrait` on both orientations (scroll along, roll across, 4-finger carry and drop, invariants after each).
 
+### Fixed
+- **Sideways three-finger swipes sometimes did nothing** (found by the owner's first recording): the axis was locked after 3 units of travel, and fingers that settle downwards as they land locked a sideways swipe vertical. Now locked after 3 units only when one axis leads 1.5x, else at `axis_lock_deadzone`. Fixture `owner-mixed-3and4-finger.jsonl` (12 real gestures) replays on both orientations; `tests/core.rs::axis_lock_waits_for_a_clear_direction_owner_recording`.
+
 ### Changed
 - **Owner rule: every test run rebuilds and restarts the binary.** `verify.ps1` runs `rebuild-daemon.ps1` first and aborts if the daemon does not come back (`-NoRestart` only on request).
 
