@@ -1,0 +1,75 @@
+{
+  "schema_version": 1,
+  "notes": [
+    {
+      "id": "N-001",
+      "time_utc": "06:20:20, 06:50:42, 07:11:52, 07:13:25",
+      "text": "freezes, \"animation super broken\", \"super jumpy, can't pair because of the jumpiness\"",
+      "status": "open",
+      "note": "needs a recording (`tools\\planor-rec-bin\\planor-rec.exe record` or `ring`); slow steps emit `SLOW`, stalls >= 300 ms emit `STALL` + stall bundle"
+    },
+    {
+      "id": "N-002",
+      "time_utc": "06:22:09, 06:52:26, 06:52:51",
+      "text": "clicking the right window does not focus it; cannot keep focus on the rightmost window",
+      "status": "open",
+      "note": "not reproduced"
+    },
+    {
+      "id": "N-003",
+      "time_utc": "06:46:05, 06:49:16, 07:11:36",
+      "text": "cannot group with the left or bottom window; \"cannot pair correctly\" while scrolling sideways",
+      "status": "open",
+      "note": "drop zone is +-20 px around window centre; see MOCKUP_DISAGREEMENT in tests/core.rs::mockup_drop_zone_outer_20_middle_60_join"
+    },
+    {
+      "id": "N-004",
+      "time_utc": "06:48:09",
+      "text": "four-finger move should move the window within its stack",
+      "status": "open",
+      "note": "not done"
+    },
+    {
+      "id": "N-005",
+      "time_utc": "06:49:52, 06:52:26",
+      "text": "borders are on top",
+      "status": "open",
+      "note": "unclear what they sit on top of (Task Manager is handled; the note box and Start menu are not)"
+    },
+    {
+      "id": "N-006",
+      "time_utc": "07:13:52",
+      "text": "no empty space on the right",
+      "status": "fixed",
+      "test": "tests/core.rs::unmaximizing_or_shrinking_clamps_offset_no_empty_space_on_right",
+      "commit": "6db2d71",
+      "note": "Strip::offset was left un-clamped after maximize/unmaximize, shrink resize, reveal, and fullscreen exit"
+    },
+    {
+      "id": "N-007",
+      "time_utc": "07:11:01",
+      "text": "pad movement laggy, not one to one",
+      "status": "open",
+      "test": "tests/core.rs::replay_three_finger_scroll_pad_trace_matches_within_tolerance",
+      "note": "changed (live scrolling no longer eased), not confirmed on hardware touchpad"
+    },
+    {
+      "id": "N-008",
+      "time_utc": "07:1x",
+      "text": "group members should be equal-size windows that slide continuously without squashing",
+      "status": "fixed",
+      "test": "tests/core.rs::group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape",
+      "commit": "v0.1.0",
+      "note": "Fixed in 07:1x round; verified in core & scroll_states_spec.json"
+    },
+    {
+      "id": "N-009",
+      "time_utc": "07:1x",
+      "text": "live touchpad scrolling should have no easing",
+      "status": "fixed",
+      "test": "tests/core.rs::touchpad_scroll_can_reach_the_first_and_last_window",
+      "commit": "v0.1.0",
+      "note": "Fixed in 07:1x round"
+    }
+  ]
+}

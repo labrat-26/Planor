@@ -84,10 +84,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: usize, l: isize) -> isize {
                 let mut buf = [0u16; 2048];
                 let n = GetWindowTextW(edit, buf.as_mut_ptr(), 2048).max(0) as usize;
                 let text = String::from_utf16_lossy(&buf[..n]);
-                if !text.trim().is_empty() {
-                    diag::trace(format!("NOTE {}", text.trim().replace('\n', " ")));
+                let trimmed = text.trim().replace('\n', " ");
+                if !trimmed.is_empty() {
+                    diag::trace(format!("NOTE {trimmed}"));
                 }
                 DestroyWindow(h);
+                if !trimmed.is_empty() && !crate::test_mode() {
+                    std::thread::spawn(move || save_note_bundle(&trimmed));
+                }
                 0
             }
             WM_CLOSE => {
@@ -197,5 +201,199 @@ unsafe fn run() {
             DispatchMessageW(&m);
         }
         UnregisterClassW(class.as_ptr(), inst);
+    }
+}
+
+fn sanitize_slug(text: &str) -> String {
+    let mut slug: String = text
+        .chars()
+        .take(36)
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    while slug.contains("--") {
+        slug = slug.replace("--", "-");
+    }
+    let trimmed = slug.trim_matches('-');
+    if trimmed.is_empty() {
+        "note".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Capture the virtual desktop as top-down RGBA pixels `(width, height, bytes)`.
+pub fn capture_desktop_rgb() -> Option<(u32, u32, Vec<u8>)> {
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        if vw <= 0 || vh <= 0 {
+            return None;
+        }
+        let screen = GetDC(null_mut());
+        if screen.is_null() {
+            return None;
+        }
+        let mem = CreateCompatibleDC(screen);
+        let bmp = CreateCompatibleBitmap(screen, vw, vh);
+        let mut rgba = None;
+        if !mem.is_null() && !bmp.is_null() {
+            let old = SelectObject(mem, bmp);
+            if BitBlt(mem, 0, 0, vw, vh, screen, vx, vy, SRCCOPY) != 0 {
+                let mut bi = BITMAPINFO {
+                    bmiHeader: BITMAPINFOHEADER {
+                        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+                        biWidth: vw,
+                        biHeight: -vh,
+                        biPlanes: 1,
+                        biBitCount: 32,
+                        biCompression: BI_RGB,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                let mut bgra = vec![0u8; (vw as usize) * (vh as usize) * 4];
+                let rows = GetDIBits(
+                    mem,
+                    bmp,
+                    0,
+                    vh as u32,
+                    bgra.as_mut_ptr().cast(),
+                    &mut bi,
+                    DIB_RGB_COLORS,
+                );
+                if rows > 0 {
+                    for px in bgra.chunks_exact_mut(4) {
+                        px.swap(0, 2);
+                        px[3] = 255;
+                    }
+                    rgba = Some((vw as u32, vh as u32, bgra));
+                }
+            }
+            SelectObject(mem, old);
+        }
+        if !bmp.is_null() {
+            DeleteObject(bmp);
+        }
+        if !mem.is_null() {
+            DeleteDC(mem);
+        }
+        ReleaseDC(null_mut(), screen);
+        rgba
+    }
+}
+
+fn encode_png_rgba(path: &std::path::Path, w: u32, h: u32, rgba: &[u8]) -> io::Result<()> {
+    let file = File::create(path)?;
+    let mut encoder = png::Encoder::new(io::BufWriter::new(file), w, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(io::Error::other)?;
+    writer.write_image_data(rgba).map_err(io::Error::other)?;
+    Ok(())
+}
+
+/// Write a self-contained diagnostic bundle (`note.txt`, `state.json`, `perf.json`,
+/// `perf.trace.json`, `trace.tail.log`, and optional `screenshot.png`) under `base_dir/bundles/`.
+pub fn write_bundle(
+    base_dir: &std::path::Path,
+    text: &str,
+    state_json: &str,
+    perf_json: &str,
+    perf_trace_json: &str,
+    screenshot_rgba: Option<(u32, u32, &[u8])>,
+) -> io::Result<PathBuf> {
+    let stamp = diag::stamp().replace([':', '.'], "");
+    let bundle_dir = base_dir
+        .join("bundles")
+        .join(format!("{stamp}-{}", sanitize_slug(text)));
+    fs::create_dir_all(&bundle_dir)?;
+    fs::write(
+        bundle_dir.join("note.txt"),
+        format!("stamp={}\ntext={text}\nqpc_us={}\n", diag::stamp(), perf::qpc_us()),
+    )?;
+    fs::write(bundle_dir.join("state.json"), state_json)?;
+    fs::write(bundle_dir.join("perf.json"), perf_json)?;
+    fs::write(bundle_dir.join("perf.trace.json"), perf_trace_json)?;
+
+    let trace_src = base_dir.join("trace.log");
+    if let Ok(raw) = fs::read_to_string(&trace_src) {
+        let lines: Vec<&str> = raw.lines().collect();
+        let start = lines.len().saturating_sub(400);
+        fs::write(bundle_dir.join("trace.tail.log"), lines[start..].join("\n"))?;
+    }
+
+    if let Some((w, h, rgba)) = screenshot_rgba {
+        encode_png_rgba(&bundle_dir.join("screenshot.png"), w, h, rgba)?;
+    }
+    Ok(bundle_dir)
+}
+
+fn save_note_bundle(text: &str) {
+    // Allow DestroyWindow repaint to settle so the note input box does not occlude the desktop screenshot.
+    std::thread::sleep(std::time::Duration::from_millis(80));
+    let Ok(base_dir) = folder("LOCALAPPDATA") else {
+        return;
+    };
+    let shot = capture_desktop_rgb();
+    let state_json = client(&pipe_name(), &Command::State { json: true })
+        .unwrap_or_else(|e| format!("{{\"error\":{e:?}}}"));
+    let perf_json = serde_json::to_string_pretty(&perf::build_report(None))
+        .unwrap_or_else(|_| "{}".to_string());
+    let trace_json = serde_json::to_string(&perf::export_chrome_trace(Some(15)))
+        .unwrap_or_else(|_| "{}".to_string());
+    let shot_ref = shot.as_ref().map(|(w, h, b)| (*w, *h, b.as_slice()));
+    let Ok(bundle_dir) = write_bundle(&base_dir, text, &state_json, &perf_json, &trace_json, shot_ref)
+    else {
+        return;
+    };
+    if let Some(rec) = watchdog::find_planor_rec() {
+        let _ = std::process::Command::new(rec)
+            .args(["dump", "--out"])
+            .arg(bundle_dir.join("video"))
+            .args(["--reason", "note", "--pipe", "ring"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    diag::trace(format!("NOTE_BUNDLE {}", bundle_dir.display()));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_writes_note_state_perf_trace_and_png() {
+        let dir = std::env::temp_dir().join(format!("planor-note-bundle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("trace.log"), "12:00:00.000 START test\n12:00:01.000 PLACE 1\n")
+            .unwrap();
+
+        let rgba = vec![0xffu8; 4 * 4 * 4];
+        let bundle = write_bundle(
+            &dir,
+            "jumpy scroll right!!",
+            "{\"schema_version\":1,\"tiles\":[]}",
+            "{\"schema_version\":1,\"budgets\":{\"all_pass\":true}}",
+            "{\"traceEvents\":[]}",
+            Some((4, 4, &rgba)),
+        )
+        .unwrap();
+
+        assert!(bundle.join("note.txt").is_file());
+        assert!(fs::read_to_string(bundle.join("note.txt"))
+            .unwrap()
+            .contains("jumpy scroll right!!"));
+        assert!(bundle.join("state.json").is_file());
+        assert!(bundle.join("perf.json").is_file());
+        assert!(bundle.join("perf.trace.json").is_file());
+        let tail = fs::read_to_string(bundle.join("trace.tail.log")).unwrap();
+        assert!(tail.contains("PLACE 1"));
+        let png_bytes = fs::read(bundle.join("screenshot.png")).unwrap();
+        assert!(png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

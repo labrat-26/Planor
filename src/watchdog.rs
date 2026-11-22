@@ -22,7 +22,7 @@ fn stall_threshold_us() -> i64 {
         * 1000
 }
 
-fn find_planor_rec() -> Option<PathBuf> {
+pub(crate) fn find_planor_rec() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("PLANOR_REC_BIN") {
         let p = PathBuf::from(p);
         if p.is_file() {

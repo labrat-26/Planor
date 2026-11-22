@@ -7,19 +7,28 @@ analyzer), `docs/` (plans, results, notes).
 ## Run tests: always through the script
 
 ```powershell
-.\scripts\verify.ps1                  # unit + every live test, failures re-run (FLAKY vs FAIL), table in build\verify\latest.md
-.\scripts\verify.ps1 -Tier unit       # fast, does not touch the user's daemon
-.\scripts\verify.ps1 -Only scn_drag   # one live test file or test name
-.\scripts\verify.ps1 -Record          # PLANOR_RECORD=1: screen-record and analyze the wired tests
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier unit            # seconds; core, prop_core, lib/bin, planor-rec
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier fast -Perf      # unit + 4 quick live smoke checks + budgets
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier smoke -Perf     # unit + 1 test per scenario (-NoDisplaySwitch skips DisplaySwitch)
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Only scn_drag        # filter by file or test name
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Changed -Tier unit   # run only tests mapped in scripts\test-map.json
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier smoke -Cache    # skip unchanged passing tests via SHA-256 cache
 ```
 
-The script stops the user's real `planor.exe` for live tests and restarts it at the end, even on failure. If you must do
-it by hand: `target\release\planor.exe stop` ... then restart with exactly
+Test daemons default to `PLANOR_TEST_MODE=1` (skipping global hotkeys, LL hooks reinstall, raw input, and Win+W dialogs), so normal live tests run cleanly alongside the user's real `planor.exe`. `verify.ps1` only stops/restarts `target\release\planor.exe` around the 3 exclusive tests (`scn_taskbar::clicking_a_peek_reveals_that_window`, `scn_exit::panic_hotkey`, `scn_exit::ctrl_break_restores_before_exit`).
+
+To rebuild and restart the real daemon cleanly:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\rebuild-daemon.ps1
+```
+
+Manual stop/start (if ever needed by hand): `target\release\planor.exe stop` then
 `Start-Process -FilePath C:\Users\rmand\Projects\PlanorV2\target\release\planor.exe -ArgumentList "start" -WindowStyle Hidden`
-and confirm exactly one `planor.exe` runs. The release exe cannot be rebuilt while the daemon runs.
+and confirm one `planor.exe` runs. The release exe cannot be rebuilt while the daemon runs.
 
 Live tests (`--ignored --test-threads=1`) use the real desktop and DXGI capture: do not use the machine while they run,
-and expect other windows to interfere. A test that passes alone and fails in the suite is a flake or leftover state: say so.
+and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by default and save trace/digest/recording evidence under `build\verify\<stamp>\<test>\`.
 
 ## Rules
 
@@ -32,19 +41,26 @@ and expect other windows to interfere. A test that passes alone and fails in the
 - The analyzer in `tools/planor-rec` must never call an LLM. LLM review of flagged frames goes to a Haiku subagent.
 - Wallpaper must stay RGB(0,0,90): the recorder classifies pixels against it.
 
-## Known state
+## Known state & references
 
-- Intended behaviour is described in `tests/core.rs` (unit tests), `docs/TEST_PLAN.md`, and the mockup canvas
-  "Planor scroll states" (landscape/portrait animated states).
+- Intended behaviour & schemas: `tests/core.rs` (`scroll_states_spec.json`), `docs/TEST_PLAN.md`, `docs/STATE_SCHEMA.md`,
+  `docs/MOCKUP_DECISIONS.md`, `docs/ARCHITECTURE.md`, and `docs/TASK_BRIEF_TEMPLATE.md` (for delegated agent briefs).
+- Tracked user notes live in `docs/notes.json` (regenerated into `docs/NOTES_OPEN.md` via `scripts/notes.ps1 -Generate`,
+  verified via `scripts/notes.ps1 -Check`). Win+W saves a diagnostic bundle under `%LOCALAPPDATA%\planor\bundles\<stamp>-<slug>\`
+  (note, screenshot PNG, `state.json`, `perf.json`, `perf.trace.json`, trace tail, plus optional ring video dump).
 - Known flaky: `drag_to_portrait_monitor` (passes alone). Check `build\verify\latest.md` for the current table.
-- Open user notes: `docs/NOTES_OPEN.md`. The user dictates new ones with Win+W; they land as `NOTE` lines in
-  `%LOCALAPPDATA%\planor\trace.log`.
+- Pre-commit hook (`scripts/install-hooks.ps1`): checks no `println!` in `src/{daemon,render,win32,perf,watchdog}.rs`,
+  runs `core` + `prop_core`, and checks `notes.ps1 -Check`.
 
-## Where to look when something is wrong
+## Profiling, state & ring capture
 
-- Trace lines: `EXPECT` (what Planor claims a tile rect should be), `PLACE` (actual window moves), `SCENE`, `FG`, `SLOW *`
-  (anything over 100 ms), `PAD` (touchpad). `planor state` (when available) dumps strips and tiles.
-- Recorder: `tools/planor-rec/README.md`. Reports in `%TEMP%\planor-rec-*\report.md`.
+- `planor state --json`: dump live monitors, strips, active/parked tiles, expected rects, and config version.
+- `planor perf [--json | --trace <file> | --bundle <dir> | --reset]`: QPC span latency percentiles (p50/p95/p99/max),
+  CPU/RAM/GDI/USER/handles, Chrome/Perfetto JSON traces, and budgets (`startup <600ms`, `render.scene <16ms`,
+  `gesture_to_place <16ms`, `hook <5ms`). Watchdog logs `STALL <thread> <ms>` and saves `%LOCALAPPDATA%\planor\stalls\`.
+- Trace lines: `EXPECT`, `PLACE`, `SCENE`, `FG`, `SLOW *`, `STALL *`, `INVARIANT *`, `PAD`.
+- Rolling ring capture: `planor-rec ring [--seconds 10 --fps 30]`, `planor-rec ring-status`, `planor-rec dump --out <dir>`,
+  `planor-rec stop --pipe ring`. Correlate video failures with QPC spans via `scripts\correlate.ps1 -Dir <dir>`.
 
 ## Read data through the digest, not raw logs
 
@@ -52,10 +68,13 @@ Raw traces, recorder reports and cargo logs are huge. Shrink them first (scripts
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\<name>.ps1`, since script execution is disabled by default):
 
 ```powershell
-scripts\digest.ps1                   # latest verify results: failures and flakes only, one line each
-scripts\digest.ps1 -Log <test log>   # the failing assertion and the lines around it
-scripts\digest.ps1 -Rec <rec dir>    # recorder findings grouped by kind with counts and the first example
-scripts\digest.ps1 -Trace <trace>    # scene-to-first-PLACE latency, SLOW lines collapsed, notes, warnings
+scripts\digest.ps1                    # latest verify results: failures, flakes, perf budgets
+scripts\digest.ps1 -Perf [perf.json]  # OS counters, budget verdicts, and top spans (<= 20 lines)
+scripts\digest.ps1 -Bundle <dir>      # Win+W note bundle or watchdog stall bundle (<= 20 lines)
+scripts\digest.ps1 -Log <test log>    # failing assertion and context
+scripts\digest.ps1 -Rec <rec dir>     # recorder findings grouped by kind with counts
+scripts\digest.ps1 -Trace <trace>     # scene-to-first-PLACE latency, STALL/SLOW lines collapsed, notes
+scripts\compare-runs.ps1              # delta between two results.json runs + p99 perf shifts
 ```
 
 Add `-Max N` to cap the output. Open a raw file only for the one thing the digest points at.
