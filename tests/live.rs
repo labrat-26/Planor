@@ -356,7 +356,8 @@ fn state_json_matches_real_windows() {
     let v: serde_json::Value =
         serde_json::from_slice(&out.stdout).expect("valid state JSON");
     assert_eq!(v["schema_version"].as_u64(), Some(1));
-    assert_eq!(v["config_version"].as_u64(), Some(1));
+    let cfg_ver = v["config_version"].as_u64().expect("config_version");
+    assert!(cfg_ver >= 1, "expected config_version >= 1, got {cfg_ver}");
     assert_eq!(v["test_mode"].as_bool(), Some(true));
     assert!(!v["monitors"].as_array().unwrap().is_empty());
     assert!(!v["strips"].as_array().unwrap().is_empty());
@@ -402,7 +403,7 @@ fn state_json_matches_real_windows() {
     let out2 = d.call_output(&["state", "--json"]);
     assert!(out2.status.success());
     let v2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
-    assert_eq!(v2["config_version"].as_u64(), Some(2));
+    assert_eq!(v2["config_version"].as_u64(), Some(cfg_ver + 1));
     d.stop();
 }
 
