@@ -89,11 +89,13 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
         } else if w == WM_LBUTTONUP as usize && SWALLOW_UP.swap(false, AcqRel) {
             return 1;
         } else if w == WM_MOUSEWHEEL as usize || w == WM_MOUSEHWHEEL as usize {
-            // Win + wheel scrolls the strip under the cursor (Win + Shift + wheel rolls its group).
+            // Win + MOUSE wheel scrolls the strip under the cursor (Win + Shift + wheel rolls its group). Only the
+            // mouse (owner's choice): a precision touchpad scrolls in fine steps (-3, -7, ... in the owner's
+            // recording) and a mouse wheel in whole notches of 120, so fine steps pass through to the app.
             let down = |vk| unsafe { KeyboardAndMouse::GetAsyncKeyState(vk) < 0 };
-            if down(0x5B) || down(0x5C) {
-                let info = unsafe { &*(l as *const MSLLHOOKSTRUCT) };
-                let delta = (info.mouseData >> 16) as u16 as i16 as i32;
+            let info = unsafe { &*(l as *const MSLLHOOKSTRUCT) };
+            let delta = (info.mouseData >> 16) as u16 as i16 as i32;
+            if (down(0x5B) || down(0x5C)) && delta != 0 && delta % 120 == 0 {
                 emit(Event::Wheel {
                     delta,
                     tilt: w == WM_MOUSEHWHEEL as usize,

@@ -11,6 +11,12 @@ All notable changes to Planor and its developer tooling harness are documented h
 ### Fixed
 - **Sideways three-finger swipes sometimes did nothing** (found by the owner's first recording): the axis was locked after 3 units of travel, and fingers that settle downwards as they land locked a sideways swipe vertical. Now locked after 3 units only when one axis leads 1.5x, else at `axis_lock_deadzone`. Fixture `owner-mixed-3and4-finger.jsonl` (12 real gestures) replays on both orientations; `tests/core.rs::axis_lock_waits_for_a_clear_direction_owner_recording`.
 
+### From the owner's top-up recording (63 gestures, Planor live)
+- **Win + wheel is for the mouse only** (owner's choice): only whole notches (multiples of 120) count; the touchpad's fine scroll steps (-3, -7, ... and -5355 in its own momentum) pass through to the app. At most two notches per event. Guide top-up steps now ask for the mouse.
+- **Fling threshold 1500 -> 900 units/s**: the owner's real flicks ran at about 1000-1100 units/s and never counted as flicks.
+- **Guided recordings are filtered**: gestures that do not match their step (or the step before, when late) are set aside in the replay test: 84 of 114 and 42 of 63 used.
+- Drops are logged in recordings (`drop` lines: mode, target, flung, other monitor) and Win+wheel (`wheel`). In the top-up, no drop landed in the centre stack box (2 tries: swap and beside).
+
 ### Found by the owner's guided recording (114 gestures, 24 steps)
 - **`planor gestures analyze <file>`** + `replay::{segments, identify, fits}`: splits a recording into gestures (lift frames or >50 ms gaps), names each one (fingers, tap/move/scroll/pinch/swipe/drag/circle, direction, slow/flick, staggered lift) and checks it against its guided step; a gesture in the get-ready gap may finish the previous step. 84 of 114 matched; the rest were genuinely different (e.g. 3-finger taps in the 1-finger step, left/right swapped).
 - **Fingers landing one at a time**: a 3-finger scroll that has moved less than twice `axis_lock_deadzone` gives way to a 4-finger drag when the fourth finger lands (gesture #107 never picked the window up).

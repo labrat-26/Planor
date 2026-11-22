@@ -58,14 +58,14 @@ swipe_scroll_gain = 4.0
 # Momentum: a fast swipe keeps scrolling after the fingers lift and slows down.
 swipe_inertia = true
 # Fling: a flick faster than swipe_fling_speed (units/s) at lift-off throws the window to the
-# neighbouring screen in that direction.
+# neighbouring screen in that direction. The owner's recorded flicks ran at about 1000-1100 units/s.
 swipe_fling_enabled = true
-swipe_fling_speed = 1500
+swipe_fling_speed = 900
 # Carry the window across monitors while dragging (off: stay on its monitor, a fling crosses).
 swipe_drag_cross_monitors = true
 
 [mouse]
-# Win + wheel scrolls the strip under the cursor along its axis (sideways on landscape, up and down on
+# Win + MOUSE wheel (not the touchpad) scrolls the strip under the cursor along its axis (sideways on landscape, up and down on
 # portrait); Win + Shift + wheel rolls the focused group. Strip travel per wheel notch:
 win_wheel_step_px = 240
 

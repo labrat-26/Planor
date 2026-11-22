@@ -49,9 +49,9 @@ pub const TOPUP: &[(&str, &str)] = &[
     ("FOUR fingers: FLICK a window fast towards another screen", "A quick throw, then lift."),
     ("FOUR fingers: drag, then lift ONE finger at a time", "Twice: drag, then raise your fingers one by one."),
     ("THREE fingers: swipe UP and DOWN on the group you made", "Fingers across the strip roll the group."),
-    ("Hold WIN + TWO-finger scroll, cursor on the TOP screen", "Keep the Windows key down while scrolling with two fingers."),
-    ("Hold WIN + TWO-finger scroll, cursor on the PORTRAIT screen", "Move the cursor to the tall screen first."),
-    ("Hold WIN + TWO-finger scroll, cursor on the LAPTOP screen", "Move the cursor to the laptop screen first."),
+    ("MOUSE: hold WIN + turn the wheel, cursor on the TOP screen", "Keep the Windows key down while turning the mouse wheel."),
+    ("MOUSE: hold WIN + turn the wheel, cursor on the PORTRAIT screen", "Move the cursor to the tall screen first."),
+    ("MOUSE: hold WIN + turn the wheel, cursor on the LAPTOP screen", "Move the cursor to the laptop screen first."),
 ];
 
 const READY: Duration = Duration::from_secs(2);

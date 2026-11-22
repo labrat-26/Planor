@@ -1179,10 +1179,26 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
     let mut report = vec![];
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
-        let gestures: Vec<(String, Vec<Vec<(f64, f64)>>)> = planor::replay::segments(&planor::replay::parse_events_jsonl(&text))
+        // Guided recordings: the owner did not follow every instruction. Keep the gestures that match their
+        // step (or the step before, when made late in the get-ready gap); set the rest aside.
+        let all = planor::replay::segments(&planor::replay::parse_events_jsonl(&text));
+        let total = all.len();
+        let gestures: Vec<(String, Vec<Vec<(f64, f64)>>)> = all
             .into_iter()
+            .filter(|s| {
+                let g = planor::replay::identify(s);
+                s.label.is_empty()
+                    || planor::replay::fits(&s.label, &g)
+                    || (!s.previous.is_empty() && planor::replay::fits(&s.previous, &g))
+            })
             .map(|s| (s.label, s.frames.into_iter().map(|f| f.1).collect()))
             .collect();
+        report.push(format!(
+            "{}: {} of {total} gestures used, {} set aside as not done as instructed",
+            f.file_name().unwrap().to_string_lossy(),
+            gestures.len(),
+            total - gestures.len()
+        ));
         assert!(!gestures.is_empty(), "{}: no gestures", f.display());
         for (n, (label, g)) in gestures.iter().enumerate() {
             for mon in ["MON0", "MON2"] {
@@ -1198,4 +1214,29 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
         }
     }
     println!("{}", report.join("\n"));
+}
+
+#[test]
+fn win_wheel_is_for_the_mouse_and_capped_per_event() {
+    // Owner's choice: Win + scroll is for the mouse, not the touchpad. The touchpad's fine steps (-3, -7, ...
+    // and -5355 in its momentum, owner top-up recording) are ignored; mouse notches (multiples of 120) scroll,
+    // at most two notches per event.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let land = (1, "MON0".to_string());
+    to_start(&mut h, "MON0");
+    for delta in [-3, -7, -12, -5355] {
+        h.engine.event(Event::Wheel { delta, tilt: false, shift: false, x: 900, y: 500 });
+        h.settle();
+    }
+    assert_eq!(h.engine.strips[&land].offset, 0, "touchpad scroll steps are not Win+wheel");
+    let step = h.engine.cfg["mouse"]["win_wheel_step_px"].as_integer().unwrap() as i32;
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 900, y: 500 });
+    h.settle();
+    let one = h.engine.strips[&land].offset;
+    assert!(one > 0 && one <= step, "one mouse notch scrolls one step: {one}");
+    h.engine.event(Event::Wheel { delta: -1200, tilt: false, shift: false, x: 900, y: 500 });
+    h.settle();
+    let more = h.engine.strips[&land].offset - one;
+    assert!(more > 0 && more <= 2 * step, "a fast spin (10 notches in one event) scrolls at most two: {more}");
+    h.stop_clean();
 }

@@ -1546,7 +1546,13 @@ impl<B: WindowBackend> Engine<B> {
             self.active = name;
         }
         let step = self.cfg["mouse"]["win_wheel_step_px"].as_integer().unwrap_or(240) as f64;
-        // Wheel down is a negative delta; the tilt wheel is positive to the right.
+        // Wheel down is a negative delta; the tilt wheel is positive to the right. Mouse only: fine touchpad
+        // steps (not whole notches of 120) are left alone (the hook already lets them through). A fast spin can
+        // pack several notches into one event: at most two per event.
+        if delta % 120 != 0 {
+            return;
+        }
+        let delta = delta.clamp(-240, 240);
         let notches = if tilt { delta } else { -delta } as f64 / 120.;
         let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) else { return };
         let roll = shift || (tilt && !s.area.horizontal());
@@ -1741,7 +1747,7 @@ impl<B: WindowBackend> Engine<B> {
             (p.cursor.0 - p.grab.0).round() as i32,
             (p.cursor.1 - p.grab.1).round() as i32,
         );
-        let threshold = self.cfg["touchpad"]["swipe_fling_speed"].as_integer().unwrap_or(1500) as f64;
+        let threshold = self.cfg["touchpad"]["swipe_fling_speed"].as_integer().unwrap_or(900) as f64;
         if self.cfg["touchpad"]["swipe_fling_enabled"].as_bool() == Some(true)
             && vx.hypot(vy) >= threshold
         {
