@@ -210,8 +210,8 @@ enum GestureAction {
         /// Let Planor act on the gestures while recording (default: record only).
         #[arg(long)]
         live: bool,
-        /// Which steps: "full" (every gesture, record only) or "topup" (what the first session missed,
-        /// Planor live).
+        /// Which steps: "full" (every gesture, record only), "topup" (what the first session missed, Planor
+        /// live) or "group" (grouping, rolling and a slow swipe, 20 s per step, Planor live).
         #[arg(long, default_value = "full")]
         set: String,
     },

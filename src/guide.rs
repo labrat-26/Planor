@@ -54,6 +54,14 @@ pub const TOPUP: &[(&str, &str)] = &[
     ("MOUSE: hold WIN + turn the wheel, cursor on the LAPTOP screen", "Move the cursor to the laptop screen first."),
 ];
 
+/// `--set group`: grouping needs time to carry a window onto the small box, so these steps are long (20 s).
+pub const GROUP: &[(&str, &str)] = &[
+    ("FOUR fingers: drag a window onto the CENTRE of another, lift", "Aim for the filled box in the middle of the other window; lift inside it. Try until they group."),
+    ("THREE fingers: swipe UP and DOWN on the group", "Three fingers, up and down a few times: the group rolls."),
+    ("THREE fingers: swipe LEFT very SLOWLY, once", "Fingers moving to the LEFT, take your time."),
+    ("FOUR fingers: drag a window onto the CENTRE of another, lift", "Once more, on another pair of windows."),
+];
+
 const READY: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
@@ -187,6 +195,7 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: usize, l: isize) -> isize {
 pub fn run(name: String, step_seconds: u64, live: bool, set: String) -> Result<()> {
     let (steps, live, step_seconds): (&'static [(&'static str, &'static str)], bool, u64) = match set.as_str() {
         "topup" => (TOPUP, true, step_seconds.max(8)),
+        "group" => (GROUP, true, step_seconds.max(20)),
         _ => (STEPS, live, step_seconds),
     };
     let slug: String = name
