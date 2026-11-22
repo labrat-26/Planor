@@ -12,6 +12,7 @@ mod note;
 mod perf;
 mod render;
 mod theme;
+mod tray;
 #[cfg(test)]
 mod sim_tests;
 mod watchdog;

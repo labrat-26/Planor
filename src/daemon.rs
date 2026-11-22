@@ -2517,6 +2517,7 @@ pub fn run() -> Result<()> {
             let _ = client(&pipe_name(), &Command::Reload);
         });
     }
+    crate::tray::spawn();
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
     perf::init(diag.enabled);
     perf::register_thread("daemon");
