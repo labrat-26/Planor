@@ -1,0 +1,264 @@
+<p align="center">
+  <img src="docs/img/banner.svg" alt="Planor: a scrolling tiling window manager for Windows 11" width="800">
+</p>
+
+<p align="center">
+  <a href="https://github.com/labrat-26/Planor/releases/latest"><b>⬇ Download planor.exe</b></a>
+  &nbsp;·&nbsp; <a href="#-getting-started-in-two-minutes">Get started</a>
+  &nbsp;·&nbsp; <a href="#-the-cheat-sheet">Cheat sheet</a>
+  &nbsp;·&nbsp; <a href="#-making-it-yours">Settings</a>
+  &nbsp;·&nbsp; <a href="#-when-something-goes-wrong">Help</a>
+</p>
+
+---
+
+## What is Planor?
+
+Planor tidies your windows for you, and does it in a way that never squeezes them.
+
+Most window managers cram every window onto one screen, so the more you open the smaller they all get. **Planor puts your windows on one long strip that extends past the edge of your screen.** Each window keeps a comfortable size. You slide the strip left and right (or up and down on a portrait monitor) to bring the window you want into view.
+
+<p align="center">
+  <img src="docs/img/hero.svg" alt="Animation: windows sit on an endless strip that scrolls past the screen" width="800">
+</p>
+
+If you have used a phone's home screen, you already know the idea: swipe to see more.
+
+**In short**
+
+- 🪟 **No more tiny windows.** New windows join the strip at a normal size.
+- 👆 **Built for touchpads.** Three fingers scroll the strip. Four fingers carry a window.
+- 🖱️ **Works with keyboard and mouse too.** Every action has a shortcut.
+- 🖥️ **Multi-monitor friendly.** Each monitor has its own strip, and you can throw windows between them.
+- 🧰 **Invisible when idle.** Planor has no window of its own. It runs quietly in the background and draws only coloured outlines.
+- 🛟 **Always an escape hatch.** One shortcut puts every window back exactly where it was.
+
+> **Good to know:** Planor is for **Windows 11** only, and it is a young project. It never touches your files. If you ever want it gone, [one command](#-leaving-or-uninstalling) restores your windows.
+
+---
+
+## 🚀 Getting started in two minutes
+
+1. **Download** `planor.exe` from the [latest release](https://github.com/labrat-26/Planor/releases/latest).
+2. **Put it somewhere permanent**, for example `C:\Tools\Planor\planor.exe`.
+3. **Open a terminal** (Windows Terminal or PowerShell) in that folder and start it:
+
+   ```powershell
+   .\planor.exe start
+   ```
+
+   Your open windows slide into place. Planor runs in the background, so you can close the terminal.
+
+4. **Try it.** Press <kbd>Alt</kbd>+<kbd>→</kbd> to move focus to the next window. Open a new app and watch it join the strip.
+
+That is all. The next sections explain what you can do now.
+
+### Start Planor automatically when you sign in
+
+```powershell
+.\planor.exe autostart on     # and "off" to undo it
+```
+
+### Stop it any time
+
+```powershell
+.\planor.exe stop
+```
+
+---
+
+## 🎬 How it works, in pictures
+
+### 1. Scroll the strip
+
+Slide **three fingers sideways** on your touchpad. The strip follows your fingers, and the window nearest the middle becomes the focused one. A fast swipe keeps gliding for a moment after you lift, like a phone list.
+
+<p align="center">
+  <img src="docs/img/gesture-scroll.svg" alt="Animation: three fingers swipe on the touchpad and the strip scrolls" width="800">
+</p>
+
+No touchpad? Hold <kbd>Win</kbd> and turn the **mouse wheel**. Or use <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd>.
+
+### 2. Stack windows together
+
+Sometimes two windows belong in one place, such as a chat beside its notes. **Stacking** puts them in one slot, and you flip between them.
+
+Pick a window up with **four fingers** (or drag it with the mouse), then drop it on another window:
+
+- **Green middle zone** (the middle half of the window): the two **stack**. The outline turns purple.
+- **Anywhere else on the window:** the two **swap** places.
+- **Hold <kbd>Shift</kbd> while dropping:** nothing happens and the window goes back to its slot.
+
+<p align="center">
+  <img src="docs/img/stack.svg" alt="Animation: a window dropped on the middle zone of another stacks with it" width="800">
+</p>
+
+Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window. Hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the mouse wheel to roll through a stack.
+
+### 3. Throw a window to another monitor
+
+Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor.
+
+<p align="center">
+  <img src="docs/img/fling.svg" alt="Animation: a flicked window flies to the next monitor" width="800">
+</p>
+
+You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <kbd>Alt</kbd>+<kbd>[</kbd> to jump focus between monitors.
+
+### 4. What the coloured outlines mean
+
+| Outline | Meaning |
+|---|---|
+| 🔵 **Blue** | This is the window you are working in |
+| 🟣 **Purple** | The window is part of a stack |
+| 🟠 **Orange** | The window is *pinned* (it stays on screen while the strip scrolls) |
+| 🟢 **Green** | A drop target while you are dragging |
+
+The thin slivers at the screen edges are **peeks**. They show that more windows wait just off-screen. Click one to bring that window in.
+
+---
+
+## 📋 The cheat sheet
+
+### Keyboard
+
+| Shortcut | What it does |
+|---|---|
+| <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Focus the previous / next window |
+| <kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> | Focus the window above / below |
+| <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>←</kbd> / <kbd>→</kbd> | Move the focused window along the strip |
+| <kbd>Alt</kbd>+<kbd>S</kbd> | Stack / unstack the focused window |
+| <kbd>Alt</kbd>+<kbd>P</kbd> | Pin / unpin the focused window |
+| <kbd>Alt</kbd>+<kbd>]</kbd> / <kbd>[</kbd> | Focus the next / previous monitor |
+| <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Backspace</kbd> | **Panic button.** Quit and restore every window |
+
+### Touchpad (precision touchpads)
+
+| Gesture | What it does |
+|---|---|
+| **3 fingers**, swipe sideways | Scroll the strip live (with momentum) |
+| **3 fingers**, swipe up or down | Step focus up or down |
+| **4 fingers**, swipe | Pick up the focused window and carry it |
+| **4 fingers**, flick as you lift | Throw it to the next monitor |
+| **5 fingers** (whole hand) | Cancels a gesture in progress, so a resting palm cannot drag a window |
+
+### Mouse
+
+| Action | What it does |
+|---|---|
+| <kbd>Win</kbd> + wheel | Scroll the strip under the pointer |
+| <kbd>Win</kbd>+<kbd>Shift</kbd> + wheel | Roll through the focused stack |
+| Drag a window by its title bar, drop on another | Swap or stack (see above) |
+| Click a peek at the screen edge | Bring that window into view |
+
+### Commands
+
+Run these from a terminal with `planor.exe <command>`.
+
+| Command | What it does |
+|---|---|
+| `start` / `stop` | Start or stop Planor |
+| `pause` / `resume` | Pause tiling, then pick it back up |
+| `pin` | Pin or unpin the focused window |
+| `pull-orphans` | Fetch back any window that got lost off-screen |
+| `reload` | Re-read your settings file |
+| `config` | Open the friendly settings editor |
+| `autostart on` / `off` | Start with Windows, or don't |
+| `state --json` | Show what Planor currently thinks of your windows |
+
+---
+
+## 🎛️ Making it yours
+
+### The settings editor
+
+```powershell
+.\planor.exe config
+```
+
+A simple screen opens in your terminal. Move with the arrow keys, change a value, and it explains each setting as you go. It checks your input and tells the running Planor to apply changes right away.
+
+### Or edit the file
+
+Settings live in a plain text file: `%APPDATA%\planor\planor.toml`. Every option and its explanation is in [`planor.example.toml`](planor.example.toml). You only need to write the lines you want to change.
+
+A few favourites:
+
+```toml
+[layout]
+gap_px = 12                 # more breathing room between windows
+default_tile_share = 0.6    # new windows take 60 % of the screen width
+
+[borders]
+focused_color = "#F43F5E"   # a rose-coloured focus outline
+
+[animation]
+duration_ms = 120           # snappier
+
+[hotkeys]
+focus_left  = "Win+Left"
+focus_right = "Win+Right"
+```
+
+### Windows Planor should leave alone
+
+Some programs should never be tiled, such as a task manager or a video call popup. Add a rule:
+
+```toml
+[[rules]]
+process = "Taskmgr.exe"
+action = "ignore"
+```
+
+Fullscreen apps are handled for you: the strip steps aside while they are fullscreen.
+
+---
+
+## 🛟 When something goes wrong
+
+| Problem | Try this |
+|---|---|
+| **Everything looks odd and I want out** | Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>Backspace</kbd>. Every window goes back to where it was |
+| **A window vanished** | `planor.exe pull-orphans` |
+| **A shortcut conflicts with another app** | Change it in `planor.exe config` |
+| **Gestures do nothing** | They need a *precision touchpad*. Make sure `three_finger_enabled = true`. The keyboard and mouse still work |
+| **I want to see what's happening** | `planor.exe diag on`, reproduce the problem, then `planor.exe diag export <folder>` |
+| **It feels slow** | `planor.exe perf` prints timings you can share in an issue |
+
+Found a bug or have an idea? Please [open an issue](https://github.com/labrat-26/Planor/issues). Attach the output of `planor.exe state --json` if you can.
+
+## 👋 Leaving or uninstalling
+
+```powershell
+.\planor.exe autostart off
+.\planor.exe stop        # windows are put back where they were
+```
+
+Then delete `planor.exe` and, if you like, the `%APPDATA%\planor` folder. Nothing else is installed.
+
+---
+
+## 🧑‍💻 For the curious and for contributors
+
+Planor is written in **Rust** and talks to Windows directly, with no extra runtime to install.
+
+```powershell
+git clone https://github.com/labrat-26/Planor.git
+cd Planor
+cargo build --release          # produces target\release\planor.exe
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier unit   # quick tests
+```
+
+| Where | What is there |
+|---|---|
+| `src/` | The daemon, layout engine, overlay renderer and Windows glue |
+| `tests/` | Unit tests plus live desktop scenario tests |
+| `tools/planor-rec/` | A screen recorder and analyzer used to check animations |
+| `docs/` | [Architecture](docs/ARCHITECTURE.md), [test plan](docs/TEST_PLAN.md) and design notes |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each version |
+
+The live tests drive your real desktop, so do not touch the machine while they run. [`CLAUDE.md`](CLAUDE.md) explains the test workflow in more detail.
+
+---
+
+<p align="center"><sub>Made with care for people who open too many windows. 💙</sub></p>
