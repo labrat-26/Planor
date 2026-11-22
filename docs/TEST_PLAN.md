@@ -220,3 +220,9 @@ assert_recording_clean(&rec);                           // fails on any `fail` f
 $env:PLANOR_RECORD = "1"
 cargo test --test scn_taskbar tiles_stay_inside_work_area -- --ignored --test-threads=1 --nocapture
 ```
+
+## Clean surface and desktop isolation (2.3)
+
+- **Backdrop stays for recorded tests.** When `PLANOR_RECORD=1`, `Recording::start` puts one `ExternalTestBackdrop` window (`WS_POPUP`, `WS_EX_NOACTIVATE`, solid `RGB(0,0,90)`) over every monitor's work area beneath the test sentinels so pixel analyzers never measure the user's background applications as tile pixels.
+- **Why a second Windows Desktop (`CreateDesktopW`) is not possible for screen tests.** Windows' Desktop Window Manager (DWM) and DXGI Desktop Duplication (`IDXGIOutputDuplication`) compose and capture only the single active interactive desktop (`WinSta0\Default`). A background/secondary Win32 desktop has no DWM composition output available to `DuplicateOutput`, and Win32 `SendInput`/`keybd_event`/`SetCursorPos` act on the interactive session desktop.
+- **Full visual isolation requires a VM.** Because the interactive desktop is shared with user windows and display topology, a virtual machine is the only way to achieve complete screen/input isolation. Whether to set up a VM stays the user's decision.
