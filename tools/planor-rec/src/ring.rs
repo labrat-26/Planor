@@ -1186,4 +1186,112 @@ seg-0-005.ts,5.000000,5.400000
         assert!(csv_raw.contains("\n0,100,1,ok,0\n1,200,1,ok,0\n"));
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn ffmpeg_segment_wrap_and_concat_remux_produces_mp4() {
+        let Some(ffmpeg) = util::find_ffmpeg() else {
+            return;
+        };
+        let dir = std::env::temp_dir().join(format!("planor-ring-ffmpeg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let seg_csv = dir.join("seg-0.csv");
+        let seg_pat = dir.join("seg-0-%03d.ts");
+
+        let status = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=320x180:rate=30:duration=2.5",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-keyint_min",
+                "30",
+                "-sc_threshold",
+                "0",
+                "-flags",
+                "+cgop",
+                "-f",
+                "segment",
+                "-segment_format",
+                "mpegts",
+                "-segment_time",
+                "1",
+                "-segment_wrap",
+                "4",
+                "-segment_list",
+            ])
+            .arg(&seg_csv)
+            .args([
+                "-segment_list_type",
+                "csv",
+                "-segment_list_flags",
+                "+live",
+                "-segment_list_size",
+                "4",
+            ])
+            .arg(&seg_pat)
+            .status()
+            .expect("spawn ffmpeg testsrc");
+        assert!(status.success(), "ffmpeg segment generation failed: {status}");
+
+        let raw_csv = fs::read_to_string(&seg_csv).expect("seg-0.csv readable");
+        let entries = parse_segment_csv(&raw_csv);
+        assert!(!entries.is_empty(), "expected segment entries in seg-0.csv");
+        let chosen = select_segments(&entries, 2, 4);
+        assert!(!chosen.is_empty(), "expected selected segments");
+
+        let tmp = dir.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let mut aligned_paths = Vec::new();
+        for e in &chosen {
+            let dst = tmp.join(&e.filename);
+            let bytes = copy_ts_aligned(&dir.join(&e.filename), &dst).unwrap();
+            assert!(bytes >= SEGMENT_BYTES_PACKET as u64);
+            aligned_paths.push(dst);
+        }
+        let concat_txt = tmp.join("concat-0.txt");
+        write_concat_file(&aligned_paths, &concat_txt).unwrap();
+
+        let mp4 = dir.join("video-0.mp4");
+        let remux = Command::new(&ffmpeg)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-fflags",
+                "+genpts",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+            ])
+            .arg(&concat_txt)
+            .args(["-c", "copy", "-movflags", "+faststart"])
+            .arg(&mp4)
+            .status()
+            .expect("spawn ffmpeg concat remux");
+        assert!(remux.success(), "ffmpeg concat remux failed: {remux}");
+
+        let bytes = fs::read(&mp4).expect("video-0.mp4 readable");
+        assert!(bytes.len() > 2000, "unexpectedly small mp4 ({} bytes)", bytes.len());
+        assert!(
+            bytes.windows(4).any(|w| w == b"ftyp"),
+            "missing MP4 ftyp header box"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
