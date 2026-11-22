@@ -29,12 +29,12 @@ pub(crate) fn find_planor_rec() -> Option<PathBuf> {
             return Some(p);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let sibling = dir.join("planor-rec.exe");
-            if sibling.is_file() {
-                return Some(sibling);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let sibling = dir.join("planor-rec.exe");
+        if sibling.is_file() {
+            return Some(sibling);
         }
     }
     let manifest_rel = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/planor-rec-bin/planor-rec.exe");
@@ -105,7 +105,7 @@ impl Watchdog {
                     break;
                 }
                 ticks += 1;
-                if ticks % 5 == 0 {
+                if ticks.is_multiple_of(5) {
                     perf::sample_counters();
                 }
                 let now = perf::qpc_us();

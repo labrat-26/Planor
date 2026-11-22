@@ -128,8 +128,146 @@ impl Journal {
 use planor::{Gesture, Rect, Strip, Swipe};
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HotCfg {
+    pub gap_px: i32,
+    pub first_pair_split: bool,
+    pub default_tile_share: f64,
+    pub peek_enabled: bool,
+    pub peek_width_px: i32,
+    pub stack_peek_px: Option<i32>,
+    pub stack_zone_percent: i32,
+    pub spawn_on_cursor_monitor: bool,
+    pub focus_follows_mouse: bool,
+    pub warp_cursor_to_focused: bool,
+    pub drag_stack_modifier_vk: i32,
+    pub border_width_px: f32,
+    pub border_radius_px: f32,
+    pub focused_color: Option<u32>,
+    pub stacked_color: Option<u32>,
+    pub pinned_color: Option<u32>,
+    pub drop_target_color: Option<u32>,
+    pub group_hover_color: Option<u32>,
+    pub anim_enabled: bool,
+    pub anim_duration_ms: u64,
+    pub anim_spring: bool,
+    pub anim_placeholder: bool,
+    pub anim_scroll: bool,
+    pub anim_open_close: bool,
+    pub anim_resize: bool,
+    pub anim_drag_reflow: bool,
+    pub anim_stack_switch: bool,
+    pub three_finger_enabled: bool,
+    pub axis_lock_deadzone: f64,
+    pub swipe_step_px: f64,
+    pub swipe_natural_direction: bool,
+    pub swipe_scroll_gain: f64,
+    pub swipe_inertia: bool,
+    pub swipe_drag_gain: f64,
+    pub swipe_drag_accel: f64,
+    pub swipe_drag_cross_monitors: bool,
+    pub swipe_fling_enabled: bool,
+    pub swipe_fling_speed: f64,
+    pub win_wheel_step_px: f64,
+    pub max_log_bytes: u64,
+    pub max_log_files: usize,
+}
+
+fn parse_hex_color(v: &toml::Value) -> Option<u32> {
+    v.as_str()
+        .and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok())
+}
+
+impl HotCfg {
+    pub(crate) fn from_toml(cfg: &toml::Value) -> Self {
+        let layout = &cfg["layout"];
+        let borders = &cfg["borders"];
+        let animation = &cfg["animation"];
+        let touchpad = &cfg["touchpad"];
+        let mouse = &cfg["mouse"];
+        let diagnostics = &cfg["diagnostics"];
+        let borders_enabled = borders["enabled"].as_bool() == Some(true);
+        let color = |k: &str| {
+            if borders_enabled {
+                parse_hex_color(&borders[k])
+            } else {
+                None
+            }
+        };
+        Self {
+            gap_px: layout["gap_px"].as_integer().unwrap_or(6) as i32,
+            first_pair_split: layout["first_pair_split"].as_bool().unwrap_or(true),
+            default_tile_share: layout["default_tile_share"].as_float().unwrap_or(0.5),
+            peek_enabled: layout["peek_enabled"].as_bool() == Some(true),
+            peek_width_px: layout["peek_width_px"].as_integer().unwrap_or(48) as i32,
+            stack_peek_px: layout["stack_peek_px"].as_integer().map(|v| v as i32),
+            stack_zone_percent: layout["stack_zone_percent"].as_integer().unwrap_or(50) as i32,
+            spawn_on_cursor_monitor: layout["spawn_on_cursor_monitor"].as_bool() == Some(true),
+            focus_follows_mouse: layout["focus_follows_mouse"].as_bool() == Some(true),
+            warp_cursor_to_focused: layout["warp_cursor_to_focused"].as_bool() == Some(true),
+            drag_stack_modifier_vk: match layout["drag_stack_modifier"].as_str() {
+                Some("Ctrl") => 17,
+                Some("Alt") => 18,
+                _ => 16,
+            },
+            border_width_px: borders["width_px"].as_integer().unwrap_or(2) as f32,
+            border_radius_px: borders["corner_radius_px"].as_integer().unwrap_or(8) as f32,
+            focused_color: color("focused_color"),
+            stacked_color: color("stacked_color"),
+            pinned_color: color("pinned_color"),
+            drop_target_color: color("drop_target_color"),
+            group_hover_color: color("group_hover_color"),
+            anim_enabled: animation["enabled"].as_bool() == Some(true),
+            anim_duration_ms: animation["duration_ms"].as_integer().unwrap_or(180) as u64,
+            anim_spring: animation["curve"].as_str() == Some("spring"),
+            anim_placeholder: animation["placeholder"].as_bool() != Some(false),
+            anim_scroll: animation["scroll"].as_bool() == Some(true),
+            anim_open_close: animation["open_close"].as_bool() == Some(true),
+            anim_resize: animation["resize"].as_bool() == Some(true),
+            anim_drag_reflow: animation["drag_reflow"].as_bool() == Some(true),
+            anim_stack_switch: animation["stack_switch"].as_bool() == Some(true),
+            three_finger_enabled: touchpad["three_finger_enabled"].as_bool() == Some(true),
+            axis_lock_deadzone: touchpad["axis_lock_deadzone"].as_integer().unwrap_or(12) as f64,
+            swipe_step_px: touchpad["swipe_step_px"].as_integer().unwrap_or(60) as f64,
+            swipe_natural_direction: touchpad["swipe_natural_direction"].as_bool() == Some(true),
+            swipe_scroll_gain: touchpad["swipe_scroll_gain"].as_float().unwrap_or(1.),
+            swipe_inertia: touchpad["swipe_inertia"].as_bool() == Some(true),
+            swipe_drag_gain: touchpad["swipe_drag_gain"].as_float().unwrap_or(1.),
+            swipe_drag_accel: touchpad["swipe_drag_accel"].as_float().unwrap_or(0.),
+            swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool() == Some(true),
+            swipe_fling_enabled: touchpad["swipe_fling_enabled"].as_bool() == Some(true),
+            swipe_fling_speed: touchpad["swipe_fling_speed"].as_integer().unwrap_or(900) as f64,
+            win_wheel_step_px: mouse["win_wheel_step_px"].as_integer().unwrap_or(240) as f64,
+            max_log_bytes: (diagnostics["max_log_mb"].as_integer().unwrap_or(25) as u64) * 1024 * 1024,
+            max_log_files: diagnostics["max_log_files"].as_integer().unwrap_or(3) as usize,
+        }
+    }
+
+    #[inline]
+    pub(crate) fn reveal_peek_px(self) -> i32 {
+        if self.peek_enabled {
+            self.peek_width_px + self.gap_px
+        } else {
+            0
+        }
+    }
+
+    #[inline]
+    pub(crate) fn anim_action_enabled(self, action: &str) -> bool {
+        match action {
+            "scroll" => self.anim_scroll,
+            "open_close" => self.anim_open_close,
+            "resize" => self.anim_resize,
+            "drag_reflow" => self.anim_drag_reflow,
+            "stack_switch" => self.anim_stack_switch,
+            _ => false,
+        }
+    }
+}
 use win32::Event;
 type Key = (u128, String);
 pub(crate) struct GestureRec {
@@ -188,9 +326,11 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub renderer: crossbeam_channel::Sender<render::Message>,
     pub action: &'static str,
     pub cfg: toml::Value,
+    pub hot: HotCfg,
     pub journal: Journal,
     pub strips: BTreeMap<Key, Strip>,
     pub displays: Vec<(String, Rect, Rect)>,
+    pub displays_arc: Arc<[(String, Rect, Rect)]>,
     pub desktop: Option<u128>,
     pub active: String,
     pub pinned: HashSet<isize>,
@@ -208,6 +348,7 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub spawn_hint: Option<String>,
     pub quick: bool,
     pub last_holes: Vec<Rect>,
+    pub last_holes_arc: Arc<[Rect]>,
     pub holes_checked: Instant,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
@@ -246,6 +387,7 @@ impl<B: WindowBackend> Engine<B> {
         let diag_enabled = cfg["diagnostics"]["enabled"].as_bool() == Some(true);
         let desktop = backend.current_desktop();
         let max_refresh_hz = backend.max_refresh_hz();
+        let hot = HotCfg::from_toml(&cfg);
         Self {
             backend,
             pad: None,
@@ -255,10 +397,12 @@ impl<B: WindowBackend> Engine<B> {
             renderer,
             action: "open_close",
             cfg,
+            hot,
             journal,
             diag: diag::Telemetry::new(diag_enabled),
             strips: Default::default(),
             displays: vec![],
+            displays_arc: Arc::from([]),
             desktop,
             active: String::new(),
             pinned: Default::default(),
@@ -274,6 +418,7 @@ impl<B: WindowBackend> Engine<B> {
             spawn_hint: None,
             quick: false,
             last_holes: vec![],
+            last_holes_arc: Arc::from([]),
             holes_checked: Instant::now(),
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
@@ -321,19 +466,14 @@ impl<B: WindowBackend> Engine<B> {
         self.paused || self.locked || self.deadline.is_some() || self.desktop.is_none()
     }
     fn reveal(&mut self) {
-        let width = if self.cfg["layout"]["peek_enabled"].as_bool() == Some(true) {
-            self.cfg["layout"]["peek_width_px"].as_integer().unwrap() as i32
-                + self.cfg["layout"]["gap_px"].as_integer().unwrap() as i32
-        } else {
-            0
-        };
+        let width = self.hot.reveal_peek_px();
         if let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) {
             s.reveal(width)
         }
         self.dirty = true
     }
     fn mark_cover(&mut self, id: isize) {
-        if self.cfg["animation"]["placeholder"].as_bool() != Some(false) {
+        if self.hot.anim_placeholder {
             self.covering.insert(id, Instant::now());
         }
     }
@@ -382,9 +522,9 @@ impl<B: WindowBackend> Engine<B> {
             .strips
             .entry((self.desktop.unwrap(), name))
             .or_insert_with(|| Strip::new(area));
-        s.gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as _;
-        s.split = self.cfg["layout"]["first_pair_split"].as_bool().unwrap();
-        s.share = self.cfg["layout"]["default_tile_share"].as_float().unwrap();
+        s.gap = self.hot.gap_px;
+        s.split = self.hot.first_pair_split;
+        s.share = self.hot.default_tile_share;
         s.insert(id, self.backend.minimum(id, area.horizontal()));
         self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
         self.born.insert(id, (Instant::now(), 0));
@@ -507,11 +647,12 @@ impl<B: WindowBackend> Engine<B> {
             }
             Command::Reload => {
                 self.cfg = self.backend.load_config()?;
+                self.hot = HotCfg::from_toml(&self.cfg);
                 self.config_version += 1;
                 perf::set_diag_enabled(self.cfg["diagnostics"]["enabled"].as_bool() == Some(true));
                 let _ = reload.send(self.cfg.clone());
                 for s in self.strips.values_mut() {
-                    s.gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as _
+                    s.gap = self.hot.gap_px;
                 }
                 self.reveal()
             }
@@ -953,7 +1094,7 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        if self.cfg["layout"]["focus_follows_mouse"].as_bool() == Some(true) {
+        if self.hot.focus_follows_mouse {
             let (px, py) = self.backend.cursor_pos();
             let id = self.backend.window_at_point(px, py);
             if self.owning(id).is_some() && self.backend.foreground() != id {
@@ -1019,11 +1160,11 @@ impl<B: WindowBackend> Engine<B> {
         self.reveal()
     }
     fn select(&mut self, id: isize) {
-        if let Some((desk, name)) = self.owning(id) {
-            if Some(desk) == self.desktop {
-                self.active = name.clone();
-                self.strips.get_mut(&(desk, name)).unwrap().select(id)
-            }
+        if let Some((desk, name)) = self.owning(id)
+            && Some(desk) == self.desktop
+        {
+            self.active = name.clone();
+            self.strips.get_mut(&(desk, name)).unwrap().select(id)
         }
     }
     pub(crate) fn topology(&mut self) {
@@ -1031,6 +1172,7 @@ impl<B: WindowBackend> Engine<B> {
         self.monitors_checked = Instant::now();
         self.max_refresh_hz = self.backend.max_refresh_hz();
         let old = std::mem::replace(&mut self.displays, self.backend.monitors());
+        self.displays_arc = Arc::from(self.displays.as_slice());
         for ((_, name), s) in &mut self.strips {
             if let Some((_, area, _)) = self.displays.iter().find(|m| &m.0 == name) {
                 s.set_area(*area);
@@ -1065,18 +1207,16 @@ impl<B: WindowBackend> Engine<B> {
     }
     /// The strip of a monitor, created with the layout settings `add` uses.
     fn home_strip(&mut self, key: Key, area: Rect) -> &mut Strip {
-        let gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as i32;
-        let split = self.cfg["layout"]["first_pair_split"].as_bool().unwrap();
-        let share = self.cfg["layout"]["default_tile_share"].as_float().unwrap();
         let s = self.strips.entry(key).or_insert_with(|| Strip::new(area));
-        s.gap = gap;
-        s.split = split;
-        s.share = share;
+        s.gap = self.hot.gap_px;
+        s.split = self.hot.first_pair_split;
+        s.share = self.hot.default_tile_share;
         s
     }
     /// Puts every window whose monitor is attached again back on that monitor, including windows that
     /// `pull-orphans` moved to another monitor. A window whose monitor is still detached stays remembered.
     fn return_home(&mut self) {
+        let peek = self.hot.reveal_peek_px();
         let entries: Vec<(isize, String)> = self.homes.drain().collect();
         for (id, home) in entries {
             let Some(owner) = self.owning(id) else { continue };
@@ -1089,12 +1229,6 @@ impl<B: WindowBackend> Engine<B> {
                     s.remove(id);
                     s.fill();
                 }
-                let peek = if self.cfg["layout"]["peek_enabled"].as_bool() == Some(true) {
-                    self.cfg["layout"]["peek_width_px"].as_integer().unwrap() as i32
-                        + self.cfg["layout"]["gap_px"].as_integer().unwrap() as i32
-                } else {
-                    0
-                };
                 let minimum = self.backend.minimum(id, area.horizontal());
                 let s = self.home_strip((owner.0, home), area);
                 s.insert(id, minimum);
@@ -1108,9 +1242,11 @@ impl<B: WindowBackend> Engine<B> {
         if self.blocked() || !self.dirty {
             return Ok(());
         }
+        let t = Instant::now();
+        let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
         self.dirty = false;
         self.seq += 1;
-        self.covering.retain(|_, t| t.elapsed() < Duration::from_millis(500));
+        self.covering.retain(|_, covered_at| covered_at.elapsed() < Duration::from_millis(500));
         for s in self.strips.values_mut() {
             s.fill_gaps()
         }
@@ -1121,7 +1257,7 @@ impl<B: WindowBackend> Engine<B> {
             && self.settle.is_none()
             && self.inertia.is_none();
         if settled_state {
-            let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
+            let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
             for ((desk, _), strip) in &self.strips {
                 if Some(*desk) != self.desktop {
                     continue;
@@ -1137,7 +1273,8 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        let mut tiles = Vec::new();
+        let cap: usize = self.strips.values().map(|s| s.columns.len()).sum::<usize>() + self.pinned.len();
+        let mut tiles = Vec::with_capacity(cap);
         let foreground = self.backend.foreground();
         let external = self.owning(foreground).is_none() && self.backend.external(foreground);
         // Unmanaged app windows (an elevated Task Manager, a rule-ignored app): the overlay must never be
@@ -1147,61 +1284,51 @@ impl<B: WindowBackend> Engine<B> {
         // carving those out would hide every border they draw, so isolated instances skip it unless a test
         // asks for it with PLANOR_HOLES.
         let live = self.pad_scrolling || self.inertia.is_some();
-        let holes = if live && self.holes_checked.elapsed() < Duration::from_millis(150) {
-            self.last_holes.clone()
-        } else {
+        if !(live && self.holes_checked.elapsed() < Duration::from_millis(150)) {
             self.holes_checked = Instant::now();
-            self.holes()
-        };
-        self.last_holes = holes.clone();
-        let color = |k: &str| {
-            if self.cfg["borders"]["enabled"].as_bool() == Some(true) {
-                self.cfg["borders"][k]
-                    .as_str()
-                    .and_then(|v| u32::from_str_radix(v.trim_start_matches('#'), 16).ok())
-            } else {
-                None
+            let holes = self.holes();
+            if holes != self.last_holes {
+                self.last_holes = holes;
+                self.last_holes_arc = Arc::from(self.last_holes.as_slice());
             }
-        };
+        }
+        let hot = self.hot;
         // While a window is carried nothing dodges out of its way (that reflow was erratic: too eager or not
         // at all). Instead every window on the monitor under the cursor shows its stack zone, filled; the
         // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
         let mut zones = vec![];
-        if let Some(d) = &self.drag {
-            if let (Some(k), Some(c)) = (&d.destination, color("drop_target_color")) {
-                if let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop) {
-                    let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
-                    let side = self.cfg["layout"]["stack_zone_percent"].as_integer().unwrap_or(50) as i32;
-                    for (id, _, z) in drop_zones(s, peek, side, d.id) {
-                        let hot = d.target == Some(id) && d.mode == planor::Drag::Stack;
-                        zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot { 0.85 } else { 0.35 } });
-                    }
-                }
+        if let Some(d) = &self.drag
+            && let (Some(k), Some(c)) = (&d.destination, hot.drop_target_color)
+            && let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop)
+        {
+            let peek = hot.stack_peek_px.unwrap_or(96);
+            let side = hot.stack_zone_percent;
+            for (id, _, z) in drop_zones(s, peek, side, d.id) {
+                let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
+                zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot_zone { 0.85 } else { 0.35 } });
             }
         }
-        let preview = std::mem::take(&mut self.strips);
-        for ((desk, name), strip) in &preview {
+        let stack_peek = hot.stack_peek_px.unwrap_or(96);
+        for ((desk, name), strip) in &self.strips {
             if Some(*desk) != self.desktop {
                 continue;
             }
-            for (id, mut rect) in
-                strip.rects(self.cfg["layout"]["stack_peek_px"].as_integer().unwrap() as i32)
-            {
+            for (id, mut rect) in strip.rects(stack_peek) {
                 if let Some(saved) = self.journal.entries.get(&id) {
                     let (i, _) = strip.locate(id).unwrap();
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         continue;
                     }
                     let fullscreen = strip.fullscreen_id() == Some(id);
-                    if fullscreen {
-                        if let Some((_, _, b)) = self.displays.iter().find(|m| &m.0 == name) {
-                            if strip.area.horizontal() {
-                                rect.y = b.y;
-                                rect.h = b.h
-                            } else {
-                                rect.x = b.x;
-                                rect.w = b.w
-                            }
+                    if fullscreen
+                        && let Some((_, _, b)) = self.displays.iter().find(|m| &m.0 == name)
+                    {
+                        if strip.area.horizontal() {
+                            rect.y = b.y;
+                            rect.h = b.h
+                        } else {
+                            rect.x = b.x;
+                            rect.w = b.w
                         }
                     }
                     let c = if fullscreen {
@@ -1210,21 +1337,21 @@ impl<B: WindowBackend> Engine<B> {
                         d.target == Some(id) && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
                     }) {
                         // The window a drop would swap with (or pull out beside).
-                        color("drop_target_color")
+                        hot.drop_target_color
                     } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
-                        d.destination.as_ref() == Some(&(*desk, name.clone()))
+                        d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
                             && d.target.is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
                             && strip.columns[i].members.len() > 1
                             && strip.columns[i].members[strip.columns[i].active] == id
                     }) {
-                        color("group_hover_color")
+                        hot.group_hover_color
                     } else if strip.columns[i].members.len() > 1
                         && strip.columns[i].members[strip.columns[i].active] == id
                     {
-                        color("stacked_color")
+                        hot.stacked_color
                     } else if !external && name == &self.active && strip.active() == Some(id) {
-                        color("focused_color")
+                        hot.focused_color
                     } else {
                         None
                     };
@@ -1255,41 +1382,40 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        self.strips = preview;
         for &id in &self.pinned {
-            if let (Some(rect), Some(saved)) = (self.backend.frame(id), self.journal.entries.get(&id)) {
-                if let Some((name, _, _)) = self.displays.iter().find(|(_, _, b)| {
+            if let (Some(rect), Some(saved)) = (self.backend.frame(id), self.journal.entries.get(&id))
+                && let Some((name, _, _)) = self.displays.iter().find(|(_, _, b)| {
                     rect.x >= b.x && rect.x < b.x + b.w && rect.y >= b.y && rect.y < b.y + b.h
-                }) {
-                    tiles.push(render::Tile {
-                        id,
-                        rect,
-                        monitor: name.clone(),
-                        color: color("pinned_color"),
-                        cookie: saved.cookie,
-                        pinned: true,
-                        fullscreen: false,
-                        preview: false,
-                        hidden: false,
-                        bound: rect,
-                        cover: None,
-                    })
-                }
+                })
+            {
+                tiles.push(render::Tile {
+                    id,
+                    rect,
+                    monitor: name.clone(),
+                    color: hot.pinned_color,
+                    cookie: saved.cookie,
+                    pinned: true,
+                    fullscreen: false,
+                    preview: false,
+                    hidden: false,
+                    bound: rect,
+                    cover: None,
+                })
             }
         }
         // The real animation time of this scene (0 when placed at once: under the fingers, a monitor
         // crossing, a fullscreen switch). The EXPECT lines carry the same value, so the recorder's lag check
         // waits for what is actually on screen.
         let duration = if !std::mem::take(&mut self.instant)
-            && self.cfg["animation"]["enabled"].as_bool() == Some(true)
-            && self.cfg["animation"][self.action].as_bool() == Some(true)
+            && hot.anim_enabled
+            && hot.anim_action_enabled(self.action)
         {
             // Live touchpad scrolling re-targets every few milliseconds; a short ease per update
             // smooths it without the strip trailing the fingers.
             if std::mem::take(&mut self.quick) {
                 70
             } else {
-                self.cfg["animation"]["duration_ms"].as_integer().unwrap() as u64
+                hot.anim_duration_ms
             }
         } else {
             self.quick = false;
@@ -1332,22 +1458,21 @@ impl<B: WindowBackend> Engine<B> {
             input_qpc_us: self.input_qpc_us.take().filter(|&t| perf::qpc_us() - t < 250_000),
             diagnostics: self.diag.enabled,
             tiles,
-            monitors: self.displays.clone(),
+            monitors: Arc::clone(&self.displays_arc),
             duration,
 
-            spring: self.cfg["animation"]["curve"].as_str() == Some("spring"),
-            width: self.cfg["borders"]["width_px"].as_integer().unwrap() as f32,
-            radius: self.cfg["borders"]["corner_radius_px"]
-                .as_integer()
-                .unwrap() as f32,
-            holes: holes.clone(),
+            spring: hot.anim_spring,
+            width: hot.border_width_px,
+            radius: hot.border_radius_px,
+            holes: Arc::clone(&self.last_holes_arc),
             zones,
             action: self.action,
             live,
         }))?;
         if self.diag.enabled {
-            diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, holes.len()));
+            diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, self.last_holes.len()));
         }
+        slow("layout", t);
         Ok(())
     }
     fn contacts(&mut self, p: Vec<(f64, f64)>) {
@@ -1377,10 +1502,8 @@ impl<B: WindowBackend> Engine<B> {
         }
         let swipe = self.gesture.sample(
             &p,
-            self.cfg["touchpad"]["axis_lock_deadzone"]
-                .as_integer()
-                .unwrap() as f64,
-            self.cfg["touchpad"]["swipe_step_px"].as_integer().unwrap() as f64,
+            self.hot.axis_lock_deadzone,
+            self.hot.swipe_step_px,
         );
         // Three fingers move the focus, four fingers move the focused window. With the
         // natural direction the content follows the fingers (swipe right = focus left).
@@ -1400,7 +1523,7 @@ impl<B: WindowBackend> Engine<B> {
             Swipe::ScrollV(d) => self.pad_scroll(d, true),
             Swipe::ScrollEnd => self.pad_scroll_end(),
             Swipe::Step { fingers, horizontal, direction } => {
-                let natural = self.cfg["touchpad"]["swipe_natural_direction"].as_bool() == Some(true);
+                let natural = self.hot.swipe_natural_direction;
                 let forward = (direction > 0) != natural;
                 let key = match (fingers, horizontal, forward) {
                     (3, true, false) => "focus_left",
@@ -1473,29 +1596,28 @@ impl<B: WindowBackend> Engine<B> {
             "focus_up" => Some((0, -1)),
             "focus_down" => Some((0, 1)),
             _ => None,
-        } {
-            if let Some(strip) = self.key().and_then(|k| self.strips.get(&k)) {
-                let cross = (dx != 0) != strip.area.horizontal();
-                let at_edge = if cross {
-                    strip
-                        .columns
-                        .get(strip.focus)
-                        .is_none_or(|c| c.members.len() == 1)
-                } else if dx + dy < 0 {
-                    strip.focus == 0
-                } else {
-                    strip.focus + 1 >= strip.columns.len()
-                };
-                if at_edge {
-                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
-                    if let Some(index) = self
-                        .displays
-                        .iter()
-                        .position(|m| m.0 == self.active)
-                        .and_then(|i| planor::adjacent(bounds[i], &bounds, dx, dy))
-                    {
-                        let name=&self.displays[index].0;if self.desktop.is_some_and(|d|self.strips.get(&(d,name.clone())).and_then(|s|s.active()).is_some()){self.active=name.clone();transferred=true}
-                    }
+        } && let Some(strip) = self.key().and_then(|k| self.strips.get(&k))
+        {
+            let cross = (dx != 0) != strip.area.horizontal();
+            let at_edge = if cross {
+                strip
+                    .columns
+                    .get(strip.focus)
+                    .is_none_or(|c| c.members.len() == 1)
+            } else if dx + dy < 0 {
+                strip.focus == 0
+            } else {
+                strip.focus + 1 >= strip.columns.len()
+            };
+            if at_edge {
+                let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                if let Some(index) = self
+                    .displays
+                    .iter()
+                    .position(|m| m.0 == self.active)
+                    .and_then(|i| planor::adjacent(bounds[i], &bounds, dx, dy))
+                {
+                    let name=&self.displays[index].0;if self.desktop.is_some_and(|d|self.strips.get(&(d,name.clone())).and_then(|s|s.active()).is_some()){self.active=name.clone();transferred=true}
                 }
             }
         }
@@ -1540,35 +1662,34 @@ impl<B: WindowBackend> Engine<B> {
         self.reveal();
         if let Some(id) = id {
             self.backend.activate(id);
-            if self.cfg["layout"]["warp_cursor_to_focused"].as_bool() == Some(true) {
-                if let Some(r) = self.strips[&self.key().unwrap()]
+            if self.hot.warp_cursor_to_focused
+                && let Some(r) = self.strips[&self.key().unwrap()]
                     .rects(0)
                     .into_iter()
                     .find(|(wid, _)| *wid == id)
                     .map(|(_, r)| r)
-                {
-                    self.backend.set_cursor_pos(r.x + r.w / 2, r.y + r.h / 2);
-                }
+            {
+                self.backend.set_cursor_pos(r.x + r.w / 2, r.y + r.h / 2);
             }
         }
     }
     fn drag_begin(&mut self, id: isize) {
-        if let Some(key) = self.owning(id) {
-            if let Some(original) = self.backend.frame(id) {
-                let point = self.backend.cursor_pos();
-                self.drag = Some(DragSession {
-                    id,
-                    key,
-                    original,
-                    point,
-                    sampled: Instant::now(),
-                    hover: Instant::now(),
-                    target: None,
-                    mode: planor::Drag::None,
-                    destination: None,
-                });
-                self.dirty = true
-            }
+        if let Some(key) = self.owning(id)
+            && let Some(original) = self.backend.frame(id)
+        {
+            let point = self.backend.cursor_pos();
+            self.drag = Some(DragSession {
+                id,
+                key,
+                original,
+                point,
+                sampled: Instant::now(),
+                hover: Instant::now(),
+                target: None,
+                mode: planor::Drag::None,
+                destination: None,
+            });
+            self.dirty = true
         }
     }
     /// Three fingers sideways: the strip follows the fingers live (no animation) and the focus moves to
@@ -1605,8 +1726,8 @@ impl<B: WindowBackend> Engine<B> {
     /// Move the strip (or roll the focused group) by `d` finger units. Shared by the live gesture and the
     /// momentum that carries on after the fingers lift.
     fn scroll_by(&mut self, d: f64, vertical: bool, live: bool) {
-        let gain = self.cfg["touchpad"]["swipe_scroll_gain"].as_float().unwrap_or(1.);
-        let natural = self.cfg["touchpad"]["swipe_natural_direction"].as_bool() == Some(true);
+        let gain = self.hot.swipe_scroll_gain;
+        let natural = self.hot.swipe_natural_direction;
         let signed = if natural { -d } else { d } * gain;
         if self.hopped {
             return;
@@ -1677,7 +1798,7 @@ impl<B: WindowBackend> Engine<B> {
         if self.desktop.is_some_and(|d| self.strips.contains_key(&(d, name.clone()))) {
             self.active = name;
         }
-        let step = self.cfg["mouse"]["win_wheel_step_px"].as_integer().unwrap_or(240) as f64;
+        let step = self.hot.win_wheel_step_px;
         // Wheel down is a negative delta; the tilt wheel is positive to the right. Mouse only: fine touchpad
         // steps (not whole notches of 120) are left alone (the hook already lets them through). A fast spin can
         // pack several notches into one event: at most two per event.
@@ -1722,7 +1843,7 @@ impl<B: WindowBackend> Engine<B> {
         }
         self.scroll_samples.clear();
         let speed = sum / 0.1;
-        let enabled = self.cfg["touchpad"]["swipe_inertia"].as_bool() == Some(true);
+        let enabled = self.hot.swipe_inertia;
         if enabled && speed.abs() > 150. {
             self.inertia = Some((vertical, speed, now));
             self.settle = None;
@@ -1787,7 +1908,7 @@ impl<B: WindowBackend> Engine<B> {
         // Carrying a window across monitors with different DPI makes the app resize and re-render on
         // every step (the recording shows it flickering to odd sizes and freezing). By default the drag
         // stays on its own monitor and a fling does the crossing in one step.
-        let cross = self.cfg["touchpad"]["swipe_drag_cross_monitors"].as_bool() == Some(true);
+        let cross = self.hot.swipe_drag_cross_monitors;
         let own = self
             .displays
             .iter()
@@ -1818,8 +1939,8 @@ impl<B: WindowBackend> Engine<B> {
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
-        let base = self.cfg["touchpad"]["swipe_drag_gain"].as_float().unwrap_or(1.);
-        let accel = self.cfg["touchpad"]["swipe_drag_accel"].as_float().unwrap_or(0.);
+        let base = self.hot.swipe_drag_gain;
+        let accel = self.hot.swipe_drag_accel;
         let Some(p) = self.pad.as_mut() else { return };
         let now = Instant::now();
         // Acceleration: the faster the fingers move, the further the window goes per unit.
@@ -1880,8 +2001,8 @@ impl<B: WindowBackend> Engine<B> {
             (p.cursor.0 - p.grab.0).round() as i32,
             (p.cursor.1 - p.grab.1).round() as i32,
         );
-        let threshold = self.cfg["touchpad"]["swipe_fling_speed"].as_integer().unwrap_or(900) as f64;
-        if self.cfg["touchpad"]["swipe_fling_enabled"].as_bool() == Some(true)
+        let threshold = self.hot.swipe_fling_speed;
+        if self.hot.swipe_fling_enabled
             && vx.hypot(vy) >= threshold
         {
             let (dx, dy) = if vx.abs() >= vy.abs() {
@@ -1959,8 +2080,8 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         let _ = velocity;
-        let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
-        let side = self.cfg["layout"]["stack_zone_percent"].as_integer().unwrap_or(50) as i32;
+        let peek = self.hot.stack_peek_px.unwrap_or(96);
+        let side = self.hot.stack_zone_percent;
         // Hit-test the visible part of each window (a group member beyond its peek is clipped away).
         let target = self.strips.get(&k).and_then(|s| {
             s.rects(peek)
@@ -1990,12 +2111,7 @@ impl<B: WindowBackend> Engine<B> {
         let column = home.and_then(|s| s.locate(d.id)).map(|(i, _)| i);
         let grouped = home.zip(column).is_some_and(|(s, i)| s.columns[i].members.len() > 1);
         // Holding the drag modifier (Shift by default) makes the drop do nothing: the window goes back.
-        let vk = match self.cfg["layout"]["drag_stack_modifier"].as_str() {
-            Some("Ctrl") => 17,
-            Some("Alt") => 18,
-            _ => 16,
-        };
-        let held = self.backend.key_down(vk);
+        let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
         let mode = target
             .filter(|_| !held)
             .map(|(t, fraction, in_zone)| {
@@ -2080,10 +2196,10 @@ impl<B: WindowBackend> Engine<B> {
         let Some((_, area, _)) = self.displays.iter().find(|m| m.0 == dest.1).cloned() else {
             return;
         };
-        if let Some(target) = d.target {
-            if !self.backend.is_window(target) || self.owning(target) != Some(dest.clone()) {
-                return;
-            }
+        if let Some(target) = d.target
+            && (!self.backend.is_window(target) || self.owning(target) != Some(dest.clone()))
+        {
+            return;
         }
         if let (planor::Drag::Swap, Some(target), true) = (d.mode, d.target, dest == d.key) {
             // Dropped on a window of the same monitor (not in its stack zone): the two exchange places.
@@ -2194,15 +2310,15 @@ impl<B: WindowBackend> Engine<B> {
             }
             Event::Rejected(seq, entries) if seq == self.seq && !self.blocked() => {
                 for (id, r) in entries {
-                    if let Some(k) = self.owning(id) {
-                        if self.placed.get(&id).is_some_and(|(n, _)| *n == seq) {
-                            let s = self.strips.get_mut(&k).unwrap();
-                            let i = s.locate(id).unwrap().0;
-                            let length = if s.area.horizontal() { r.w } else { r.h };
-                            if length > s.columns[i].length {
-                                s.resize(i, length, false);
-                                self.dirty = true
-                            }
+                    if let Some(k) = self.owning(id)
+                        && self.placed.get(&id).is_some_and(|(n, _)| *n == seq)
+                    {
+                        let s = self.strips.get_mut(&k).unwrap();
+                        let i = s.locate(id).unwrap().0;
+                        let length = if s.area.horizontal() { r.w } else { r.h };
+                        if length > s.columns[i].length {
+                            s.resize(i, length, false);
+                            self.dirty = true
                         }
                     }
                 }
@@ -2214,12 +2330,8 @@ impl<B: WindowBackend> Engine<B> {
                         let _ = diag::append(
                             &dir,
                             &serde_json::to_vec(&f).unwrap_or_default(),
-                            self.cfg["diagnostics"]["max_log_mb"].as_integer().unwrap() as u64
-                                * 1024
-                                * 1024,
-                            self.cfg["diagnostics"]["max_log_files"]
-                                .as_integer()
-                                .unwrap() as usize,
+                            self.hot.max_log_bytes,
+                            self.hot.max_log_files,
                         );
                     }
                 }
@@ -2248,7 +2360,7 @@ impl<B: WindowBackend> Engine<B> {
             Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.covering.remove(&id);self.dirty=true;},
             Event::Window(e, id) if !self.blocked() => match e {
                 EVENT_OBJECT_SHOW | EVENT_SYSTEM_MINIMIZEEND => {
-                    if self.cfg["layout"]["spawn_on_cursor_monitor"].as_bool() == Some(true)
+                    if self.hot.spawn_on_cursor_monitor
                         && e == EVENT_OBJECT_SHOW
                     {
                         let (px, py) = self.backend.cursor_pos();
@@ -2306,10 +2418,10 @@ impl<B: WindowBackend> Engine<B> {
                                 self.strips[&k].active() == Some(id) && k.1 == self.active;
                             self.strips.get_mut(&k).unwrap().remove(id);
                             self.strips.get_mut(&k).unwrap().fill();
-                            if focused {
-                                if let Some(next) = self.strips[&k].active() {
-                                    self.backend.activate(next)
-                                }
+                            if focused
+                                && let Some(next) = self.strips[&k].active()
+                            {
+                                self.backend.activate(next)
                             }
                             self.placed.remove(&id);
                             self.action = "open_close";
@@ -2334,7 +2446,7 @@ impl<B: WindowBackend> Engine<B> {
             }
             Event::Contacts(p)
                 if !self.blocked()
-                    && self.cfg["touchpad"]["three_finger_enabled"].as_bool() == Some(true) =>
+                    && self.hot.three_finger_enabled =>
             {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
@@ -2411,6 +2523,7 @@ pub fn run() -> Result<()> {
     win32::events(tx, cfg.clone(), rx);
     let desktop = backend.current_desktop();
     let max_refresh_hz = backend.max_refresh_hz();
+    let hot = HotCfg::from_toml(&cfg);
     let mut engine = Engine {
         backend,
         pad: None,
@@ -2420,10 +2533,12 @@ pub fn run() -> Result<()> {
         renderer: render::start(),
         action: "open_close",
         cfg,
+        hot,
         journal,
         diag,
         strips: Default::default(),
         displays: vec![],
+        displays_arc: Arc::from([]),
         desktop,
         active: String::new(),
         pinned: Default::default(),
@@ -2439,6 +2554,7 @@ pub fn run() -> Result<()> {
         spawn_hint: None,
         quick: false,
         last_holes: vec![],
+        last_holes_arc: Arc::from([]),
         holes_checked: Instant::now(),
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),
@@ -2475,29 +2591,25 @@ pub fn run() -> Result<()> {
     let mut fast = crossbeam_channel::tick(Duration::from_millis(fast_ms));
     let never = crossbeam_channel::never::<Instant>();
     let mut _hi_res: Option<win32::HighResTimer> = None;
+    let mut last_ipc_poll = Instant::now() - Duration::from_millis(10);
     let result = (|| -> Result<()> {
         loop {
             perf::heartbeat_daemon();
-            let t = Instant::now();
+            engine.layout()?;
+            let ipc_done = if server.connected
+                || server.has_pending_write()
+                || last_ipc_poll.elapsed() >= Duration::from_millis(4)
             {
-                let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
-                engine.layout()?;
-            }
-            slow("layout", t);
-            let ipc_done = {
-                let _span = perf::SpanGuard::new(perf::SpanKind::DaemonIpc);
+                last_ipc_poll = Instant::now();
                 server.poll(|cmd| engine.command(cmd, &reload))?
+            } else {
+                false
             };
             if ipc_done {
                 break;
             }
             if engine.dirty && !server.closing {
-                let t = Instant::now();
-                {
-                    let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
-                    engine.layout()?;
-                }
-                slow("layout", t);
+                engine.layout()?;
             }
             if server.has_pending_write() {
                 while let Ok(e) = events.try_recv() {
@@ -2559,6 +2671,54 @@ pub fn recover() -> Result<usize> {
     journal.restore(&Win32Backend)?;
     Ok(count)
 }
+/// Diagnostics: records the cursor position, mouse buttons and non-text keys with the same timestamps as
+/// the rest of the trace, so a black screen or flicker can be lined up with exactly what was done.
+/// Polled (no extra hook, so it cannot slow input). Keys that type text are only counted, never named:
+/// the log must not become a record of what was typed.
+fn record_input() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+    std::thread::spawn(|| {
+        let mut down = [false; 256];
+        let mut at = (i32::MIN, i32::MIN);
+        let mut chars = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(15));
+            let mut p = POINT::default();
+            if unsafe { GetCursorPos(&mut p) } != 0 && (p.x, p.y) != at {
+                at = (p.x, p.y);
+                diag::trace(format!("IN mouse {} {}", p.x, p.y));
+            }
+            for (vk, slot) in down.iter_mut().enumerate().take(255).skip(1) {
+                let now = unsafe { GetAsyncKeyState(vk as i32) } < 0;
+                if now == *slot {
+                    continue;
+                }
+                *slot = now;
+                let text = matches!(vk, 0x30..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDF | 0x60..=0x6F | 0x20);
+                if text {
+                    if now {
+                        chars += 1;
+                    }
+                    continue;
+                }
+                if chars > 0 {
+                    diag::trace(format!("IN text-keys x{chars}"));
+                    chars = 0;
+                }
+                let name = match vk {
+                    1 => "mouse-left".to_string(),
+                    2 => "mouse-right".to_string(),
+                    4 => "mouse-middle".to_string(),
+                    5 => "mouse-x1".to_string(),
+                    6 => "mouse-x2".to_string(),
+                    _ => format!("vk{vk:#04x}"),
+                };
+                diag::trace(format!("IN {} {name}", if now { "down" } else { "up" }));
+            }
+        }
+    });
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2584,52 +2744,4 @@ mod tests {
         Journal::open(path.clone()).unwrap().restore(&Win32Backend).unwrap();
         assert!(!path.exists())
     }
-}
-/// Diagnostics: records the cursor position, mouse buttons and non-text keys with the same timestamps as
-/// the rest of the trace, so a black screen or flicker can be lined up with exactly what was done.
-/// Polled (no extra hook, so it cannot slow input). Keys that type text are only counted, never named:
-/// the log must not become a record of what was typed.
-fn record_input() {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
-    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
-    std::thread::spawn(|| {
-        let mut down = [false; 256];
-        let mut at = (i32::MIN, i32::MIN);
-        let mut chars = 0u32;
-        loop {
-            std::thread::sleep(Duration::from_millis(15));
-            let mut p = POINT::default();
-            if unsafe { GetCursorPos(&mut p) } != 0 && (p.x, p.y) != at {
-                at = (p.x, p.y);
-                diag::trace(format!("IN mouse {} {}", p.x, p.y));
-            }
-            for vk in 1..255usize {
-                let now = unsafe { GetAsyncKeyState(vk as i32) } < 0;
-                if now == down[vk] {
-                    continue;
-                }
-                down[vk] = now;
-                let text = matches!(vk, 0x30..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDF | 0x60..=0x6F | 0x20);
-                if text {
-                    if now {
-                        chars += 1;
-                    }
-                    continue;
-                }
-                if chars > 0 {
-                    diag::trace(format!("IN text-keys x{chars}"));
-                    chars = 0;
-                }
-                let name = match vk {
-                    1 => "mouse-left".to_string(),
-                    2 => "mouse-right".to_string(),
-                    4 => "mouse-middle".to_string(),
-                    5 => "mouse-x1".to_string(),
-                    6 => "mouse-x2".to_string(),
-                    _ => format!("vk{vk:#04x}"),
-                };
-                diag::trace(format!("IN {} {name}", if now { "down" } else { "up" }));
-            }
-        }
-    });
 }

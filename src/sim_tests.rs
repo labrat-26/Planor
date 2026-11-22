@@ -1181,9 +1181,10 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
         let text = std::fs::read_to_string(f).unwrap();
         // Guided recordings: the owner did not follow every instruction. Keep the gestures that match their
         // step (or the step before, when made late in the get-ready gap); set the rest aside.
+        type GestureList = Vec<(String, Vec<Vec<(f64, f64)>>)>;
         let all = planor::replay::segments(&planor::replay::parse_events_jsonl(&text));
         let total = all.len();
-        let gestures: Vec<(String, Vec<Vec<(f64, f64)>>)> = all
+        let gestures: GestureList = all
             .into_iter()
             .filter(|s| {
                 let g = planor::replay::identify(s);
@@ -1705,6 +1706,83 @@ fn sim_app_rejected_resize_enforces_minimum_on_landscape_and_portrait() {
         assert!(r.h >= 1300);
         mouse_resize(&mut h, 301, Rect { h: 500, ..r }, (-700, 500));
         assert!(h.rect(301).h >= 1300, "portrait app rejection restores >= 1300 px height: {:?}", h.rect(301));
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn hot_cfg_reloads_and_arc_scenes_stay_synced_on_landscape_and_portrait() {
+    for (mon, first_id, second_id, hole_id, initial_hole, moved_hole) in [
+        (
+            "MON0",
+            101,
+            102,
+            901,
+            Rect { x: 100, y: 100, w: 300, h: 300 },
+            Rect { x: 180, y: 140, w: 340, h: 280 },
+        ),
+        (
+            "MON2",
+            301,
+            302,
+            902,
+            Rect { x: -1200, y: 200, w: 300, h: 300 },
+            Rect { x: -1100, y: 320, w: 320, h: 360 },
+        ),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            three_per_monitor(sim);
+            let mut ext = SimWindow::new(hole_id, initial_hole);
+            ext.elevated = true;
+            sim.add_window(ext);
+        });
+        focus(&mut h, first_id);
+
+        // Initial HotCfg and Arc monitors/holes match configuration & topology.
+        assert_eq!(h.engine.hot.focused_color, Some(0x3B82F6), "{mon}: initial focused_color");
+        assert_eq!(h.engine.hot.gap_px, 6, "{mon}: initial gap_px");
+        assert_eq!(h.engine.hot.stack_peek_px, Some(96), "{mon}: initial stack_peek_px");
+        assert!(h.engine.hot.anim_placeholder, "{mon}: initial placeholder");
+        assert!((h.engine.hot.swipe_scroll_gain - 4.0).abs() < 1e-9, "{mon}: initial swipe_scroll_gain");
+        assert!((h.engine.hot.win_wheel_step_px - 240.0).abs() < 1e-9, "{mon}: initial win_wheel_step_px");
+        assert_eq!(h.engine.displays_arc.as_ref(), h.engine.displays.as_slice(), "{mon}: displays Arc synced");
+        assert!(h.engine.last_holes_arc.contains(&initial_hole), "{mon}: initial holes Arc synced");
+
+        // Update TOML config + move unmanaged hole window, then trigger Reload.
+        {
+            let mut d = h.desktop.0.lock().unwrap();
+            d.config["borders"]["focused_color"] = toml::Value::String("#FF00AA".into());
+            d.config["layout"]["gap_px"] = toml::Value::Integer(2);
+            d.config["layout"]["stack_peek_px"] = toml::Value::Integer(42);
+            d.config["animation"]["enabled"] = toml::Value::Boolean(false);
+            d.config["animation"]["placeholder"] = toml::Value::Boolean(false);
+            d.config["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(2.5);
+            d.config["mouse"]["win_wheel_step_px"] = toml::Value::Integer(360);
+            d.windows.get_mut(&hole_id).unwrap().rect = moved_hole;
+        }
+        h.cmd(Command::Reload);
+        h.settle();
+
+        assert_eq!(h.engine.hot.focused_color, Some(0xFF00AA), "{mon}: reloaded focused_color");
+        assert_eq!(h.engine.hot.gap_px, 2, "{mon}: reloaded gap_px");
+        assert_eq!(h.engine.hot.stack_peek_px, Some(42), "{mon}: reloaded stack_peek_px");
+        assert!(!h.engine.hot.anim_enabled, "{mon}: reloaded anim.enabled");
+        assert!(!h.engine.hot.anim_placeholder, "{mon}: reloaded anim.placeholder");
+        assert!((h.engine.hot.swipe_scroll_gain - 2.5).abs() < 1e-9, "{mon}: reloaded swipe_scroll_gain");
+        assert!((h.engine.hot.win_wheel_step_px - 360.0).abs() < 1e-9, "{mon}: reloaded win_wheel_step_px");
+
+        // Strip layout & Scene Arc holes reflect the reloaded gap and updated unmanaged window rect.
+        let r1 = h.rect(first_id);
+        let r2 = h.rect(second_id);
+        let gap = if mon == "MON0" {
+            r2.x - (r1.x + r1.w)
+        } else {
+            r2.y - (r1.y + r1.h)
+        };
+        assert_eq!(gap, 2, "{mon}: reloaded gap_px applied along strip axis");
+        let last_holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+        assert!(last_holes.contains(&moved_hole), "{mon}: Scene holes Arc refreshed to moved rect");
+        assert!(!last_holes.contains(&initial_hole), "{mon}: stale hole rect evicted");
         h.stop_clean();
     }
 }

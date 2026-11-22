@@ -92,14 +92,24 @@ unsafe extern "system" {
     fn GetGuiResources(hProcess: *mut c_void, uiFlags: u32) -> u32;
 }
 
-static QPC_FREQ: OnceLock<i64> = OnceLock::new();
+static QPC_FREQ: AtomicI64 = AtomicI64::new(0);
 
+#[inline]
 pub fn qpc_frequency() -> i64 {
-    *QPC_FREQ.get_or_init(|| {
-        let mut f = 0i64;
-        unsafe { QueryPerformanceFrequency(&mut f) };
-        if f <= 0 { 10_000_000 } else { f }
-    })
+    let f = QPC_FREQ.load(Ordering::Relaxed);
+    if f > 0 {
+        return f;
+    }
+    qpc_frequency_init()
+}
+
+#[cold]
+fn qpc_frequency_init() -> i64 {
+    let mut f = 0i64;
+    unsafe { QueryPerformanceFrequency(&mut f) };
+    let f = if f <= 0 { 10_000_000 } else { f };
+    QPC_FREQ.store(f, Ordering::Relaxed);
+    f
 }
 
 #[inline]
@@ -110,11 +120,20 @@ pub fn qpc_ticks() -> i64 {
 }
 
 #[inline]
-pub fn qpc_us() -> i64 {
-    let f = qpc_frequency();
-    ((qpc_ticks() as i128 * 1_000_000i128) / f as i128) as i64
+fn ticks_to_us_with_freq(ticks: i64, f: i64) -> i64 {
+    if f == 10_000_000 {
+        ticks / 10
+    } else {
+        ((ticks as i128 * 1_000_000i128) / f as i128) as i64
+    }
 }
 
+#[inline]
+pub fn qpc_us() -> i64 {
+    ticks_to_us_with_freq(qpc_ticks(), qpc_frequency())
+}
+
+#[inline]
 pub fn current_tid() -> u32 {
     unsafe { GetCurrentThreadId() }
 }
@@ -454,24 +473,23 @@ pub fn register_thread(name: &'static str) {
             0,
             DUPLICATE_SAME_ACCESS,
         );
-        let tid = GetCurrentThreadId();
-        if ok != 0 {
-            if let Ok(mut list) = store().threads.lock() {
-                if !list.iter().any(|t| t.tid == tid) {
-                    list.push(ThreadEntry {
-                        name,
-                        tid,
-                        handle: dup as isize,
-                    });
-                }
-            }
+        let tid = current_tid();
+        if ok != 0
+            && let Ok(mut list) = store().threads.lock()
+            && !list.iter().any(|t| t.tid == tid)
+        {
+            list.push(ThreadEntry {
+                name,
+                tid,
+                handle: dup as isize,
+            });
         }
     }
 }
 
 pub struct SpanGuard {
     kind: SpanKind,
-    start_us: i64,
+    start_ticks: i64,
     prev_span: u8,
     arg: u64,
     active: bool,
@@ -488,22 +506,26 @@ impl SpanGuard {
         if !PERF_ENABLED.load(Ordering::Relaxed) {
             return Self {
                 kind,
-                start_us: 0,
+                start_ticks: 0,
                 prev_span: 0,
                 arg,
                 active: false,
             };
         }
         let prev_span = if kind.is_daemon_thread() {
-            DAEMON_SPAN_ID.swap(kind as u8, Ordering::Relaxed)
+            let prev = DAEMON_SPAN_ID.load(Ordering::Relaxed);
+            DAEMON_SPAN_ID.store(kind as u8, Ordering::Relaxed);
+            prev
         } else if kind.is_render_thread() {
-            RENDER_SPAN_ID.swap(kind as u8, Ordering::Relaxed)
+            let prev = RENDER_SPAN_ID.load(Ordering::Relaxed);
+            RENDER_SPAN_ID.store(kind as u8, Ordering::Relaxed);
+            prev
         } else {
             0
         };
         Self {
             kind,
-            start_us: qpc_us(),
+            start_ticks: qpc_ticks(),
             prev_span,
             arg,
             active: true,
@@ -522,9 +544,19 @@ impl Drop for SpanGuard {
         } else if self.kind.is_render_thread() {
             RENDER_SPAN_ID.store(self.prev_span, Ordering::Relaxed);
         }
-        let end_us = qpc_us();
-        let dur_us = (end_us - self.start_us).max(0) as u64;
-        push_span(self.kind, self.start_us, dur_us, self.arg);
+        let end_ticks = qpc_ticks();
+        let f = qpc_frequency();
+        let (start_us, dur_us) = if f == 10_000_000 {
+            (
+                self.start_ticks / 10,
+                end_ticks.saturating_sub(self.start_ticks).max(0) as u64 / 10,
+            )
+        } else {
+            let start_us = ticks_to_us_with_freq(self.start_ticks, f);
+            let end_us = ticks_to_us_with_freq(end_ticks, f);
+            (start_us, (end_us - start_us).max(0) as u64)
+        };
+        push_span(self.kind, start_us, dur_us, self.arg);
     }
 }
 
@@ -899,7 +931,7 @@ pub fn build_report(frame_telemetry: Option<serde_json::Value>) -> PerfReport {
             arg: r.arg,
         })
         .collect();
-    slowest_spans.sort_by(|a, b| b.dur_us.cmp(&a.dur_us));
+    slowest_spans.sort_by_key(|a| std::cmp::Reverse(a.dur_us));
     slowest_spans.truncate(20);
 
     let threads = if let Ok(list) = store().threads.lock() {
@@ -1235,6 +1267,33 @@ mod tests {
         let report = build_report(None);
         assert!(report.spans.iter().any(|s| s.name == "daemon.tick"));
         reset();
+    }
+
+    #[test]
+    fn current_tid_matches_os_across_threads() {
+        let main_tid = current_tid();
+        assert_eq!(main_tid, unsafe { GetCurrentThreadId() });
+        assert_ne!(main_tid, 0);
+        let child_tid = std::thread::spawn(|| {
+            let tid = current_tid();
+            assert_eq!(tid, unsafe { GetCurrentThreadId() });
+            tid
+        })
+        .join()
+        .unwrap();
+        assert_ne!(child_tid, 0);
+        assert_ne!(child_tid, main_tid);
+    }
+
+    #[test]
+    fn ticks_to_us_matches_reference_for_10mhz_and_other_freqs() {
+        for ticks in [0i64, 1, 9, 10, 15, 123_456_789, -15, i64::MAX / 2] {
+            let ref_us = ((ticks as i128 * 1_000_000i128) / 10_000_000i128) as i64;
+            assert_eq!(ticks_to_us_with_freq(ticks, 10_000_000), ref_us);
+        }
+        assert_eq!(ticks_to_us_with_freq(3_579_545, 3_579_545), 1_000_000);
+        assert_eq!(ticks_to_us_with_freq(24_000_000, 24_000_000), 1_000_000);
+        assert_eq!(ticks_to_us_with_freq(12_000, 24_000_000), 500);
     }
 }
 

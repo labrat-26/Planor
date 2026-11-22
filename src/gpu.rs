@@ -118,6 +118,7 @@ pub struct GpuSample {
 }
 
 /// Lives on the sampling thread.
+#[derive(Default)]
 pub struct Sampler {
     adapter: Option<IDXGIAdapter3>,
     adapter_tried: bool,
@@ -128,16 +129,10 @@ pub struct Sampler {
     last: GpuSample,
 }
 
-impl Default for Sampler {
-    fn default() -> Self {
-        Self { adapter: None, adapter_tried: false, pdh: None, pdh_tried: false, last_dwm: None, tick: 0, last: GpuSample::default() }
-    }
-}
-
 impl Sampler {
     /// Called every counter sample (about 250 ms). PDH and DXGI are read once a second; DWM every time.
     pub fn sample(&mut self) -> GpuSample {
-        let slow = self.tick % 4 == 0;
+        let slow = self.tick.is_multiple_of(4);
         self.tick = self.tick.wrapping_add(1);
         let mut s = self.last;
         if slow {
@@ -314,7 +309,7 @@ mod tests {
             assert!((0. ..=100.).contains(&p), "engine {p}%");
         }
         for mb in [second.local_mb, second.shared_mb].into_iter().flatten() {
-            assert!(mb >= 0. && mb < 1e6, "video memory {mb} MB");
+            assert!((0. ..1e6).contains(&mb), "video memory {mb} MB");
         }
     }
 }

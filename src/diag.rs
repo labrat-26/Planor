@@ -92,20 +92,6 @@ pub fn append(dir: &Path, msg: &[u8], cap: u64, count: usize) -> Result<()> {
     f.write_all(b"\n")?;
     Ok(())
 }
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn caps() {
-        let d = std::env::temp_dir().join(format!("planor-log-{}", std::process::id()));
-        fs::create_dir_all(&d).unwrap();
-        for _ in 0..10 {
-            append(&d, b"1234", 8, 2).unwrap()
-        }
-        assert_eq!(fs::read_dir(&d).unwrap().count(), 2);
-        fs::remove_dir_all(d).unwrap()
-    }
-}
 /// Diagnostics trace: one text file, `%LOCALAPPDATA%\planor\trace.log`, every line stamped with UTC
 /// wall-clock time (HH:MM:SS.mmm). A file (not stderr) so it works however the daemon was started.
 static TRACE: std::sync::OnceLock<std::sync::Mutex<Option<fs::File>>> = std::sync::OnceLock::new();
@@ -135,9 +121,23 @@ pub fn trace(line: impl AsRef<str>) {
         });
         std::sync::Mutex::new(file)
     });
-    if let Ok(mut guard) = slot.lock() {
-        if let Some(f) = guard.as_mut() {
-            let _ = writeln!(f, "{} {}", stamp(), line.as_ref());
+    if let Ok(mut guard) = slot.lock()
+        && let Some(f) = guard.as_mut()
+    {
+        let _ = writeln!(f, "{} {}", stamp(), line.as_ref());
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn caps() {
+        let d = std::env::temp_dir().join(format!("planor-log-{}", std::process::id()));
+        fs::create_dir_all(&d).unwrap();
+        for _ in 0..10 {
+            append(&d, b"1234", 8, 2).unwrap()
         }
+        assert_eq!(fs::read_dir(&d).unwrap().count(), 2);
+        fs::remove_dir_all(d).unwrap()
     }
 }

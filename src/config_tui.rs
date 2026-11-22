@@ -214,7 +214,7 @@ fn shown(v: &toml::Value) -> String {
 fn colour(v: &toml::Value) -> Option<Color> {
     let s = v.as_str()?.strip_prefix('#')?;
     let n = u32::from_str_radix(s, 16).ok()?;
-    (s.len() == 6).then(|| Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
+    (s.len() == 6).then_some(Color::Rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
 }
 
 #[derive(PartialEq)]

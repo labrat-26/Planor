@@ -65,13 +65,13 @@ fn gen_sequence(rng: &mut Rng, len: usize) -> Vec<Op> {
             active_count = active_count.saturating_sub(1);
             Op::Close(rng.usize(997))
         } else if pick < 48 {
-            let step = if rng.next() % 2 == 0 { 1 } else { -1 };
-            let cross = rng.next() % 3 == 0;
+            let step = if rng.next().is_multiple_of(2) { 1 } else { -1 };
+            let cross = rng.next().is_multiple_of(3);
             Op::Navigate(step, cross)
         } else if pick < 54 {
             Op::Select(rng.usize(997))
         } else if pick < 62 {
-            Op::Resize(rng.usize(997), rng.range(250, 1400), rng.next() % 2 == 0)
+            Op::Resize(rng.usize(997), rng.range(250, 1400), rng.next().is_multiple_of(2))
         } else if pick < 70 {
             Op::Scroll(rng.range(-900, 900))
         } else if pick < 78 {
@@ -79,7 +79,7 @@ fn gen_sequence(rng: &mut Rng, len: usize) -> Vec<Op> {
         } else if pick < 83 {
             Op::Ungroup(rng.usize(997))
         } else if pick < 88 {
-            Op::Reorder(rng.usize(997), rng.usize(997), rng.next() % 2 == 0)
+            Op::Reorder(rng.usize(997), rng.usize(997), rng.next().is_multiple_of(2))
         } else if pick < 92 {
             let delta = (rng.range(-18, 18) as f64) / 10.0;
             Op::RollAndSettle(delta)
@@ -304,7 +304,7 @@ fn adversarial_and_disallowed_resizes_preserve_all_invariants() {
                 s.reveal(54);
             } else if pick < 72 {
                 let len = s.area.length();
-                let col_idx = if rng.next() % 8 == 0 {
+                let col_idx = if rng.next().is_multiple_of(8) {
                     s.columns.len() + 3 // OOB index
                 } else {
                     rng.usize(s.columns.len())
@@ -324,7 +324,7 @@ fn adversarial_and_disallowed_resizes_preserve_all_invariants() {
                     if fits && s.columns.len() == 2 { i32::MAX } else { len / 2 },
                 ];
                 let bad_len = choices[rng.usize(choices.len())];
-                let leading = col_idx == 0 && (rng.next() % 2 == 0) || (rng.next() % 2 == 0);
+                let leading = col_idx == 0 && rng.next().is_multiple_of(2) || rng.next().is_multiple_of(2);
                 s.resize(col_idx, bad_len, leading);
                 s.reveal(54);
             } else if pick < 80 {

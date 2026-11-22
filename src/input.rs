@@ -131,10 +131,9 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                         size as u32,
                     ) >= 0
                         && usages[..used as usize].contains(&0x42)
+                        && let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31))
                     {
-                        if let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31)) {
-                            let scale=|usage|{let mut c=HIDP_VALUE_CAPS::default();let mut n=1;if HidP_GetSpecificValueCaps(HidP_Input,1,link,usage,&mut c,&mut n,prep)<0||c.LogicalMax<=c.LogicalMin||c.PhysicalMax<=c.PhysicalMin{return 1.}let exponent=(c.UnitsExp as i32&15)<<28>>28;let units=match c.Units{0x11=>dpi/2.54,0x13=>dpi,_=>return 1.};(c.PhysicalMax-c.PhysicalMin) as f64/(c.LogicalMax-c.LogicalMin) as f64*10f64.powi(exponent)*units};points.push((get(13,link,0x51).unwrap_or(link as u32),(x as f64*scale(0x30),y as f64*scale(0x31))))
-                        }
+                        let scale=|usage|{let mut c=HIDP_VALUE_CAPS::default();let mut n=1;if HidP_GetSpecificValueCaps(HidP_Input,1,link,usage,&mut c,&mut n,prep)<0||c.LogicalMax<=c.LogicalMin||c.PhysicalMax<=c.PhysicalMin{return 1.}let exponent=(c.UnitsExp as i32&15)<<28>>28;let units=match c.Units{0x11=>dpi/2.54,0x13=>dpi,_=>return 1.};(c.PhysicalMax-c.PhysicalMin) as f64/(c.LogicalMax-c.LogicalMin) as f64*10f64.powi(exponent)*units};points.push((get(13,link,0x51).unwrap_or(link as u32),(x as f64*scale(0x30),y as f64*scale(0x31))))
                     }
                 }
             }

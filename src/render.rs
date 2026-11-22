@@ -1,7 +1,7 @@
 use super::*;
 use planor::Rect;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{Duration, Instant},
 };
 use windows::{
@@ -42,14 +42,14 @@ pub struct Scene {
     pub input: Option<Instant>,
     pub input_qpc_us: Option<i64>,
     pub diagnostics: bool,
-    pub monitors: Vec<(String, Rect, Rect)>,
+    pub monitors: std::sync::Arc<[(String, Rect, Rect)]>,
     pub tiles: Vec<Tile>,
     pub duration: u64,
     pub spring: bool,
     pub width: f32,
     pub radius: f32,
     /// Rectangles of unmanaged app windows (desktop coordinates): cut out of the overlay.
-    pub holes: Vec<Rect>,
+    pub holes: std::sync::Arc<[Rect]>,
     /// Filled boxes drawn under the borders: the stack drop zones while a window is carried.
     pub zones: Vec<Zone>,
     /// What caused this scene (scroll, drag_reflow, open_close, stack_switch, resize, ...): animation frame
@@ -229,7 +229,7 @@ struct CardDraw {
     spinner_alpha: f32,
     spinner_angle_rad: f32,
 }
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
     fills: Vec<(Rect, u32, u32)>,
     cards: Vec<(Rect, u32, u32)>,
@@ -239,26 +239,66 @@ struct DrawSig {
     dpi_bits: u32,
 }
 impl DrawSig {
-    fn new(
+    fn matches(
+        &self,
         fills: &[(Rect, u32, f32)],
         cards: &[CardDraw],
         lines: &[(Rect, u32)],
         width: f32,
         radius: f32,
         dpi: f32,
-    ) -> Self {
-        Self {
-            fills: fills.iter().map(|&(r, c, a)| (r, c, a.to_bits())).collect(),
-            cards: cards
+    ) -> bool {
+        self.width_bits == width.to_bits()
+            && self.radius_bits == radius.to_bits()
+            && self.dpi_bits == dpi.to_bits()
+            && self.fills.len() == fills.len()
+            && self.cards.len() == cards.len()
+            && self.lines.len() == lines.len()
+            && self
+                .fills
                 .iter()
-                .map(|c| (c.rect, c.spinner_alpha.to_bits(), c.spinner_angle_rad.to_bits()))
-                .collect(),
-            lines: lines.to_vec(),
-            width_bits: width.to_bits(),
-            radius_bits: radius.to_bits(),
-            dpi_bits: dpi.to_bits(),
-        }
+                .zip(fills)
+                .all(|(&(r1, c1, a1), &(r2, c2, a2))| r1 == r2 && c1 == c2 && a1 == a2.to_bits())
+            && self.cards.iter().zip(cards).all(|(&(r1, a1, ang1), c2)| {
+                r1 == c2.rect
+                    && a1 == c2.spinner_alpha.to_bits()
+                    && ang1 == c2.spinner_angle_rad.to_bits()
+            })
+            && self.lines.as_slice() == lines
     }
+    fn set_from(
+        &mut self,
+        fills: &[(Rect, u32, f32)],
+        cards: &[CardDraw],
+        lines: &[(Rect, u32)],
+        width: f32,
+        radius: f32,
+        dpi: f32,
+    ) {
+        self.fills.clear();
+        self.fills
+            .extend(fills.iter().map(|&(r, c, a)| (r, c, a.to_bits())));
+        self.cards.clear();
+        self.cards.extend(
+            cards
+                .iter()
+                .map(|c| (c.rect, c.spinner_alpha.to_bits(), c.spinner_angle_rad.to_bits())),
+        );
+        self.lines.clear();
+        self.lines.extend_from_slice(lines);
+        self.width_bits = width.to_bits();
+        self.radius_bits = radius.to_bits();
+        self.dpi_bits = dpi.to_bits();
+    }
+}
+struct DrawFrame<'a> {
+    pictures: &'a [(Rect, ID2D1Bitmap1)],
+    fills: &'a [(Rect, u32, f32)],
+    cards: &'a [CardDraw],
+    lines: &'a [(Rect, u32)],
+    width: f32,
+    radius: f32,
+    dpi: f32,
 }
 struct Surface {
     gpu: ID3D11Device,
@@ -319,16 +359,17 @@ impl Surface {
             })
         }
     }
-    fn draw(
-        &mut self,
-        pictures: &[(Rect, ID2D1Bitmap1)],
-        fills: &[(Rect, u32, f32)],
-        cards: &[CardDraw],
-        lines: &[(Rect, u32)],
-        width: f32,
-        radius: f32,
-        dpi: f32,
-    ) -> Result<()> {
+    fn draw(&mut self, frame: &DrawFrame<'_>) -> Result<()> {
+        let DrawFrame {
+            pictures,
+            fills,
+            cards,
+            lines,
+            width,
+            radius,
+            dpi,
+        } = frame;
+        let (width, radius, dpi) = (*width, *radius, *dpi);
         unsafe {
             let mut off = F::POINT::default();
             let mark = self.timer.begin(&self.gpu);
@@ -351,7 +392,7 @@ impl Surface {
                 let rt: &ID2D1RenderTarget = &self.context;
                 rt.BeginDraw();
                 rt.Clear(Some(&D2D1_COLOR_F::default()));
-                for (r, bitmap) in pictures {
+                for (r, bitmap) in *pictures {
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
                     rt.DrawBitmap(
@@ -367,7 +408,7 @@ impl Surface {
                         None,
                     )
                 }
-                for &(r, c, alpha) in fills {
+                for &(r, c, alpha) in *fills {
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -378,10 +419,10 @@ impl Surface {
                             radiusX: radius,
                             radiusY: radius,
                         },
-                        &*brush,
+                        brush,
                     );
                 }
-                for card in cards {
+                for card in *cards {
                     let x = (card.rect.x + off.x) as f32;
                     let y = (card.rect.y + off.y) as f32;
                     let w = card.rect.w as f32;
@@ -394,7 +435,7 @@ impl Surface {
                             radiusX: radius,
                             radiusY: radius,
                         },
-                        &*base,
+                        base,
                     );
                     let rim_w = 1.0 * dpi;
                     let rim_d = rim_w * 0.5;
@@ -412,7 +453,7 @@ impl Surface {
                             radiusX: rim_r,
                             radiusY: rim_r,
                         },
-                        &*rim,
+                        rim,
                         rim_w,
                         None,
                     );
@@ -429,7 +470,7 @@ impl Surface {
                         track.point.Y = cy;
                         let track_brush = Self::brush_for(&mut self.brushes, rt, 0x334155)?;
                         track_brush.SetOpacity(0.35 * card.spinner_alpha);
-                        rt.DrawEllipse(&track, &*track_brush, 2.2 * dpi, None);
+                        rt.DrawEllipse(&track, track_brush, 2.2 * dpi, None);
                         for i in 0..12 {
                             let frac = i as f32 / 11.0;
                             let theta = card.spinner_angle_rad
@@ -444,11 +485,11 @@ impl Surface {
                             dot.point.Y = cy + ring_r * theta.sin();
                             let dot_brush = Self::brush_for(&mut self.brushes, rt, 0x60A5FA)?;
                             dot_brush.SetOpacity((0.12 + 0.88 * frac * frac) * card.spinner_alpha);
-                            rt.FillEllipse(&dot, &*dot_brush);
+                            rt.FillEllipse(&dot, dot_brush);
                         }
                     }
                 }
-                for &(r, c) in lines {
+                for &(r, c) in *lines {
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -465,7 +506,7 @@ impl Surface {
                             radiusX: radius,
                             radiusY: radius,
                         },
-                        &*brush,
+                        brush,
                         width,
                         None,
                     )
@@ -484,12 +525,18 @@ impl Surface {
     }
 }
 struct Host {
+    generation: u64,
     h: HWND,
     b: Rect,
     surface: Option<Surface>,
     thumbs: HashMap<isize, isize>,
+    pictures: HashMap<(isize, usize), Source>,
+    failed_sources: HashMap<(isize, usize), Instant>,
+    pending_sources: HashSet<(isize, usize)>,
+    applied_holes: Option<Vec<Rect>>,
     visible: bool,
-    last_draw: Option<DrawSig>,
+    last_draw: DrawSig,
+    last_draw_valid: bool,
 }
 impl Drop for Host {
     fn drop(&mut self) {
@@ -502,7 +549,7 @@ impl Drop for Host {
     }
 }
 impl Host {
-    fn new(b: Rect) -> Result<Self> {
+    fn new(generation: u64, b: Rect) -> Result<Self> {
         unsafe {
             let class = wide("Planor.Composition");
             let inst = GetModuleHandleW(null());
@@ -561,12 +608,18 @@ impl Host {
                 }
             }
             Ok(Self {
+                generation,
                 h,
                 b,
                 surface,
                 thumbs: Default::default(),
+                pictures: HashMap::new(),
+                failed_sources: HashMap::new(),
+                pending_sources: HashSet::new(),
+                applied_holes: None,
                 visible: false,
-                last_draw: None,
+                last_draw: DrawSig::default(),
+                last_draw_valid: false,
             })
         }
     }
@@ -648,101 +701,181 @@ fn interpolate(a: Rect, b: Rect, t: f64) -> Rect {
         h: f(a.h, b.h),
     }
 }
-fn warm_hosts(monitors: Vec<(String, Rect)>, hosts: &mut BTreeMap<String, Host>) {
+type Placement = (isize, Rect);
+type OpenLanding = (u64, Instant, Vec<Placement>);
+type VerifyState = (Instant, Vec<Placement>, u8);
+type SourceKey = (isize, usize);
+type SourceJob = (String, u64, SourceKey, SendDevice);
+type SourceDone = (String, u64, SourceKey, std::result::Result<SendSource, String>, u128);
+
+fn warm_hosts(monitors: Vec<(String, Rect)>, hosts: &mut BTreeMap<String, Host>, next_gen: &mut u64) {
     for (n, b) in monitors {
         if hosts.get(&n).is_some_and(|h| h.b != b) {
             hosts.remove(&n);
         }
-        if !hosts.contains_key(&n)
-            && let Ok(h) = Host::new(b)
-        {
-            hosts.insert(n, h);
+        if let std::collections::btree_map::Entry::Vacant(e) = hosts.entry(n) {
+            let generation = *next_gen;
+            *next_gen += 1;
+            if let Ok(h) = Host::new(generation, b) {
+                e.insert(h);
+            }
         }
     }
 }
-pub static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-pub fn start() -> crossbeam_channel::Sender<Message> {
-    let (tx, rx) = crossbeam_channel::unbounded();
-    std::thread::spawn(move || unsafe {
-        crate::perf::register_thread("render");
-        let _ = windows::Win32::System::Com::CoInitializeEx(
-            None,
-            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
-        );
-        let mut hosts = BTreeMap::<String, Host>::new();
-        let mut applied = HashMap::<String, Vec<Rect>>::new();
-        let mut current = HashMap::new();
-        let mut origins = HashMap::new();
-        let mut pictures = HashMap::<(isize, usize, String), Source>::new();
-        // Cooldown cache so WGC Source::new failures (e.g. elevated/protected windows or
-        // non-input desktops) do not block every subsequent warm scene for ~45 ms/window.
-        let mut failed_sources = HashMap::<(isize, usize, String), Instant>::new();
-        let mut pending_sources = std::collections::HashSet::<(isize, usize, String)>::new();
-        let mut live_ids = std::collections::HashSet::<isize>::new();
-        let mut last_live_present: Option<Instant> = None;
-        // The final on-screen move of an open/close animation is asynchronous: newly started apps can take
-        // tens of milliseconds to answer SetWindowPos. Keep their stand-ins visible until the move lands.
-        let mut open_landing: Option<(u64, Instant, Vec<(isize, Rect)>)> = None;
-        let mut open_landed: Option<u64> = None;
-        let mut open_timed_out = false;
-        let mut anim_done = false;
-        let cover_cfg = planor::cover::CoverConfig::default();
-        let mut cover_landed: HashMap<(isize, Instant), Instant> = HashMap::new();
-        let mut cover_done: HashMap<isize, Instant> = HashMap::new();
-        let mut cover_sent: std::collections::HashSet<(u64, isize)> = Default::default();
-        let mut cover_timed_out_ids: std::collections::HashSet<isize> = Default::default();
-        let mut live_refresh_us: f64 = win32::dwm_refresh_period_us().unwrap_or(16_666.7);
-        let mut refresh_checked = Instant::now();
-        type SourceKey = (isize, usize, String);
-        let (source_tx, source_jobs) = crossbeam_channel::unbounded::<(SourceKey, isize, SendDevice)>();
-        let (source_done_tx, source_done) = crossbeam_channel::unbounded::<(SourceKey, std::result::Result<SendSource, String>, u128)>();
-        std::thread::Builder::new()
-            .name("Planor.Capture".into())
-            .spawn(move || {
-                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
-                for (key, id, device) in source_jobs {
-                    let t = Instant::now();
-                    let made = Source::new(id, &device.0).map(SendSource).map_err(|e| e.to_string());
-                    if source_done_tx.send((key, made, t.elapsed().as_millis())).is_err() {
-                        break;
-                    }
-                }
-            })
-            .ok();
-        let mut scene: Option<Scene> = None;
-        let mut begin = Instant::now();
-        let mut last = begin;
-        let mut frame_of_scene = 0u32;
-        let mut settled = 0;
-        let mut gesture_recorded = false;
-        let mut parked_checked_epoch = 0u64;
-        // Windows that were just uncloaked (desktop switch) can report a transiently inset frame,
-        // which skews the border delta used for placement. After settling, re-check the frames
-        // and re-place anything that is not exactly on target.
-        let mut verify: Option<(Instant, Vec<(isize, Rect)>, u8)> = None;
-        let mut hz = 0;
+
+struct PresentInfo {
+    t: f64,
+    park: i32,
+    any_cover_active: bool,
+    time: Instant,
+    render_start: Instant,
+    retries: u32,
+    placement_us: u64,
+}
+
+#[derive(Default)]
+struct FrameScratch {
+    placements: Vec<Placement>,
+    cover_placements: Vec<Placement>,
+    unsent_covers: Vec<Placement>,
+    settled_tiles: Vec<planor::SettledTile>,
+    hits: Vec<(Rect, isize)>,
+    next: HashMap<isize, Rect>,
+    parking: Vec<Placement>,
+    landing: Vec<Placement>,
+    rejected: Vec<Placement>,
+    actuals: Vec<Placement>,
+    verify_items: Vec<Placement>,
+    lines: Vec<(Rect, u32)>,
+    backing: Vec<(Rect, ID2D1Bitmap1)>,
+    cards: Vec<CardDraw>,
+    keep: HashSet<isize>,
+    host_hits: Vec<(Rect, isize)>,
+    fills: Vec<(Rect, u32, f32)>,
+    mine: Vec<Rect>,
+}
+
+struct RenderState {
+    hosts: BTreeMap<String, Host>,
+    next_host_gen: u64,
+    current: HashMap<isize, Rect>,
+    origins: HashMap<isize, Rect>,
+    live_ids: HashSet<isize>,
+    last_live_present: Option<Instant>,
+    open_landing: Option<OpenLanding>,
+    open_landed: Option<u64>,
+    open_timed_out: bool,
+    anim_done: bool,
+    cover_cfg: planor::cover::CoverConfig,
+    cover_landed: HashMap<(isize, Instant), Instant>,
+    cover_done: HashMap<isize, Instant>,
+    cover_sent: HashSet<(u64, isize)>,
+    cover_timed_out_ids: HashSet<isize>,
+    live_refresh_us: f64,
+    refresh_checked: Instant,
+    source_tx: crossbeam_channel::Sender<SourceJob>,
+    source_done: crossbeam_channel::Receiver<SourceDone>,
+    scene: Option<Scene>,
+    begin: Instant,
+    last: Instant,
+    frame_of_scene: u32,
+    settled: i64,
+    gesture_recorded: bool,
+    parked_checked_epoch: u64,
+    verify: Option<VerifyState>,
+    qpc_hz: i64,
+    tag: Vec<u16>,
+    last_peeks: Option<Vec<(Rect, isize)>>,
+    scratch: FrameScratch,
+}
+
+impl RenderState {
+    fn new(source_tx: crossbeam_channel::Sender<SourceJob>, source_done: crossbeam_channel::Receiver<SourceDone>) -> Self {
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn QueryPerformanceFrequency(value: *mut i64) -> i32;
+        }
+        let mut qpc_hz = 0i64;
+        unsafe { QueryPerformanceFrequency(&mut qpc_hz) };
+        let begin = Instant::now();
+        Self {
+            hosts: BTreeMap::new(),
+            next_host_gen: 1,
+            current: HashMap::new(),
+            origins: HashMap::new(),
+            live_ids: HashSet::new(),
+            last_live_present: None,
+            open_landing: None,
+            open_landed: None,
+            open_timed_out: false,
+            anim_done: false,
+            cover_cfg: planor::cover::CoverConfig::default(),
+            cover_landed: HashMap::new(),
+            cover_done: HashMap::new(),
+            cover_sent: HashSet::new(),
+            cover_timed_out_ids: HashSet::new(),
+            live_refresh_us: win32::dwm_refresh_period_us().unwrap_or(16_666.7),
+            refresh_checked: begin,
+            source_tx,
+            source_done,
+            scene: None,
+            begin,
+            last: begin,
+            frame_of_scene: 0,
+            settled: 0,
+            gesture_recorded: false,
+            parked_checked_epoch: 0,
+            verify: None,
+            qpc_hz,
+            tag: wide("Planor.Recovery.Identity"),
+            last_peeks: None,
+            scratch: FrameScratch::default(),
+        }
+    }
+
+    fn timestamp(&self) -> i64 {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
             fn QueryPerformanceCounter(value: *mut i64) -> i32;
         }
-        QueryPerformanceFrequency(&mut hz);
-        let timestamp = || {
-            let mut now = 0;
-            QueryPerformanceCounter(&mut now);
-            ((now as i128 * 10_000_000) / hz as i128) as i64
-        };
-        let tag = wide("Planor.Recovery.Identity");
-        loop {
-            crate::perf::heartbeat_render();
+        let mut now = 0i64;
+        unsafe { QueryPerformanceCounter(&mut now) };
+        ((now as i128 * 10_000_000) / self.qpc_hz.max(1) as i128) as i64
+    }
+
+    fn has_active_sources(&self) -> bool {
+        self.hosts
+            .values()
+            .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty())
+    }
+
+    fn clear_state(&mut self) {
+        self.verify = None;
+        self.hosts.clear();
+        self.scene = None;
+        self.current.clear();
+        self.open_landing = None;
+        self.open_landed = None;
+        self.open_timed_out = false;
+        self.anim_done = false;
+        self.cover_landed.clear();
+        self.cover_done.clear();
+        self.cover_sent.clear();
+        self.cover_timed_out_ids.clear();
+        win32::set_peeks(Vec::new());
+        self.last_peeks = None;
+    }
+
+    unsafe fn poll_background_work(&mut self) {
+        unsafe {
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
-            if let Some((at, items, left)) = verify.take() {
+            if let Some((at, items, left)) = self.verify.take() {
                 if Instant::now() < at {
-                    verify = Some((at, items, left))
+                    self.verify = Some((at, items, left))
                 } else if left > 0 {
                     let _vspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderVerify);
                     if items
@@ -750,11 +883,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         .any(|&(id, want)| win32::frame(id).is_some_and(|got| got != want))
                     {
                         win32::place_async(&items);
-                        verify = Some((Instant::now() + Duration::from_millis(150), items, left - 1))
+                        self.verify = Some((Instant::now() + Duration::from_millis(150), items, left - 1))
                     }
                 }
             }
-            let async_landed = open_landing.as_ref().and_then(|(epoch, started, items)| {
+            let async_landed = self.open_landing.as_ref().and_then(|(epoch, started, items)| {
                 let current = *epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
                 // Position is the handoff signal. A minimum-size application may legitimately be wider or
                 // taller than requested; the normal rejection path handles that after the handoff.
@@ -767,289 +900,211 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 (current && (arrived || timed_out)).then_some((*epoch, !arrived))
             });
             if let Some((epoch, timed_out)) = async_landed {
-                open_landed = Some(epoch);
-                open_timed_out = timed_out;
-                open_landing = None;
+                self.open_landed = Some(epoch);
+                self.open_timed_out = timed_out;
+                self.open_landing = None;
             }
-            while let Ok((key, made, ms)) = source_done.try_recv() {
-                pending_sources.remove(&key);
+            while let Ok((mon, generation, key, made, ms)) = self.source_done.try_recv() {
+                let Some(host) = self.hosts.get_mut(&mon).filter(|h| h.generation == generation) else {
+                    continue;
+                };
+                host.pending_sources.remove(&key);
                 if ms >= 100 {
                     diag::trace(format!("capture source for {} took {ms} ms (worker thread, render not blocked)", key.0));
                 }
                 match made {
                     Ok(src) => {
-                        failed_sources.remove(&key);
-                        pictures.insert(key, src.0);
+                        host.failed_sources.remove(&key);
+                        host.pictures.insert(key, src.0);
                     }
                     Err(e) => {
-                        if failed_sources.insert(key.clone(), Instant::now()).is_none() {
+                        if host.failed_sources.insert(key, Instant::now()).is_none() {
                             diag::trace(format!("WGC source creation failed for {}: {e}", key.0));
                         }
                     }
                 }
             }
-            match rx.recv_timeout(if scene.is_some() {
-                Duration::ZERO
-            } else if !pictures.is_empty() || verify.is_some() || !pending_sources.is_empty() {
-                Duration::from_millis(33)
-            } else {
-                Duration::from_millis(50)
-            }) {
-                Ok(Message::Stop(ack)) => {
-                    win32::set_peeks(Vec::new());
-                    hosts.clear();
-                    let _ = ack.send(());
-                    break;
+        }
+    }
+
+    fn prepare_scene(&mut self, s: Scene) {
+        let _scene_span = crate::perf::SpanGuard::with_arg(
+            crate::perf::SpanKind::RenderScene,
+            s.epoch,
+        );
+        self.gesture_recorded = false;
+        crate::perf::record_instant(
+            "SCENE",
+            "render",
+            format!("seq={} tiles={}", s.epoch, s.tiles.len()),
+        );
+        let handle_start = Instant::now();
+        self.verify = None;
+        self.origins.clear();
+        for (&k, &v) in &self.current {
+            self.origins.insert(k, v);
+        }
+        for t in &s.tiles {
+            let o = *self
+                .origins
+                .entry(t.id)
+                .or_insert_with(|| win32::frame(t.id).unwrap_or(t.rect));
+            // A window already within 2px of its target is settled; animating
+            // (and parking) it for a rounding discrepancy is pure noise.
+            if (o.x - t.rect.x).abs() <= 2
+                && (o.y - t.rect.y).abs() <= 2
+                && (o.w - t.rect.w).abs() <= 2
+                && (o.h - t.rect.h).abs() <= 2
+            {
+                self.origins.insert(t.id, t.rect);
+            }
+        }
+        {
+            let _hspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderHosts);
+            // Capture sources belong to the host/D3D device for a given monitor geometry; dropping a
+            // removed/resized Host automatically releases its frame pools, textures, and cooldowns.
+            self.hosts
+                .retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
+            for (name, host) in &mut self.hosts {
+                host.pictures.retain(|&(id, c), _| {
+                    s.tiles
+                        .iter()
+                        .any(|t| t.id == id && t.cookie == c && &t.monitor == name)
+                });
+                host.failed_sources.retain(|&(id, c), _| {
+                    s.tiles
+                        .iter()
+                        .any(|t| t.id == id && t.cookie == c && &t.monitor == name)
+                });
+            }
+            for (n, _, b) in s.monitors.iter() {
+                if !self.hosts.contains_key(n) {
+                    let generation = self.next_host_gen;
+                    self.next_host_gen += 1;
+                    if let Ok(h) = Host::new(generation, *b) {
+                        self.hosts.insert(n.clone(), h);
+                    }
                 }
-                Ok(Message::Warm(monitors)) => {
-                    warm_hosts(monitors, &mut hosts);
+            }
+        }
+        let hosts_ms = handle_start.elapsed().as_millis();
+        {
+            let _sspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderSources);
+            const WGC_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
+            for tile in &s.tiles {
+                if tile.pinned {
                     continue;
                 }
-                Ok(Message::Clear(ack)) => {
-                    verify = None;
-                    hosts.clear();
-                    scene = None;
-                    current.clear();
-                    pictures.clear();
-                    failed_sources.clear();
-                    open_landing = None;
-                    open_landed = None;
-                    open_timed_out = false;
-                    anim_done = false;
-                    cover_landed.clear();
-                    cover_done.clear();
-                    cover_sent.clear();
-                    cover_timed_out_ids.clear();
-                    win32::set_peeks(Vec::new());
-                    let _ = ack.send(());
+                let Some(host) = self.hosts.get_mut(&tile.monitor) else {
+                    continue;
+                };
+                let key = (tile.id, tile.cookie);
+                if host.pictures.contains_key(&key)
+                    || host
+                        .failed_sources
+                        .get(&key)
+                        .is_some_and(|at| at.elapsed() < WGC_RETRY_COOLDOWN)
+                {
                     continue;
                 }
-                Ok(Message::Scene(mut s)) => {
-                    // Drain any newer queued scenes so a burst of input/events skips stale frames
-                    // instead of paying setup work for a scene that has already been superseded.
-                    let mut stop = false;
-                    let mut cleared = false;
-                    while let Ok(next_msg) = rx.try_recv() {
-                        match next_msg {
-                            Message::Scene(newer) => s = newer,
-                            Message::Warm(monitors) => warm_hosts(monitors, &mut hosts),
-                            Message::Clear(ack) => {
-                                verify = None;
-                                hosts.clear();
-                                scene = None;
-                                current.clear();
-                                pictures.clear();
-                                failed_sources.clear();
-                                open_landing = None;
-                                open_landed = None;
-                                open_timed_out = false;
-                                anim_done = false;
-                                cover_landed.clear();
-                                cover_done.clear();
-                                cover_sent.clear();
-                                cover_timed_out_ids.clear();
-                                win32::set_peeks(Vec::new());
-                                let _ = ack.send(());
-                                cleared = true;
-                                break;
-                            }
-                            Message::Stop(ack) => {
-                                win32::set_peeks(Vec::new());
-                                hosts.clear();
-                                let _ = ack.send(());
-                                stop = true;
-                                break;
-                            }
-                        }
-                    }
-                    if stop {
-                        break;
-                    }
-                    if cleared {
-                        continue;
-                    }
-                    let _scene_span = crate::perf::SpanGuard::with_arg(
-                        crate::perf::SpanKind::RenderScene,
-                        s.epoch,
-                    );
-                    gesture_recorded = false;
-                    crate::perf::record_instant(
-                        "SCENE",
-                        "render",
-                        format!("seq={} tiles={}", s.epoch, s.tiles.len()),
-                    );
-                    let handle_start = Instant::now();
-                    verify = None;
-                    origins = current.clone();
-                    for t in &s.tiles {
-                        origins
-                            .entry(t.id)
-                            .or_insert_with(|| win32::frame(t.id).unwrap_or(t.rect));
-                        // A window already within 2px of its target is settled; animating
-                        // (and parking) it for a rounding discrepancy is pure noise.
-                        let o = origins[&t.id];
-                        if (o.x - t.rect.x).abs() <= 2
-                            && (o.y - t.rect.y).abs() <= 2
-                            && (o.w - t.rect.w).abs() <= 2
-                            && (o.h - t.rect.h).abs() <= 2
-                        {
-                            origins.insert(t.id, t.rect);
-                        }
-                    }
-                    pictures.retain(|(id, c, name), _| {
-                        s.tiles
-                            .iter()
-                            .any(|t| t.id == *id && t.cookie == *c && &t.monitor == name)
-                    });
-                    failed_sources.retain(|(id, c, name), _| {
-                        s.tiles
-                            .iter()
-                            .any(|t| t.id == *id && t.cookie == *c && &t.monitor == name)
-                    });
-                    {
-                        let _hspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderHosts);
-                        hosts.retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
-                        applied.retain(|k, _| hosts.contains_key(k));
-                        // Capture sources belong to the D3D device of the host they were made for. When a
-                        // monitor's host goes (display change, unplug) its sources must go too: they kept the
-                        // old device, its frame pools and textures alive, about +500 MB RAM, +700 MB VRAM
-                        // and +10k handles per display blip in the user's daemon.
-                        pictures.retain(|k, _| hosts.contains_key(&k.2));
-                        failed_sources.retain(|k, _| hosts.contains_key(&k.2));
-                        for (n, _, b) in &s.monitors {
-                            if !hosts.contains_key(n) {
-                                pictures.retain(|k, _| &k.2 != n);
-                                failed_sources.retain(|k, _| &k.2 != n);
-                                if let Ok(h) = Host::new(*b) {
-                                    hosts.insert(n.clone(), h);
-                                }
-                            }
-                        }
-                    }
-                    let hosts_ms = handle_start.elapsed().as_millis();
-                    {
-                        let _sspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderSources);
-                        const WGC_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
-                        for tile in &s.tiles {
-                            let key = (tile.id, tile.cookie, tile.monitor.clone());
-                            if tile.pinned || pictures.contains_key(&key) {
-                                continue;
-                            }
-                            if failed_sources
-                                .get(&key)
-                                .is_some_and(|at| at.elapsed() < WGC_RETRY_COOLDOWN)
-                            {
-                                continue;
-                            }
-                            // Capture sources take 100-150 ms to create (6 render freezes in the first feel
-                            // run): a worker makes them; until one is ready the DWM thumbnail stands in.
-                            if !pending_sources.contains(&key) {
-                                if let Some(surface) = hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref()) {
-                                    pending_sources.insert(key.clone());
-                                    let _ = source_tx.send((key, tile.id, SendDevice(surface.gpu.clone())));
-                                }
-                            }
-                        }
-                    }
-                    let sources_ms = handle_start.elapsed().as_millis();
-                    {
-                        let _fspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderFrames);
-                        for ((id, _, name), source) in &mut pictures {
-                            if let Some(host) = hosts.get(name) {
-                                if win32::frame(*id)
-                                    .and_then(|r| intersect(r, host.b))
-                                    .is_some()
-                                {
-                                    // One attempt, no waiting (it used to sleep up to 70 ms per source for a
-                                    // first frame); without a bitmap the DWM thumbnail stands in.
-                                    if let Some(surface) = &host.surface {
-                                        if source.bitmap.is_none() {
-                                            let _ = source.update(surface, 0);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if handle_start.elapsed().as_millis() >= 30 {
-                        diag::trace(format!(
-                            "SLOW render scene handling: hosts {hosts_ms} ms, sources {} ms, frames {} ms",
-                            sources_ms - hosts_ms,
-                            handle_start.elapsed().as_millis() - sources_ms
-                        ))
-                    }
-                    if !s.live {
-                        live_ids.clear();
-                        last_live_present = None;
-                    }
-                    open_landing = None;
-                    open_landed = None;
-                    open_timed_out = false;
-                    anim_done = false;
-                    cover_sent.clear();
-                    cover_timed_out_ids.clear();
-                    cover_landed.retain(|(id, _), _| s.tiles.iter().any(|t| t.id == *id));
-                    cover_done.retain(|id, _| s.tiles.iter().any(|t| t.id == *id));
-                    live_refresh_us =
-                        planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
-                    refresh_checked = Instant::now();
-                    begin = Instant::now();
-                    last = begin;
-                    frame_of_scene = 0;
-                    scene = Some(s)
+                // Capture sources take 100-150 ms to create (6 render freezes in the first feel
+                // run): a worker makes them; until one is ready the DWM thumbnail stands in.
+                if !host.pending_sources.contains(&key)
+                    && let Some(surface) = host.surface.as_ref()
+                {
+                    host.pending_sources.insert(key);
+                    let _ = self.source_tx.send((
+                        tile.monitor.clone(),
+                        host.generation,
+                        key,
+                        SendDevice(surface.gpu.clone()),
+                    ));
                 }
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
-                _ => (),
             }
-            let Some(s) = scene.as_ref() else {
-                for ((id, _, name), source) in &mut pictures {
-                    if let Some(host) = hosts.get(name) {
-                        if let (Some(surface), Some(r)) = (&host.surface, win32::frame(*id)) {
-                            if intersect(r, host.b) == Some(r) {
-                                let _ = source.update(surface, settled);
-                            }
-                        }
+        }
+        let sources_ms = handle_start.elapsed().as_millis();
+        {
+            let _fspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderFrames);
+            for host in self.hosts.values_mut() {
+                let Some(surface) = &host.surface else {
+                    continue;
+                };
+                for (&(id, _), source) in &mut host.pictures {
+                    if source.bitmap.is_none()
+                        && win32::frame(id)
+                            .and_then(|r| intersect(r, host.b))
+                            .is_some()
+                    {
+                        // One attempt, no waiting (it used to sleep up to 70 ms per source for a
+                        // first frame); without a bitmap the DWM thumbnail stands in.
+                        let _ = source.update(surface, 0);
                     }
                 }
+            }
+        }
+        if handle_start.elapsed().as_millis() >= 30 {
+            diag::trace(format!(
+                "SLOW render scene handling: hosts {hosts_ms} ms, sources {} ms, frames {} ms",
+                sources_ms - hosts_ms,
+                handle_start.elapsed().as_millis() - sources_ms
+            ))
+        }
+        if !s.live {
+            self.live_ids.clear();
+            self.last_live_present = None;
+        }
+        self.open_landing = None;
+        self.open_landed = None;
+        self.open_timed_out = false;
+        self.anim_done = false;
+        self.cover_sent.clear();
+        self.cover_timed_out_ids.clear();
+        self.cover_landed
+            .retain(|(id, _), _| s.tiles.iter().any(|t| t.id == *id));
+        self.cover_done
+            .retain(|id, _| s.tiles.iter().any(|t| t.id == *id));
+        self.live_refresh_us =
+            planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
+        self.refresh_checked = Instant::now();
+        self.begin = Instant::now();
+        self.last = self.begin;
+        self.frame_of_scene = 0;
+        self.scene = Some(s);
+    }
+
+    fn update_idle_sources(&mut self) {
+        for host in self.hosts.values_mut() {
+            let Some(surface) = &host.surface else {
                 continue;
             };
-            if s.epoch != EPOCH.load(std::sync::atomic::Ordering::Acquire) {
-                scene = None;
-                continue;
+            for (&(id, _), source) in &mut host.pictures {
+                if let Some(r) = win32::frame(id)
+                    && intersect(r, host.b) == Some(r)
+                {
+                    let _ = source.update(surface, self.settled);
+                }
             }
-            if refresh_checked.elapsed() >= Duration::from_millis(100) {
-                refresh_checked = Instant::now();
-                live_refresh_us =
-                    planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
-            }
-            let time = Instant::now();
-            let t = if s.duration == 0 {
-                1.
-            } else {
-                planor::motion(
-                    begin.elapsed().as_secs_f64() * 1000. / s.duration as f64,
-                    s.spring,
-                )
-            };
-            let mut placements = vec![];
-            let mut cover_placements = vec![];
-            let mut settled_tiles = vec![];
+        }
+    }
+
+    unsafe fn build_all_hosts(&mut self, s: &Scene, t: f64, park: i32, open_handoff: bool) -> bool {
+        unsafe {
+            let scratch = &mut self.scratch;
+            scratch.placements.clear();
+            scratch.cover_placements.clear();
+            scratch.settled_tiles.clear();
+            scratch.hits.clear();
+            scratch.next.clear();
             let mut any_cover_active = false;
-            let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-            let open_handoff = s.action == "open_close"
-                && t >= 1.
-                && open_landed != Some(s.epoch);
-            let mut hits = vec![];
-            let mut next = HashMap::new();
-            for (name, host) in &mut hosts {
-                let mut lines = vec![];
-                let mut backing = vec![];
-                let mut cards: Vec<CardDraw> = vec![];
+            for (name, host) in &mut self.hosts {
+                scratch.lines.clear();
+                scratch.backing.clear();
+                scratch.cards.clear();
+                scratch.keep.clear();
+                scratch.host_hits.clear();
                 let mut full = false;
-                let mut keep = std::collections::HashSet::new();
-                let mut host_hits = vec![];
                 for tile in s.tiles.iter().filter(|tile| &tile.monitor == name) {
-                    if GetPropW(tile.id as _, tag.as_ptr()) as usize != tile.cookie
+                    if GetPropW(tile.id as _, self.tag.as_ptr()) as usize != tile.cookie
                         || IsIconic(tile.id as _) != 0
                     {
                         continue;
@@ -1063,10 +1118,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         && intersect(tile.rect, bound) == Some(tile.rect);
                     let mut covered_visual = false;
                     let mut skip_cover_motion = false;
-                    if can_cover
-                        && let Some(started) = tile.cover
-                    {
-                        if cover_done.get(&tile.id) == Some(&started) {
+                    if can_cover && let Some(started) = tile.cover {
+                        if self.cover_done.get(&tile.id) == Some(&started) {
                             skip_cover_motion = true;
                         } else {
                             let frame_ready = win32::frame(tile.id).is_some_and(|got| {
@@ -1076,22 +1129,24 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                     && got.h >= tile.rect.h - 2
                             });
                             let landed_for_ms = if frame_ready {
-                                let at = *cover_landed
+                                let at = *self
+                                    .cover_landed
                                     .entry((tile.id, started))
                                     .or_insert_with(Instant::now);
                                 Some(at.elapsed().as_millis() as u64)
                             } else {
                                 None
                             };
-                            let source_size_matches = pictures
-                                .get(&(tile.id, tile.cookie, name.clone()))
+                            let source_size_matches = host
+                                .pictures
+                                .get(&(tile.id, tile.cookie))
                                 .is_some_and(|src| {
                                     src.bitmap.is_some()
                                         && (src.size.Width - tile.rect.w).abs() <= 24
                                         && (src.size.Height - tile.rect.h).abs() <= 24
                                 });
                             let vis = planor::cover::eval_cover(
-                                cover_cfg,
+                                self.cover_cfg,
                                 started.elapsed().as_millis() as u64,
                                 landed_for_ms,
                                 source_size_matches,
@@ -1099,8 +1154,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             if vis.active {
                                 covered_visual = true;
                                 any_cover_active = true;
-                                next.insert(tile.id, tile.rect);
-                                cards.push(CardDraw {
+                                scratch.next.insert(tile.id, tile.rect);
+                                scratch.cards.push(CardDraw {
                                     rect: Rect {
                                         x: tile.rect.x - host.b.x,
                                         y: tile.rect.y - host.b.y,
@@ -1110,7 +1165,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                     spinner_angle_rad: vis.spinner_angle_rad,
                                 });
                                 if let Some(color) = tile.color {
-                                    lines.push((
+                                    scratch.lines.push((
                                         Rect {
                                             x: tile.rect.x - host.b.x,
                                             y: tile.rect.y - host.b.y,
@@ -1119,9 +1174,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                         color,
                                     ));
                                 }
-                                cover_placements.push((tile.id, tile.rect));
+                                scratch.cover_placements.push((tile.id, tile.rect));
                                 if t >= 1. && !s.live {
-                                    settled_tiles.push(planor::SettledTile {
+                                    scratch.settled_tiles.push(planor::SettledTile {
                                         id: tile.id,
                                         rect: tile.rect,
                                         bound,
@@ -1130,11 +1185,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                     });
                                 }
                             } else {
-                                cover_done.insert(tile.id, started);
-                                cover_landed.remove(&(tile.id, started));
+                                self.cover_done.insert(tile.id, started);
+                                self.cover_landed.remove(&(tile.id, started));
                                 skip_cover_motion = true;
                                 if vis.timed_out {
-                                    cover_timed_out_ids.insert(tile.id);
+                                    self.cover_timed_out_ids.insert(tile.id);
                                 }
                             }
                         }
@@ -1145,53 +1200,57 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     let (o, r) = if skip_cover_motion {
                         (tile.rect, tile.rect)
                     } else {
-                        (origins[&tile.id], interpolate(origins[&tile.id], tile.rect, t))
+                        (self.origins[&tile.id], interpolate(self.origins[&tile.id], tile.rect, t))
                     };
-                    next.insert(tile.id, r);
+                    scratch.next.insert(tile.id, r);
                     // While moving, the stand-in keeps the window's real size and only its position
                     // glides; scaling it to the in-between rectangle stretched the contents.
                     let rs = if t < 1. { Rect { w: o.w, h: o.h, ..r } } else { r };
                     let clip = if tile.hidden { None } else { intersect(rs, bound) };
                     let moving = !skip_cover_motion && t < 1. && o != tile.rect;
-                    let live_proxy = s.live && !tile.pinned && (live_ids.contains(&tile.id) || origins[&tile.id] != tile.rect);
+                    let live_proxy = s.live
+                        && !tile.pinned
+                        && (self.live_ids.contains(&tile.id) || self.origins[&tile.id] != tile.rect);
                     if live_proxy {
-                        live_ids.insert(tile.id);
+                        self.live_ids.insert(tile.id);
                     }
                     if !moving && tile.fullscreen && tile.rect == host.b {
                         full = true
                     }
-                    let park_window = !tile.pinned && (moving || live_proxy || clip != Some(rs) || tile.preview || tile.hidden);
+                    let park_window = !tile.pinned
+                        && (moving || live_proxy || clip != Some(rs) || tile.preview || tile.hidden);
                     // Once an open/close animation reaches its last frame, hold the stand-in on screen
                     // while the real window's final asynchronous move catches up. The OS target below is
                     // still the visible tile rectangle (not the park column).
                     let proxy = park_window || (!tile.pinned && open_handoff);
                     if let Some(c) = clip {
-                        if proxy {
-                            if let (Some(source), Some(surface)) = (
-                                pictures.get_mut(&(tile.id, tile.cookie, name.clone())),
+                        if proxy
+                            && let (Some(source), Some(surface)) = (
+                                host.pictures.get_mut(&(tile.id, tile.cookie)),
                                 host.surface.as_ref(),
-                            ) {
-                                if source.bitmap.is_none() {
-                                    if let Err(e) = source.update(surface, 0) {
-                                        eprintln!("source frame: {e}")
-                                    }
-                                }
-                                if let Some(bitmap) = &source.bitmap {
-                                    backing.push((
-                                        Rect {
-                                            x: rs.x - host.b.x,
-                                            y: rs.y - host.b.y,
-                                            ..rs
-                                        },
-                                        bitmap.clone(),
-                                    ));
-                                }
+                            )
+                        {
+                            if source.bitmap.is_none()
+                                && let Err(e) = source.update(surface, 0)
+                            {
+                                eprintln!("source frame: {e}")
+                            }
+                            if let Some(bitmap) = &source.bitmap {
+                                scratch.backing.push((
+                                    Rect {
+                                        x: rs.x - host.b.x,
+                                        y: rs.y - host.b.y,
+                                        ..rs
+                                    },
+                                    bitmap.clone(),
+                                ));
                             }
                         }
                         if proxy && host.thumbnail(tile.id, rs, c) {
                             if moving
-                                && pictures
-                                    .get(&(tile.id, tile.cookie, name.clone()))
+                                && host
+                                    .pictures
+                                    .get(&(tile.id, tile.cookie))
                                     .is_some_and(|src| src.bitmap.is_some())
                             {
                                 let p = DWM_THUMBNAIL_PROPERTIES {
@@ -1201,9 +1260,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                 };
                                 DwmUpdateThumbnailProperties(host.thumbs[&tile.id], &p);
                             }
-                            keep.insert(tile.id);
+                            scratch.keep.insert(tile.id);
                             if !moving {
-                                host_hits.push((c, tile.id))
+                                scratch.host_hits.push((c, tile.id))
                             }
                         }
                         if let Some(color) = tile.color {
@@ -1211,7 +1270,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             // the window's real size gliding), not the in-between rectangle, which grew or
                             // shrank ahead of the picture ("border grows faster than the animation").
                             let b = if proxy { rs } else { r };
-                            lines.push((
+                            scratch.lines.push((
                                 Rect {
                                     x: b.x - host.b.x,
                                     y: b.y - host.b.y,
@@ -1230,9 +1289,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         tile.rect
                     };
                     if !tile.pinned {
-                        placements.push((tile.id, target));
+                        scratch.placements.push((tile.id, target));
                         if t >= 1. && !s.live {
-                            settled_tiles.push(planor::SettledTile {
+                            scratch.settled_tiles.push(planor::SettledTile {
                                 id: tile.id,
                                 rect: tile.rect,
                                 bound,
@@ -1243,7 +1302,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                 }
                 host.thumbs.retain(|id, h| {
-                    if keep.contains(id) {
+                    if scratch.keep.contains(id) {
                         true
                     } else {
                         DwmUnregisterThumbnail(*h);
@@ -1251,146 +1310,221 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                 });
                 if !full {
-                    hits.append(&mut host_hits)
+                    scratch.hits.append(&mut scratch.host_hits);
                 }
-                let fills: Vec<(Rect, u32, f32)> = s
-                    .zones
-                    .iter()
-                    .filter(|z| &z.monitor == name)
-                    .filter_map(|z| {
-                        intersect(z.rect, host.b)
-                            .map(|r| (Rect { x: r.x - host.b.x, y: r.y - host.b.y, ..r }, z.color, z.alpha))
-                    })
-                    .collect();
-                if full || (keep.is_empty() && lines.is_empty() && fills.is_empty() && cards.is_empty()) {
+                scratch.fills.clear();
+                for z in &s.zones {
+                    if &z.monitor == name
+                        && let Some(r) = intersect(z.rect, host.b)
+                    {
+                        scratch.fills.push((
+                            Rect {
+                                x: r.x - host.b.x,
+                                y: r.y - host.b.y,
+                                ..r
+                            },
+                            z.color,
+                            z.alpha,
+                        ));
+                    }
+                }
+                if full
+                    || (scratch.keep.is_empty()
+                        && scratch.lines.is_empty()
+                        && scratch.fills.is_empty()
+                        && scratch.cards.is_empty())
+                {
                     if host.visible {
                         ShowWindow(host.h, SW_HIDE);
                         host.visible = false;
-                        host.last_draw = None;
+                        host.last_draw_valid = false;
                     }
                 } else {
                     if !host.visible {
                         ShowWindow(host.h, SW_SHOWNOACTIVATE);
                         host.visible = true;
-                        host.last_draw = None;
+                        host.last_draw_valid = false;
                     }
                     // Cut unmanaged windows out of the overlay (SetWindowRgn); only when they changed.
-                    let mine: Vec<Rect> = s
-                        .holes
-                        .iter()
-                        .filter_map(|h| intersect(*h, host.b))
-                        .collect();
-                    if applied.get(name) != Some(&mine) {
+                    scratch.mine.clear();
+                    for h in s.holes.iter() {
+                        if let Some(r) = intersect(*h, host.b) {
+                            scratch.mine.push(r);
+                        }
+                    }
+                    if host.applied_holes.as_ref() != Some(&scratch.mine) {
                         let _rgn_span = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderRgnHoles);
-                        if mine.is_empty() {
+                        if scratch.mine.is_empty() {
                             windows_sys::Win32::Graphics::Gdi::SetWindowRgn(host.h, null_mut(), 1);
                         } else {
                             let whole = windows_sys::Win32::Graphics::Gdi::CreateRectRgn(0, 0, host.b.w, host.b.h);
-                            for h in &mine {
+                            for h in &scratch.mine {
                                 let cut = windows_sys::Win32::Graphics::Gdi::CreateRectRgn(
                                     h.x - host.b.x,
                                     h.y - host.b.y,
                                     h.x - host.b.x + h.w,
                                     h.y - host.b.y + h.h,
                                 );
-                                windows_sys::Win32::Graphics::Gdi::CombineRgn(whole, whole, cut, windows_sys::Win32::Graphics::Gdi::RGN_DIFF);
+                                windows_sys::Win32::Graphics::Gdi::CombineRgn(
+                                    whole,
+                                    whole,
+                                    cut,
+                                    windows_sys::Win32::Graphics::Gdi::RGN_DIFF,
+                                );
                                 windows_sys::Win32::Graphics::Gdi::DeleteObject(cut as _);
                             }
                             windows_sys::Win32::Graphics::Gdi::SetWindowRgn(host.h, whole, 1);
                         }
-                        applied.insert(name.clone(), mine);
+                        let slot = host.applied_holes.get_or_insert_with(Vec::new);
+                        slot.clear();
+                        slot.extend_from_slice(&scratch.mine);
                     }
                     if let Some(surface) = host.surface.as_mut() {
                         let dpi = GetDpiForWindow(host.h) as f32 / 96.;
-                        let sig = DrawSig::new(&fills, &cards, &lines, s.width * dpi, s.radius * dpi, dpi);
-                        if !backing.is_empty() || host.last_draw.as_ref() != Some(&sig) {
-                            let t = Instant::now();
+                        let width = s.width * dpi;
+                        let radius = s.radius * dpi;
+                        if !scratch.backing.is_empty()
+                            || !host.last_draw_valid
+                            || !host.last_draw.matches(
+                                &scratch.fills,
+                                &scratch.cards,
+                                &scratch.lines,
+                                width,
+                                radius,
+                                dpi,
+                            )
+                        {
+                            let frame = DrawFrame {
+                                pictures: &scratch.backing,
+                                fills: &scratch.fills,
+                                cards: &scratch.cards,
+                                lines: &scratch.lines,
+                                width,
+                                radius,
+                                dpi,
+                            };
+                            let draw_start = Instant::now();
                             let drawn = {
                                 let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
-                                surface.draw(&backing, &fills, &cards, &lines, s.width * dpi, s.radius * dpi, dpi)
+                                surface.draw(&frame)
                             };
-                            if t.elapsed().as_millis() >= 100 {
-                                diag::trace(format!("SLOW render draw: {} ms", t.elapsed().as_millis()))
+                            if draw_start.elapsed().as_millis() >= 100 {
+                                diag::trace(format!("SLOW render draw: {} ms", draw_start.elapsed().as_millis()))
                             }
                             if let Err(e) = drawn {
                                 eprintln!("border draw: {e}");
                                 host.surface = None;
-                                host.last_draw = None;
-                            } else if backing.is_empty() {
-                                host.last_draw = Some(sig);
+                                host.last_draw_valid = false;
+                            } else if scratch.backing.is_empty() {
+                                host.last_draw.set_from(
+                                    &scratch.fills,
+                                    &scratch.cards,
+                                    &scratch.lines,
+                                    width,
+                                    radius,
+                                    dpi,
+                                );
+                                host.last_draw_valid = true;
                             } else {
-                                host.last_draw = None;
+                                host.last_draw_valid = false;
                             }
                         }
                     }
                 }
             }
-            win32::set_peeks(hits);
-            if !cover_placements.is_empty() {
-                let unsent: Vec<(isize, Rect)> = cover_placements
-                    .iter()
-                    .copied()
-                    .filter(|&(id, _)| cover_sent.insert((s.epoch, id)))
-                    .collect();
-                if !unsent.is_empty() {
-                    win32::place_async(&unsent);
+            if self.last_peeks.as_deref() != Some(scratch.hits.as_slice()) {
+                win32::set_peeks(scratch.hits.clone());
+                let slot = self.last_peeks.get_or_insert_with(Vec::new);
+                slot.clear();
+                slot.extend_from_slice(&scratch.hits);
+            }
+            any_cover_active
+        }
+    }
+
+    unsafe fn apply_placements(
+        &mut self,
+        s: &Scene,
+        t: f64,
+        park: i32,
+        open_handoff: bool,
+        any_cover_active: bool,
+    ) -> (u32, u64) {
+        unsafe {
+            let scratch = &mut self.scratch;
+            if !scratch.cover_placements.is_empty() {
+                scratch.unsent_covers.clear();
+                for &(id, rect) in &scratch.cover_placements {
+                    if self.cover_sent.insert((s.epoch, id)) {
+                        scratch.unsent_covers.push((id, rect));
+                    }
+                }
+                if !scratch.unsent_covers.is_empty() {
+                    win32::place_async(&scratch.unsent_covers);
+                }
+            }
+            scratch.parking.clear();
+            scratch.landing.clear();
+            for &(id, rect) in &scratch.placements {
+                if rect.x == park {
+                    scratch.parking.push((id, rect));
+                } else {
+                    scratch.landing.push((id, rect));
                 }
             }
             let start = Instant::now();
-            let mut retries = 0;
+            let mut retries = 0u32;
             let mut place_ok = false;
-            let mut rejected = Vec::new();
+            scratch.rejected.clear();
             while s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire) {
                 if s.diagnostics && retries == 0 {
-                    for (id, want) in &placements {
-                        if let Some(got) = win32::frame(*id) {
-                            if got != *want {
-                                diag::trace(format!("PLACE {id} {:?} -> {:?}", (got.x, got.y, got.w, got.h), (want.x, want.y, want.w, want.h)));
-                            }
+                    for &(id, want) in &scratch.placements {
+                        if let Some(got) = win32::frame(id)
+                            && got != want
+                        {
+                            diag::trace(format!("PLACE {id} {:?} -> {:?}", (got.x, got.y, got.w, got.h), (want.x, want.y, want.w, want.h)));
                         }
                     }
                 }
                 let placed_at = Instant::now();
                 // Parking never waits for the app. The last on-screen move of an open/close animation is
                 // asynchronous too: its thumbnail remains above it until `open_landed` confirms arrival.
-                let (parking, landing): (Vec<(isize, Rect)>, Vec<(isize, Rect)>) =
-                    placements.iter().copied().partition(|p| p.1.x == park);
                 let animated_open_landing = s.action == "open_close"
                     && t >= 1.
-                    && !landing.is_empty();
+                    && !scratch.landing.is_empty();
                 if animated_open_landing
-                    && open_landed != Some(s.epoch)
-                    && open_landing.as_ref().is_none_or(|(epoch, _, _)| *epoch != s.epoch)
+                    && self.open_landed != Some(s.epoch)
+                    && self.open_landing.as_ref().is_none_or(|(epoch, _, _)| *epoch != s.epoch)
                 {
-                    win32::place_async(&landing);
-                    open_landing = Some((s.epoch, Instant::now(), landing.clone()));
+                    win32::place_async(&scratch.landing);
+                    self.open_landing = Some((s.epoch, Instant::now(), scratch.landing.clone()));
                 }
                 if retries == 0 {
-                    win32::place_async(&parking);
+                    win32::place_async(&scratch.parking);
                 }
-                let result = if landing.is_empty() || (animated_open_landing && retries == 0) {
+                let result = if scratch.landing.is_empty() || (animated_open_landing && retries == 0) {
                     Ok(())
                 } else {
                     // Constraint/rejection handling remains synchronous, as does final placement for
                     // every non-open/close action. The existing delayed verify corrects a timed-out handoff.
-                    win32::place(&landing)
+                    win32::place(&scratch.landing)
                 };
                 if placed_at.elapsed().as_millis() >= 100 {
                     diag::trace(format!("SLOW render place: {} ms", placed_at.elapsed().as_millis()))
                 }
-                rejected.clear();
-                if t >= 1. && !open_handoff && !open_timed_out && result.is_ok() {
-                    for &(id, want) in &placements {
-                        if want.x != park && !cover_timed_out_ids.contains(&id) {
-                            if let Some(got) = win32::frame(id) {
-                                if got.w > want.w + 1 || got.h > want.h + 1 {
-                                    rejected.push((id, got))
-                                }
-                            }
+                scratch.rejected.clear();
+                if t >= 1. && !open_handoff && !self.open_timed_out && result.is_ok() {
+                    for &(id, want) in &scratch.placements {
+                        if want.x != park
+                            && !self.cover_timed_out_ids.contains(&id)
+                            && let Some(got) = win32::frame(id)
+                            && (got.w > want.w + 1 || got.h > want.h + 1)
+                        {
+                            scratch.rejected.push((id, got))
                         }
                     }
                 }
-                if result.is_ok() && rejected.is_empty() {
+                if result.is_ok() && scratch.rejected.is_empty() {
                     place_ok = true;
                     break;
                 }
@@ -1405,46 +1539,48 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 std::thread::sleep(Duration::from_millis(2 << retries));
                 retries += 1
             }
-            if !rejected.is_empty() {
-                win32::emit(win32::Event::Rejected(s.epoch, rejected.clone()));
+            if !scratch.rejected.is_empty() {
+                win32::emit(win32::Event::Rejected(s.epoch, scratch.rejected.clone()));
             }
-            if place_ok && (!placements.is_empty() || !cover_placements.is_empty() || t >= 1.) {
+            if place_ok && (!scratch.placements.is_empty() || !scratch.cover_placements.is_empty() || t >= 1.) {
                 crate::perf::mark_first_place_done();
             }
-            if place_ok && !gesture_recorded {
-                if let Some(in_qpc) = s.input_qpc_us {
-                    gesture_recorded = true;
-                    crate::perf::record_duration_from(
-                        crate::perf::SpanKind::GestureToPlace,
-                        in_qpc,
-                        s.epoch,
-                    );
-                }
+            if place_ok
+                && !self.gesture_recorded
+                && let Some(in_qpc) = s.input_qpc_us
+            {
+                self.gesture_recorded = true;
+                crate::perf::record_duration_from(
+                    crate::perf::SpanKind::GestureToPlace,
+                    in_qpc,
+                    s.epoch,
+                );
             }
-            let waiting_open_landing = open_landing
+            let waiting_open_landing = self
+                .open_landing
                 .as_ref()
                 .is_some_and(|(epoch, _, _)| *epoch == s.epoch);
             if place_ok
                 && t >= 1.
                 && !waiting_open_landing
                 && !any_cover_active
-                && rejected.is_empty()
-                && parked_checked_epoch != s.epoch
-                && !settled_tiles.is_empty()
+                && scratch.rejected.is_empty()
+                && self.parked_checked_epoch != s.epoch
+                && !scratch.settled_tiles.is_empty()
             {
-                parked_checked_epoch = s.epoch;
-                let actuals: Vec<(isize, Rect)> = settled_tiles
-                    .iter()
-                    .filter(|st| {
-                        s.tiles.iter().any(|t| {
-                            t.id == st.id
-                                && GetPropW(t.id as _, tag.as_ptr()) as usize == t.cookie
-                                && IsIconic(t.id as _) == 0
-                        })
-                    })
-                    .filter_map(|st| win32::frame(st.id).map(|r| (st.id, r)))
-                    .collect();
-                let violations = planor::check_settled_parked(&settled_tiles, &actuals, park);
+                self.parked_checked_epoch = s.epoch;
+                scratch.actuals.clear();
+                for st in &scratch.settled_tiles {
+                    if s.tiles.iter().any(|tile| {
+                        tile.id == st.id
+                            && GetPropW(tile.id as _, self.tag.as_ptr()) as usize == tile.cookie
+                            && IsIconic(tile.id as _) == 0
+                    }) && let Some(r) = win32::frame(st.id)
+                    {
+                        scratch.actuals.push((st.id, r));
+                    }
+                }
+                let violations = planor::check_settled_parked(&scratch.settled_tiles, &scratch.actuals, park);
                 for v in violations {
                     crate::perf::record_instant("INVARIANT", "invariant", v.trace_line());
                     if s.diagnostics {
@@ -1455,8 +1591,22 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                 }
             }
-            let placement_us = start.elapsed().as_micros() as u64;
-            current = next;
+            (retries, start.elapsed().as_micros() as u64)
+        }
+    }
+
+    unsafe fn post_present(&mut self, s: Scene, info: &PresentInfo) {
+        let &PresentInfo {
+            t,
+            park,
+            any_cover_active,
+            time,
+            render_start,
+            retries,
+            placement_us,
+        } = info;
+        unsafe {
+            std::mem::swap(&mut self.current, &mut self.scratch.next);
             {
                 let _fspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDwmFlush);
                 DwmFlush();
@@ -1464,49 +1614,209 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             if s.diagnostics {
                 win32::emit(win32::Event::Frame(diag::Frame {
                     input_to_present_us: s.input.map(|v| v.elapsed().as_micros() as u64),
-                    interval_us: last.elapsed().as_micros() as _,
+                    interval_us: self.last.elapsed().as_micros() as _,
                     render_us: time.elapsed().as_micros() as _,
                     placement_us,
-                    thumbnail_us: start.duration_since(time).as_micros() as _,
+                    thumbnail_us: render_start.elapsed().as_micros() as _,
                     retries,
                 }));
             }
             // Animation smoothness: the interval between two presented frames of the same animated scene. A
             // frame later than 1.5 refresh periods is a visible hitch.
-            if s.duration > 0 && frame_of_scene > 0 && !anim_done {
-                crate::perf::record_frame_with_refresh(s.action, last.elapsed().as_micros() as u64, live_refresh_us);
+            if s.duration > 0 && self.frame_of_scene > 0 && !self.anim_done {
+                crate::perf::record_frame_with_refresh(
+                    s.action,
+                    self.last.elapsed().as_micros() as u64,
+                    self.live_refresh_us,
+                );
             }
             if t >= 1. {
-                anim_done = true;
+                self.anim_done = true;
             }
-            if s.live && frame_of_scene == 0 {
+            if s.live && self.frame_of_scene == 0 {
                 // Under the fingers every scene is one frame: the gap between their presents is the smoothness.
-                let cutoff = Duration::from_millis(planor::pacing::live_gap_cutoff_ms(live_refresh_us));
-                if let Some(prev) = last_live_present.filter(|p| p.elapsed() < cutoff) {
-                    crate::perf::record_frame_with_refresh("live", prev.elapsed().as_micros() as u64, live_refresh_us);
+                let cutoff = Duration::from_millis(planor::pacing::live_gap_cutoff_ms(self.live_refresh_us));
+                if let Some(prev) = self.last_live_present.filter(|p| p.elapsed() < cutoff) {
+                    crate::perf::record_frame_with_refresh(
+                        "live",
+                        prev.elapsed().as_micros() as u64,
+                        self.live_refresh_us,
+                    );
                 }
-                last_live_present = Some(Instant::now());
+                self.last_live_present = Some(Instant::now());
             }
-            frame_of_scene += 1;
-            last = Instant::now();
+            self.frame_of_scene += 1;
+            self.last = Instant::now();
+            let waiting_open_landing = self
+                .open_landing
+                .as_ref()
+                .is_some_and(|(epoch, _, _)| *epoch == s.epoch);
             if t >= 1. && !waiting_open_landing && !any_cover_active {
-                settled = timestamp() + planor::pacing::settled_capture_delay_100ns(live_refresh_us);
+                self.settled =
+                    self.timestamp() + planor::pacing::settled_capture_delay_100ns(self.live_refresh_us);
                 let current_epoch = s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
-                scene = None;
                 if current_epoch {
-                    let verify_items: Vec<(isize, Rect)> = placements
-                        .iter()
-                        .filter(|p| p.1.x != park)
-                        .chain(cover_placements.iter())
-                        .copied()
-                        .collect();
-                    verify = Some((
+                    self.scratch.verify_items.clear();
+                    for &(id, rect) in &self.scratch.placements {
+                        if rect.x != park {
+                            self.scratch.verify_items.push((id, rect));
+                        }
+                    }
+                    self.scratch
+                        .verify_items
+                        .extend_from_slice(&self.scratch.cover_placements);
+                    self.verify = Some((
                         Instant::now() + Duration::from_millis(250),
-                        verify_items,
+                        std::mem::take(&mut self.scratch.verify_items),
                         2,
-                    ))
+                    ));
                 }
+                // `self.scene` stays cleared after the final settled frame.
+                self.scene = None;
+            } else {
+                self.scene = Some(s);
             }
+        }
+    }
+}
+
+pub static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn start() -> crossbeam_channel::Sender<Message> {
+    let (tx, rx) = crossbeam_channel::unbounded();
+    std::thread::spawn(move || unsafe {
+        crate::perf::register_thread("render");
+        let _ = windows::Win32::System::Com::CoInitializeEx(
+            None,
+            windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
+        );
+        let (source_tx, source_jobs) = crossbeam_channel::unbounded::<SourceJob>();
+        let (source_done_tx, source_done) = crossbeam_channel::unbounded::<SourceDone>();
+        std::thread::Builder::new()
+            .name("Planor.Capture".into())
+            .spawn(move || {
+                let _ = windows::Win32::System::Com::CoInitializeEx(
+                    None,
+                    windows::Win32::System::Com::COINIT_MULTITHREADED,
+                );
+                for (mon, generation, key, device) in source_jobs {
+                    let t = Instant::now();
+                    let made = Source::new(key.0, &device.0).map(SendSource).map_err(|e| e.to_string());
+                    if source_done_tx
+                        .send((mon, generation, key, made, t.elapsed().as_millis()))
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .ok();
+        let mut state = RenderState::new(source_tx, source_done);
+        loop {
+            crate::perf::heartbeat_render();
+            state.poll_background_work();
+            let timeout = if state.scene.is_some() {
+                Duration::ZERO
+            } else if state.has_active_sources() || state.verify.is_some() {
+                Duration::from_millis(33)
+            } else {
+                Duration::from_millis(50)
+            };
+            match rx.recv_timeout(timeout) {
+                Ok(Message::Stop(ack)) => {
+                    win32::set_peeks(Vec::new());
+                    state.last_peeks = None;
+                    state.hosts.clear();
+                    let _ = ack.send(());
+                    break;
+                }
+                Ok(Message::Warm(monitors)) => {
+                    warm_hosts(monitors, &mut state.hosts, &mut state.next_host_gen);
+                    continue;
+                }
+                Ok(Message::Clear(ack)) => {
+                    state.clear_state();
+                    let _ = ack.send(());
+                    continue;
+                }
+                Ok(Message::Scene(mut s)) => {
+                    // Drain any newer queued scenes so a burst of input/events skips stale frames
+                    // instead of paying setup work for a scene that has already been superseded.
+                    let mut stop = false;
+                    let mut cleared = false;
+                    while let Ok(next_msg) = rx.try_recv() {
+                        match next_msg {
+                            Message::Scene(newer) => s = newer,
+                            Message::Warm(monitors) => {
+                                warm_hosts(monitors, &mut state.hosts, &mut state.next_host_gen)
+                            }
+                            Message::Clear(ack) => {
+                                state.clear_state();
+                                let _ = ack.send(());
+                                cleared = true;
+                                break;
+                            }
+                            Message::Stop(ack) => {
+                                win32::set_peeks(Vec::new());
+                                state.last_peeks = None;
+                                state.hosts.clear();
+                                let _ = ack.send(());
+                                stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    if stop {
+                        break;
+                    }
+                    if cleared {
+                        continue;
+                    }
+                    state.prepare_scene(s);
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                _ => (),
+            }
+            let Some(s) = state.scene.take() else {
+                state.update_idle_sources();
+                continue;
+            };
+            if s.epoch != EPOCH.load(std::sync::atomic::Ordering::Acquire) {
+                continue;
+            }
+            if state.refresh_checked.elapsed() >= Duration::from_millis(100) {
+                state.refresh_checked = Instant::now();
+                state.live_refresh_us =
+                    planor::pacing::effective_refresh_us(win32::dwm_refresh_period_us(), None);
+            }
+            let time = Instant::now();
+            let t = if s.duration == 0 {
+                1.
+            } else {
+                planor::motion(
+                    state.begin.elapsed().as_secs_f64() * 1000. / s.duration as f64,
+                    s.spring,
+                )
+            };
+            let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+            let open_handoff = s.action == "open_close"
+                && t >= 1.
+                && state.open_landed != Some(s.epoch);
+            let any_cover_active = state.build_all_hosts(&s, t, park, open_handoff);
+            let place_start = Instant::now();
+            let (retries, placement_us) =
+                state.apply_placements(&s, t, park, open_handoff, any_cover_active);
+            state.post_present(
+                s,
+                &PresentInfo {
+                    t,
+                    park,
+                    any_cover_active,
+                    time,
+                    render_start: place_start,
+                    retries,
+                    placement_us,
+                },
+            );
         }
     });
     tx

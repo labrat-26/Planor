@@ -225,7 +225,7 @@ fn group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape() {
     assert_eq!(rect_of(&four, 4).h, 600 - 56, "a fourth member does not change the size");
     // The visible part of a neighbour is exactly the peek: its rectangle clipped to the column.
     assert_eq!(600 - next.y, 28, "28 px of the next member show below the active one");
-    assert_eq!(prev.y + prev.h - 0, 28, "28 px of the previous member show above it");
+    assert_eq!(prev.y + prev.h, 28, "28 px of the previous member show above it");
 }
 #[test]
 fn group_is_a_deck_sideways_in_portrait() {
@@ -712,10 +712,10 @@ fn mockup_spec_states_match_layout() {
                 s.insert(w, 1);
             }
             let peek = state["reveal_peek"].as_i64().unwrap_or(54) as i32;
-            if let Some(f) = state["focus"].as_u64() {
-                if count > 0 {
-                    s.focus = (f as usize).min(s.columns.len() - 1);
-                }
+            if let Some(f) = state["focus"].as_u64()
+                && count > 0
+            {
+                s.focus = (f as usize).min(s.columns.len() - 1);
             }
             s.reveal(peek);
             s.fill_gaps();

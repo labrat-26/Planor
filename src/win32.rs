@@ -319,15 +319,14 @@ pub fn events(
                 }
             } else if m.message == taskbar {
                 emit(Event::Topology)
-            } else if m.message == WM_TIMER {
-                if let Ok(cfg) = reload.try_recv() {
-                    if !test_mode {
-                        for id in 1..=keys.len() {
-                            KeyboardAndMouse::UnregisterHotKey(h, id as _);
-                        }
-                        keys = input::bindings(h, &cfg)
-                    }
+            } else if m.message == WM_TIMER
+                && let Ok(cfg) = reload.try_recv()
+                && !test_mode
+            {
+                for id in 1..=keys.len() {
+                    KeyboardAndMouse::UnregisterHotKey(h, id as _);
                 }
+                keys = input::bindings(h, &cfg)
             }
             TranslateMessage(&m);
             DispatchMessageW(&m);
@@ -380,8 +379,10 @@ pub fn monitors() -> Vec<(String, Rect, Rect)> {
             let mut info = MONITORINFOEXW::default();
             info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as _;
             if GetMonitorInfoW(m, &mut info.monitorInfo) != 0 {
-                let mut dev = DISPLAY_DEVICEW::default();
-                dev.cb = size_of::<DISPLAY_DEVICEW>() as _;
+                let mut dev = DISPLAY_DEVICEW {
+                    cb: size_of::<DISPLAY_DEVICEW>() as _,
+                    ..Default::default()
+                };
                 EnumDisplayDevicesW(info.szDevice.as_ptr(), 0, &mut dev, 1);
                 let text = |s: &[u16]| {
                     String::from_utf16_lossy(
@@ -834,8 +835,10 @@ pub fn max_monitor_refresh_hz() -> f64 {
             let mut info = MONITORINFOEXW::default();
             info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
             if GetMonitorInfoW(m, &mut info.monitorInfo) != 0 {
-                let mut mode = DEVMODEW::default();
-                mode.dmSize = size_of::<DEVMODEW>() as u16;
+                let mut mode = DEVMODEW {
+                    dmSize: size_of::<DEVMODEW>() as u16,
+                    ..Default::default()
+                };
                 if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
                     && let Some(hz) = planor::pacing::clamp_hz(mode.dmDisplayFrequency as f64)
                 {
@@ -856,8 +859,10 @@ pub fn max_monitor_refresh_hz() -> f64 {
 
 pub fn dwm_refresh_period_us() -> Option<f64> {
     unsafe {
-        let mut t = DWM_TIMING_INFO::default();
-        t.cbSize = size_of::<DWM_TIMING_INFO>() as u32;
+        let mut t = DWM_TIMING_INFO {
+            cbSize: size_of::<DWM_TIMING_INFO>() as u32,
+            ..Default::default()
+        };
         if DwmGetCompositionTimingInfo(null_mut(), &mut t) < 0 {
             return None;
         }

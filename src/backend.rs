@@ -482,7 +482,7 @@ pub(crate) mod sim {
             let mut placements = Vec::new();
             let mut peeks = Vec::new();
             let mut mon_bounds = HashMap::new();
-            for (n, _, b) in &scene.monitors {
+            for (n, _, b) in scene.monitors.iter() {
                 mon_bounds.insert(n.as_str(), *b);
             }
             for tile in &scene.tiles {
@@ -538,7 +538,7 @@ pub(crate) mod sim {
             self.scenes.push(SimSceneSummary {
                 epoch: scene.epoch,
                 tiles_len: scene.tiles.len(),
-                holes: scene.holes.clone(),
+                holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
                 covered: scene
                     .tiles

@@ -121,11 +121,11 @@ fn parse(s: &str) -> Result<toml::Value> {
         };
         if let Some(table) = value.as_table() {
             for (k, v) in table {
-                if let Some(old) = base.get_mut(k) {
-                    if valid_value(k, old, v) {
-                        *old = v.clone();
-                        continue;
-                    }
+                if let Some(old) = base.get_mut(k)
+                    && valid_value(k, old, v)
+                {
+                    *old = v.clone();
+                    continue;
                 }
                 eprintln!("ignored invalid config key in {section}")
             }
@@ -376,6 +376,7 @@ impl PipeServer {
             self.connected = true;
             self.started = std::time::Instant::now()
         }
+        let mut _span: Option<perf::SpanGuard> = None;
         let mut available = 0;
         let mut prefix = [0; 4];
         let mut n = 0;
@@ -401,6 +402,7 @@ impl PipeServer {
                 return Ok(false);
             }
             if available >= 4 + len {
+                _span = Some(perf::SpanGuard::new(perf::SpanKind::DaemonIpc));
                 let result = read_frame(&mut self.file)
                     .and_then(|data| Ok(serde_json::from_slice::<Command>(&data)?))
                     .and_then(|cmd| {
@@ -416,6 +418,9 @@ impl PipeServer {
                     .extend_from_slice(&(body.len() as u32).to_le_bytes());
                 self.reply.extend(body)
             }
+        }
+        if self.sent < self.reply.len() && _span.is_none() {
+            _span = Some(perf::SpanGuard::new(perf::SpanKind::DaemonIpc));
         }
         while self.sent < self.reply.len() {
             match self.file.write(&self.reply[self.sent..]) {
@@ -586,10 +591,10 @@ fn main() -> Result<()> {
             if path.as_os_str() == "-" {
                 println!("{payload}");
             } else {
-                if let Some(parent) = path.parent() {
-                    if !parent.as_os_str().is_empty() {
-                        fs::create_dir_all(parent)?;
-                    }
+                if let Some(parent) = path.parent()
+                    && !parent.as_os_str().is_empty()
+                {
+                    fs::create_dir_all(parent)?;
                 }
                 fs::write(path, payload)?;
                 println!("{}", path.display());

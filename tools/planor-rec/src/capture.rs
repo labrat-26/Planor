@@ -764,17 +764,18 @@ mod rotation_tests {
         for i in 0..w * h {
             src[i * 4] = i as u8;
         }
+        let px = |row: usize, col: usize| (row * 2 + col) * 4;
         let mut cw = vec![0u8; w * h * 4];
         rotate_into(&src, w, h, 2, &mut cw);
         // Clockwise: the top-left pixel (0) ends up top-right of the 2 wide x 3 high result; the
         // top-right pixel (2) bottom-right.
-        assert_eq!(cw[(0 * 2 + 1) * 4], 0);
-        assert_eq!(cw[(2 * 2 + 1) * 4], 2);
+        assert_eq!(cw[px(0, 1)], 0);
+        assert_eq!(cw[px(2, 1)], 2);
         let mut ccw = vec![0u8; w * h * 4];
         rotate_into(&src, w, h, 4, &mut ccw);
         // Counter-clockwise: the top-left pixel (0) ends up bottom-left; top-right (2) top-left.
-        assert_eq!(ccw[(2 * 2 + 0) * 4], 0);
-        assert_eq!(ccw[(0 * 2 + 0) * 4], 2);
+        assert_eq!(ccw[px(2, 0)], 0);
+        assert_eq!(ccw[px(0, 0)], 2);
     }
 
     /// The pre-tiling reference: one pixel at a time.
