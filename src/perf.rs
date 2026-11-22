@@ -178,11 +178,31 @@ impl SpanKind {
     ];
 
     pub fn from_u8(v: u8) -> Self {
-        Self::ALL
-            .iter()
-            .copied()
-            .find(|&k| k as u8 == v)
-            .unwrap_or(SpanKind::Idle)
+        match v {
+            1 => SpanKind::DaemonTick,
+            2 => SpanKind::DaemonLayout,
+            3 => SpanKind::DaemonEvent,
+            4 => SpanKind::DaemonHoles,
+            5 => SpanKind::DaemonScan,
+            6 => SpanKind::DaemonIpc,
+            7 => SpanKind::DaemonJournal,
+            8 => SpanKind::DaemonTopology,
+            9 => SpanKind::RenderScene,
+            10 => SpanKind::RenderHosts,
+            11 => SpanKind::RenderSources,
+            12 => SpanKind::RenderFrames,
+            13 => SpanKind::RenderDraw,
+            14 => SpanKind::RenderDwmFlush,
+            15 => SpanKind::RenderVerify,
+            16 => SpanKind::RenderRgnHoles,
+            17 => SpanKind::Win32Place,
+            18 => SpanKind::HookMouse,
+            19 => SpanKind::HookKeyboard,
+            20 => SpanKind::InputContacts,
+            21 => SpanKind::GestureToPlace,
+            22 => SpanKind::StartupFirstPlace,
+            _ => SpanKind::Idle,
+        }
     }
 
     pub fn name(self) -> &'static str {

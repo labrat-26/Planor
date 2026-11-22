@@ -21,6 +21,8 @@ param(
   [switch]$Changed,
   [switch]$Cache,
   [switch]$Perf,
+  [switch]$Parallel,
+  [int]$MaxJobs = 0,
   [switch]$UpdateDocs
 )
 
@@ -51,6 +53,104 @@ function Invoke-ProcessCaptured([string]$exe, [string]$argLine, [string]$log) {
     Code = $code
     DurationMs = [int64][Math]::Round($sw.Elapsed.TotalMilliseconds)
   }
+}
+
+function Start-CapturedProcessBg([string]$exe, [string]$argLine, [string]$log, [hashtable]$envMap) {
+  $psi = [System.Diagnostics.ProcessStartInfo]::new()
+  $psi.FileName = "cmd.exe"
+  $psi.Arguments = "/d /c call `"$exe`" $argLine > `"$log`" 2>&1"
+  $psi.UseShellExecute = $false
+  $psi.CreateNoWindow = $true
+  $psi.WorkingDirectory = $root
+  if ($envMap) {
+    foreach ($k in $envMap.Keys) {
+      if ($null -eq $envMap[$k]) {
+        [void]$psi.EnvironmentVariables.Remove($k)
+      } else {
+        $psi.EnvironmentVariables[$k] = [string]$envMap[$k]
+      }
+    }
+  }
+  $proc = [System.Diagnostics.Process]::Start($psi)
+  $sw = [System.Diagnostics.Stopwatch]::StartNew()
+  return [pscustomobject]@{
+    Process = $proc
+    Stopwatch = $sw
+    Log = $log
+  }
+}
+
+function Invoke-ParallelStepJobs([array]$jobs, [int]$concurrency) {
+  $queue = [System.Collections.Generic.Queue[object]]::new()
+  foreach ($j in $jobs) {
+    $queue.Enqueue([pscustomobject]@{
+      Tag = $j.Tag
+      Steps = @($j.Steps)
+      StepIdx = 0
+      Log = $j.Log
+      EnvMap = $j.EnvMap
+      TotalMs = [int64]0
+      AllOk = $true
+      Active = $null
+      ActiveSubLog = ""
+    })
+  }
+  $running = [System.Collections.Generic.List[object]]::new()
+  $done = [System.Collections.Generic.List[object]]::new()
+
+  while (($queue.Count -gt 0) -or ($running.Count -gt 0)) {
+    while (($running.Count -lt $concurrency) -and ($queue.Count -gt 0)) {
+      $item = $queue.Dequeue()
+      if ($item.Steps.Count -eq 0) {
+        $done.Add($item)
+        continue
+      }
+      $step = $item.Steps[$item.StepIdx]
+      $subLog = if ($item.StepIdx -eq 0) { $item.Log } else { "$($item.Log).part$($item.StepIdx)" }
+      $item.ActiveSubLog = $subLog
+      $item.Active = Start-CapturedProcessBg $step.Exe $step.Args $subLog $item.EnvMap
+      $running.Add($item)
+    }
+    if ($running.Count -gt 0) {
+      Start-Sleep -Milliseconds 30
+      for ($idx = $running.Count - 1; $idx -ge 0; $idx--) {
+        $item = $running[$idx]
+        $proc = $item.Active.Process
+        if (-not $proc.HasExited) { continue }
+        $item.Active.Stopwatch.Stop()
+        $item.TotalMs += [int64][Math]::Round($item.Active.Stopwatch.Elapsed.TotalMilliseconds)
+        $code = $proc.ExitCode
+        $proc.Dispose()
+        if ($item.StepIdx -gt 0 -and (Test-Path $item.ActiveSubLog)) {
+          Get-Content $item.ActiveSubLog | Add-Content $item.Log
+          Remove-Item $item.ActiveSubLog -Force -ErrorAction SilentlyContinue
+        }
+        $running.RemoveAt($idx)
+        if ($code -ne 0) {
+          $item.AllOk = $false
+          $done.Add($item)
+        } elseif (($item.StepIdx + 1) -lt $item.Steps.Count) {
+          $item.StepIdx++
+          $step = $item.Steps[$item.StepIdx]
+          $subLog = "$($item.Log).part$($item.StepIdx)"
+          $item.ActiveSubLog = $subLog
+          $item.Active = Start-CapturedProcessBg $step.Exe $step.Args $subLog $item.EnvMap
+          $running.Add($item)
+        } else {
+          $done.Add($item)
+        }
+      }
+    }
+  }
+  return @($done)
+}
+
+function Test-OnlyMatch([string]$onlyFilter, [string]$suite, [string]$name, [string]$fq) {
+  if (-not $onlyFilter) { return $true }
+  foreach ($tok in @($onlyFilter -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    if ("$suite $name $fq" -like "*$tok*") { return $true }
+  }
+  return $false
 }
 
 function Get-FailureLine([string]$log) {
@@ -182,6 +282,17 @@ $exclusiveLiveSet = @{
   "scn_exit::panic_hotkey" = $true
   "scn_exit::ctrl_break_restores_before_exit" = $true
 }
+$parallelSafeLiveSet = @{
+  "live::state_json_matches_real_windows" = $true
+  "live::stop_restores_exact_rect" = $true
+  "live::owned_dialog_excluded" = $true
+  "live::bounded_rejection_backoff" = $true
+  "live::forced_kill_recovery" = $true
+  "scn_exit::stop_with_many_windows" = $true
+  "scn_taskbar::tiles_stay_inside_work_area" = $true
+}
+$unitParallelJobs = if ($MaxJobs -gt 0) { $MaxJobs } else { 4 }
+$liveParallelJobs = if ($MaxJobs -gt 0) { $MaxJobs } else { 2 }
 
 # Optional change-based selection (-Changed)
 $changedUnitFilter = $null
@@ -227,23 +338,58 @@ try {
   if ($KeepAnim) { $env:PLANOR_KEEP_ANIM = "1" } else { Remove-Item Env:PLANOR_KEEP_ANIM -ErrorAction SilentlyContinue }
 
   if ($Tier -ne "live") {
-    Write-Host "== unit tests" -ForegroundColor Cyan
+    Write-Host ("== unit tests{0}" -f $(if ($Parallel) { " (parallel max=$unitParallelJobs)" } else { "" })) -ForegroundColor Cyan
     $unitSpecs = @(
-      @{ Name = "--workspace --lib --bins"; Exes = @($unitBinExes["lib:planor"], $unitBinExes["bin:planor"], $unitBinExes["lib:planor_rec"], $unitBinExes["bin:planor-rec"]) | Where-Object { $_ }; Args = "" },
-      @{ Name = "--test core"; Exes = @($testExes["core"]) | Where-Object { $_ }; Args = "" },
-      @{ Name = "--test prop_core"; Exes = @($testExes["prop_core"]) | Where-Object { $_ }; Args = "--nocapture" },
-      @{ Name = "-p planor-rec"; Exes = @($unitBinExes["lib:planor_rec"], $unitBinExes["bin:planor-rec"], $testExes["analyze_synthetic"]) | Where-Object { $_ }; Args = "" }
+      @{
+        Name = "--lib planor"
+        Steps = @(@(
+          @{ Exe = $unitBinExes["lib:planor"]; Args = "" }
+        ) | Where-Object { $_.Exe })
+      },
+      @{
+        Name = "--bin planor (sim_tests)"
+        Steps = @(@(
+          @{ Exe = $unitBinExes["bin:planor"]; Args = "sim_tests" }
+        ) | Where-Object { $_.Exe })
+      },
+      @{
+        Name = "--bin planor (other)"
+        Steps = @(@(
+          @{ Exe = $unitBinExes["bin:planor"]; Args = "--skip sim_tests" }
+        ) | Where-Object { $_.Exe })
+      },
+      @{
+        Name = "--test core"
+        Steps = @(@(
+          @{ Exe = $testExes["core"]; Args = "" }
+        ) | Where-Object { $_.Exe })
+      },
+      @{
+        Name = "--test prop_core"
+        Steps = @(@(
+          @{ Exe = $testExes["prop_core"]; Args = "--nocapture" }
+        ) | Where-Object { $_.Exe })
+      },
+      @{
+        Name = "-p planor-rec"
+        Steps = @(@(
+          @{ Exe = $unitBinExes["lib:planor_rec"]; Args = "" },
+          @{ Exe = $unitBinExes["bin:planor-rec"]; Args = "" },
+          @{ Exe = $testExes["analyze_synthetic"]; Args = "" }
+        ) | Where-Object { $_.Exe })
+      }
     )
     if ($null -ne $changedUnitFilter) {
       $unitSpecs = @($unitSpecs | Where-Object { $changedUnitFilter -contains $_.Name })
     }
     if ($Only) {
-      $unitSpecs = @($unitSpecs | Where-Object { $_.Name -like "*$Only*" })
+      $unitSpecs = @($unitSpecs | Where-Object { Test-OnlyMatch $Only "unit" $_.Name ("unit::" + $_.Name) })
     }
+    $unitRunQueue = @()
     foreach ($spec in $unitSpecs) {
       $sname = $spec.Name
       $key = "unit::$sname"
-      $shaParts = @($daemonSha, $cfgSha, "perf=$Perf") + @($spec.Exes | ForEach-Object { Get-FileSha $_ })
+      $shaParts = @($daemonSha, $cfgSha, "perf=$Perf") + @($spec.Steps | ForEach-Object { Get-FileSha $_.Exe })
       $hash = ($shaParts -join "|")
       if ($Cache -and $cacheMap.ContainsKey($key) -and $cacheMap[$key].hash -eq $hash -and $cacheMap[$key].verdict -eq "PASS") {
         $cachedCount++
@@ -254,34 +400,59 @@ try {
         continue
       }
       $log = Join-Path $out ("unit-" + ($sname -replace "[^a-z0-9]+", "_") + ".log")
-      $totalMs = [int64]0
-      $allOk = $true
-      $firstRun = $true
-      foreach ($exe in $spec.Exes) {
-        $subLog = if ($firstRun) { $log } else { "$log.part" }
-        $res = Invoke-ProcessCaptured $exe $spec.Args $subLog
-        $totalMs += $res.DurationMs
-        if (-not $firstRun -and (Test-Path $subLog)) {
-          Get-Content $subLog | Add-Content $log
-          Remove-Item $subLog -Force -ErrorAction SilentlyContinue
+      $unitRunQueue += [pscustomobject]@{
+        Tag = @{ Name = $sname; Key = $key; Hash = $hash }
+        Steps = $spec.Steps
+        Log = $log
+        EnvMap = $null
+      }
+    }
+    if ($Parallel -and $unitRunQueue.Count -gt 1) {
+      $finished = Invoke-ParallelStepJobs $unitRunQueue $unitParallelJobs
+      foreach ($fin in ($finished | Sort-Object { $_.Tag.Name })) {
+        $sname = $fin.Tag.Name; $key = $fin.Tag.Key; $hash = $fin.Tag.Hash
+        $verdict = if ($fin.AllOk) { "PASS" } else { "FAIL" }
+        $detail = if (-not $fin.AllOk) { Get-FailureLine $fin.Log } else { "" }
+        Write-Host ("{0,-6} unit :: {1} ({2})" -f $verdict, $sname, (Format-Dur $fin.TotalMs)) -ForegroundColor $(if ($verdict -eq "PASS") { "Green" } else { "Red" })
+        if ($Cache -and $verdict -eq "PASS") {
+          $cacheMap[$key] = [pscustomobject]@{ hash = $hash; verdict = "PASS"; stamp = $stamp }
         }
-        $firstRun = $false
-        if ($res.Code -ne 0) { $allOk = $false; break }
+        $results += [pscustomobject]@{
+          Suite = "unit"; Test = $sname; Verdict = $verdict; Runs = 1; DurationMs = $fin.TotalMs; RunDurationsMs = @($fin.TotalMs); Detail = $detail; Log = $fin.Log
+        }
       }
-      $verdict = if ($allOk) { "PASS" } else { "FAIL" }
-      $detail = if (-not $allOk) { Get-FailureLine $log } else { "" }
-      Write-Host ("{0,-6} unit :: {1} ({2})" -f $verdict, $sname, (Format-Dur $totalMs)) -ForegroundColor $(if ($verdict -eq "PASS") { "Green" } else { "Red" })
-      if ($Cache -and $verdict -eq "PASS") {
-        $cacheMap[$key] = [pscustomobject]@{ hash = $hash; verdict = "PASS"; stamp = $stamp }
-      }
-      $results += [pscustomobject]@{
-        Suite = "unit"; Test = $sname; Verdict = $verdict; Runs = 1; DurationMs = $totalMs; RunDurationsMs = @($totalMs); Detail = $detail; Log = $log
+    } else {
+      foreach ($job in $unitRunQueue) {
+        $sname = $job.Tag.Name; $key = $job.Tag.Key; $hash = $job.Tag.Hash; $log = $job.Log
+        $totalMs = [int64]0
+        $allOk = $true
+        $firstRun = $true
+        foreach ($step in $job.Steps) {
+          $subLog = if ($firstRun) { $log } else { "$log.part" }
+          $res = Invoke-ProcessCaptured $step.Exe $step.Args $subLog
+          $totalMs += $res.DurationMs
+          if (-not $firstRun -and (Test-Path $subLog)) {
+            Get-Content $subLog | Add-Content $log
+            Remove-Item $subLog -Force -ErrorAction SilentlyContinue
+          }
+          $firstRun = $false
+          if ($res.Code -ne 0) { $allOk = $false; break }
+        }
+        $verdict = if ($allOk) { "PASS" } else { "FAIL" }
+        $detail = if (-not $allOk) { Get-FailureLine $log } else { "" }
+        Write-Host ("{0,-6} unit :: {1} ({2})" -f $verdict, $sname, (Format-Dur $totalMs)) -ForegroundColor $(if ($verdict -eq "PASS") { "Green" } else { "Red" })
+        if ($Cache -and $verdict -eq "PASS") {
+          $cacheMap[$key] = [pscustomobject]@{ hash = $hash; verdict = "PASS"; stamp = $stamp }
+        }
+        $results += [pscustomobject]@{
+          Suite = "unit"; Test = $sname; Verdict = $verdict; Runs = 1; DurationMs = $totalMs; RunDurationsMs = @($totalMs); Detail = $detail; Log = $log
+        }
       }
     }
   }
 
   if ($Tier -ne "unit") {
-    Write-Host "== live tests ($Tier)" -ForegroundColor Cyan
+    Write-Host ("== live tests ({0}{1})" -f $Tier, $(if ($Parallel) { ", parallel-safe max=$liveParallelJobs" } else { "" })) -ForegroundColor Cyan
     $env:PLANOR_KEEP_ARTIFACTS = $out
     $liveFiles = @("live", "scn_focus", "scn_scroll", "scn_drag", "scn_exit", "scn_taskbar", "scn_overlay", "scn_display")
     if ($NoDisplaySwitch) {
@@ -296,19 +467,92 @@ try {
         $fq = "$f::$name"
         if ($Tier -eq "fast" -and ($fastLiveList -notcontains $fq)) { continue }
         if ($Tier -eq "smoke" -and ($smokeLiveList -notcontains $fq)) { continue }
-        if ($Only -and ("$f $name $fq" -notlike "*$Only*")) { continue }
+        if ($Only -and -not (Test-OnlyMatch $Only $f $name $fq)) { continue }
         if ($null -ne $changedLiveFilter -and -not ($changedLiveFilter | Where-Object { $fq -eq $_ -or $f -eq $_ })) { continue }
         $selectedTests += [pscustomobject]@{ Suite = $f; Name = $name; Fq = $fq; Exe = $exe }
       }
     }
 
-    # Run non-exclusive tests first so real user daemon stays undisturbed; run exclusive tests only if selected.
+    # Run parallel-safe subset first (concurrently when -Parallel), then non-exclusive serial tests, then exclusive tests.
     $ordered = @($selectedTests | Where-Object { -not $exclusiveLiveSet.ContainsKey($_.Fq) }) + @($selectedTests | Where-Object { $exclusiveLiveSet.ContainsKey($_.Fq) })
-    foreach ($t in $ordered) {
+    $serialLiveQueue = @()
+    if ($Parallel) {
+      $parBatch = @()
+      $parQueue = @()
+      foreach ($t in $ordered) {
+        $f = $t.Suite; $name = $t.Name; $fq = $t.Fq; $exe = $t.Exe
+        $key = $fq
+        $hash = (@($daemonSha, $cfgSha, (Get-FileSha $exe), "anim=$KeepAnim", "perf=$Perf", "rec=$Record") -join "|")
+        if ($Cache -and $cacheMap.ContainsKey($key) -and $cacheMap[$key].hash -eq $hash -and $cacheMap[$key].verdict -eq "PASS") {
+          $cachedCount++
+          Write-Host ("CACHED {0} :: {1} (0.00s)" -f $f, $name) -ForegroundColor DarkGray
+          $results += [pscustomobject]@{
+            Suite = $f; Test = $name; Verdict = "CACHED"; Runs = 0; DurationMs = 0; RunDurationsMs = @(); Detail = ""; Log = ""
+          }
+          continue
+        }
+        if ($parallelSafeLiveSet.ContainsKey($fq)) {
+          $log1 = Join-Path $out ("$f-$name-run1.log")
+          $safeName = (Safe-ArtifactName $f $name)
+          $envMap = @{
+            PLANOR_TEST_NAME = $safeName
+            PLANOR_RECORD = $(if ($Record) { "1" } else { "0" })
+            PLANOR_KEEP_ARTIFACTS = $out
+            PLANOR_PERF = $(if ($Perf) { "1" } else { $null })
+            PLANOR_KEEP_ANIM = $(if ($KeepAnim) { "1" } else { $null })
+          }
+          $parQueue += [pscustomobject]@{
+            Tag = @{ Suite = $f; Name = $name; Fq = $fq; Exe = $exe; Hash = $hash; SafeName = $safeName }
+            Steps = @(@{ Exe = $exe; Args = "$name --ignored --exact --test-threads=1 --nocapture" })
+            Log = $log1
+            EnvMap = $envMap
+          }
+        } else {
+          $serialLiveQueue += $t
+        }
+      }
+      if ($parQueue.Count -eq 1) {
+        $serialLiveQueue = @([pscustomobject]@{
+          Suite = $parQueue[0].Tag.Suite; Name = $parQueue[0].Tag.Name; Fq = $parQueue[0].Tag.Fq; Exe = $parQueue[0].Tag.Exe
+        }) + $serialLiveQueue
+      } elseif ($parQueue.Count -gt 1) {
+        $finishedPar = Invoke-ParallelStepJobs $parQueue $liveParallelJobs
+        foreach ($fin in ($finishedPar | Sort-Object { $_.Tag.Fq })) {
+          $tag = $fin.Tag
+          $rawLog = Get-Content $fin.Log -Raw -ErrorAction SilentlyContinue
+          if ($rawLog -match "(?m)^PERF_JSON (\{.+\})\r?$") {
+            try { $perfReports += ($Matches[1] | ConvertFrom-Json) } catch {}
+          }
+          if ($fin.AllOk) {
+            Write-Host ("{0,-6} {1} :: {2} (1 run(s), {3})" -f "PASS", $tag.Suite, $tag.Name, (Format-Dur $fin.TotalMs)) -ForegroundColor Green
+            if ($Cache) {
+              $cacheMap[$tag.Fq] = [pscustomobject]@{ hash = $tag.Hash; verdict = "PASS"; stamp = $stamp }
+            }
+            $results += [pscustomobject]@{
+              Suite = $tag.Suite; Test = $tag.Name; Verdict = "PASS"; Runs = 1; DurationMs = $fin.TotalMs; RunDurationsMs = @($fin.TotalMs); Detail = ""; Log = $fin.Log
+            }
+          } else {
+            # Failed parallel first run: retry serially with recording enabled per cheap-retry rule.
+            $parBatch += [pscustomobject]@{
+              Suite = $tag.Suite; Name = $tag.Name; Fq = $tag.Fq; Exe = $tag.Exe
+              InitialMs = $fin.TotalMs; InitialDetail = (Get-FailureLine $fin.Log); LastLog = $fin.Log
+            }
+          }
+        }
+        foreach ($retryItem in $parBatch) {
+          $serialLiveQueue = @($retryItem) + $serialLiveQueue
+        }
+      }
+    } else {
+      $serialLiveQueue = $ordered
+    }
+
+    foreach ($t in $serialLiveQueue) {
       $f = $t.Suite; $name = $t.Name; $fq = $t.Fq; $exe = $t.Exe
       $key = $fq
       $hash = (@($daemonSha, $cfgSha, (Get-FileSha $exe), "anim=$KeepAnim", "perf=$Perf", "rec=$Record") -join "|")
-      if ($Cache -and $cacheMap.ContainsKey($key) -and $cacheMap[$key].hash -eq $hash -and $cacheMap[$key].verdict -eq "PASS") {
+      $hadParallelRun1 = $null -ne $t.InitialMs
+      if (-not $hadParallelRun1 -and $Cache -and $cacheMap.ContainsKey($key) -and $cacheMap[$key].hash -eq $hash -and $cacheMap[$key].verdict -eq "PASS") {
         $cachedCount++
         Write-Host ("CACHED {0} :: {1} (0.00s)" -f $f, $name) -ForegroundColor DarkGray
         $results += [pscustomobject]@{
@@ -319,9 +563,15 @@ try {
       if ($exclusiveLiveSet.ContainsKey($fq)) {
         Ensure-RealDaemonStopped ([ref]$realPausedByUs) $release
       }
-      $runs = 0; $passes = 0; $detail = ""; $lastlog = ""; $runDurations = @(); [int64]$totalMs = 0
+      $runs = if ($hadParallelRun1) { 1 } else { 0 }
+      $passes = 0
+      $detail = if ($hadParallelRun1) { $t.InitialDetail } else { "" }
+      $lastlog = if ($hadParallelRun1) { $t.LastLog } else { "" }
+      $runDurations = if ($hadParallelRun1) { @($t.InitialMs) } else { @() }
+      [int64]$totalMs = if ($hadParallelRun1) { $t.InitialMs } else { 0 }
+      $startAttempt = if ($hadParallelRun1) { 2 } else { 1 }
       $env:PLANOR_TEST_NAME = (Safe-ArtifactName $f $name)
-      for ($i = 1; $i -le (1 + $Retries); $i++) {
+      for ($i = $startAttempt; $i -le (1 + $Retries); $i++) {
         $runs++
         $useRec = [bool]$Record -or (($i -gt 1) -and (-not $NoRecordOnRetry) -and $hasRecBin)
         $env:PLANOR_RECORD = if ($useRec) { "1" } else { "0" }
@@ -378,7 +628,7 @@ if ($perfLatest) {
   $perfJsonStr | Set-Content (Join-Path $root "build\verify\latest-perf.json") -Encoding UTF8
 }
 
-$md = @("# Planor test results", "", "Run: $stamp  ·  tier: $Tier  ·  retries: $Retries  ·  recording: $([bool]$Record)  ·  perf: $([bool]$Perf)  ·  total: $(Format-Dur $totalRunMs)  ·  commit: $gitCommit", "",
+$md = @("# Planor test results", "", "Run: $stamp  ·  tier: $Tier  ·  parallel: $([bool]$Parallel)  ·  retries: $Retries  ·  recording: $([bool]$Record)  ·  perf: $([bool]$Perf)  ·  total: $(Format-Dur $totalRunMs)  ·  commit: $gitCommit", "",
   "**$pass pass · $flaky flaky · $fail fail · $cachedCount cached**", "", "| Verdict | Suite | Test | Runs | Duration | Detail |", "|---|---|---|---|---|---|")
 $sortOrder = @{ FAIL = 0; FLAKY = 1; PASS = 2; CACHED = 3 }
 foreach ($r in ($results | Sort-Object @{ e = { $sortOrder[$_.Verdict] } }, Suite, Test)) {
@@ -414,6 +664,8 @@ $jsonDoc = [pscustomobject]@{
   perf_enabled = [bool]$Perf
   changed_only = [bool]$Changed
   cache_enabled = [bool]$Cache
+  parallel = [bool]$Parallel
+  max_jobs = $MaxJobs
   git_commit = $gitCommit
   total_duration_ms = $totalRunMs
   summary = [pscustomobject]@{

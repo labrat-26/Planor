@@ -1,32 +1,58 @@
 use super::*;
+use crate::backend::{Win32Backend, WindowBackend};
 use std::collections::BTreeMap;
-use windows_sys::Win32::UI::WindowsAndMessaging::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+    EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+};
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct Saved {
-    pid: u32,
-    cookie: usize,
-    flags: u32,
-    show: u32,
-    min: [i32; 2],
-    max: [i32; 2],
-    normal: [i32; 4],
-    rect: [i32; 4],
-    topmost: bool,
+pub(crate) struct Saved {
+    pub pid: u32,
+    pub cookie: usize,
+    pub flags: u32,
+    pub show: u32,
+    pub min: [i32; 2],
+    pub max: [i32; 2],
+    pub normal: [i32; 4],
+    pub rect: [i32; 4],
+    pub topmost: bool,
 }
-struct Journal {
-    path: PathBuf,
-    entries: BTreeMap<isize, Saved>,
+pub(crate) struct Journal {
+    pub path: PathBuf,
+    pub entries: BTreeMap<isize, Saved>,
+    defer_save: bool,
+    dirty_save: bool,
 }
 impl Journal {
-    fn open(path: PathBuf) -> Result<Self> {
+    pub(crate) fn open(path: PathBuf) -> Result<Self> {
         let entries = match fs::read(&path) {
             Ok(data) => serde_json::from_slice(&data)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => BTreeMap::new(),
             Err(e) => return Err(e.into()),
         };
-        Ok(Self { path, entries })
+        Ok(Self {
+            path,
+            entries,
+            defer_save: false,
+            dirty_save: false,
+        })
     }
-    fn save(&self) -> Result<()> {
+    pub(crate) fn begin_batch(&mut self) {
+        self.defer_save = true;
+    }
+    pub(crate) fn end_batch(&mut self) -> Result<()> {
+        self.defer_save = false;
+        if std::mem::take(&mut self.dirty_save) {
+            self.save()?;
+        }
+        Ok(())
+    }
+    pub(crate) fn save(&mut self) -> Result<()> {
+        if self.defer_save {
+            self.dirty_save = true;
+            return Ok(());
+        }
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonJournal);
         if self.entries.is_empty() {
             if self.path.exists() {
@@ -42,107 +68,52 @@ impl Journal {
         fs::rename(tmp, &self.path)?;
         Ok(())
     }
-    fn capture(&mut self, id: isize) -> Result<()> {
-        unsafe {
-            let hwnd = id as HWND;
-            let tag = wide("Planor.Recovery.Identity");
-            if self
-                .entries
-                .get(&id)
-                .is_some_and(|s| s.cookie == GetPropW(hwnd, tag.as_ptr()) as usize)
-            {
-                return Ok(());
-            }
-            let mut p = WINDOWPLACEMENT::default();
-            p.length = size_of::<WINDOWPLACEMENT>() as _;
-            let mut r = RECT::default();
-            let mut pid = 0;
-            GetWindowThreadProcessId(hwnd, &mut pid);
-            if GetWindowPlacement(hwnd, &mut p) == 0 || GetWindowRect(hwnd, &mut r) == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            let cookie = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)?
-                .as_nanos() as usize)
-                | 1;
-            let n = p.rcNormalPosition;
-            self.entries.insert(
-                id,
-                Saved {
-                    pid,
-                    cookie,
-                    flags: p.flags,
-                    show: p.showCmd,
-                    min: [p.ptMinPosition.x, p.ptMinPosition.y],
-                    max: [p.ptMaxPosition.x, p.ptMaxPosition.y],
-                    normal: [n.left, n.top, n.right, n.bottom],
-                    rect: [r.left, r.top, r.right, r.bottom],
-                    topmost: GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOPMOST != 0,
-                },
-            );
-            self.save()?;
-            if SetPropW(hwnd, tag.as_ptr(), cookie as HANDLE) == 0 {
-                return Err(io::Error::last_os_error().into());
-            }
-            Ok(())
+    pub(crate) fn capture(&mut self, id: isize, backend: &impl WindowBackend) -> Result<()> {
+        if self
+            .entries
+            .get(&id)
+            .is_some_and(|s| s.cookie == backend.get_recovery_cookie(id))
+        {
+            return Ok(());
         }
+        let Some(info) = backend.get_window_placement(id) else {
+            return Err("GetWindowPlacement / GetWindowRect failed".into());
+        };
+        let cookie = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos() as usize)
+            | 1;
+        self.entries.insert(
+            id,
+            Saved {
+                pid: info.pid,
+                cookie,
+                flags: info.flags,
+                show: info.show,
+                min: info.min,
+                max: info.max,
+                normal: info.normal,
+                rect: info.rect,
+                topmost: info.topmost,
+            },
+        );
+        self.save()?;
+        backend.set_recovery_cookie(id, cookie)?;
+        Ok(())
     }
-    fn restore(&mut self) -> Result<()> {
-        let tag = wide("Planor.Recovery.Identity");
-        self.entries.retain(|&id, s| unsafe {
-            let h = id as HWND;
-            let mut pid = 0;
-            GetWindowThreadProcessId(h, &mut pid);
-            if pid != s.pid || GetPropW(h, tag.as_ptr()) as usize != s.cookie {
+    pub(crate) fn restore(&mut self, backend: &impl WindowBackend) -> Result<()> {
+        self.defer_save = false;
+        self.dirty_save = false;
+        self.entries.retain(|&id, s| {
+            if backend.get_window_pid(id) != Some(s.pid)
+                || backend.get_recovery_cookie(id) != s.cookie
+            {
                 return false;
             }
-            let [left, top, right, bottom] = s.normal;
-            let p = WINDOWPLACEMENT {
-                length: size_of::<WINDOWPLACEMENT>() as _,
-                flags: s.flags,
-                showCmd: s.show,
-                ptMinPosition: POINT {
-                    x: s.min[0],
-                    y: s.min[1],
-                },
-                ptMaxPosition: POINT {
-                    x: s.max[0],
-                    y: s.max[1],
-                },
-                rcNormalPosition: RECT {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                },
-            };
-            if SetWindowPlacement(h, &p) == 0 {
+            if !backend.restore_window_placement(id, s) {
                 return true;
             }
-            let [x, y, r, b] = s.rect;
-            let flags = SWP_NOACTIVATE
-                | if s.show == SW_SHOWNORMAL as u32 {
-                    0
-                } else {
-                    SWP_NOMOVE | SWP_NOSIZE
-                };
-            if SetWindowPos(
-                h,
-                if s.topmost {
-                    HWND_TOPMOST
-                } else {
-                    HWND_NOTOPMOST
-                },
-                x,
-                y,
-                r - x,
-                b - y,
-                flags,
-            ) == 0
-            {
-                return true;
-            }
-            RemovePropW(h, tag.as_ptr());
+            backend.remove_recovery_cookie(id);
             false
         });
         self.save()?;
@@ -160,89 +131,151 @@ use std::{
 };
 use win32::Event;
 type Key = (u128, String);
-struct DragSession {
-    id: isize,
-    key: Key,
-    original: Rect,
-    point: POINT,
-    sampled: Instant,
-    hover: Instant,
-    target: Option<isize>,
-    mode: planor::Drag,
-    destination: Option<Key>,
+pub(crate) struct DragSession {
+    pub id: isize,
+    pub key: Key,
+    pub original: Rect,
+    pub point: (i32, i32),
+    pub sampled: Instant,
+    pub hover: Instant,
+    pub target: Option<isize>,
+    pub mode: planor::Drag,
+    pub destination: Option<Key>,
 }
 /// A window being carried by a four-finger touchpad swipe. Planor moves it itself (there is no OS move
 /// loop without a mouse button) and moves the cursor with it, so the normal drag logic sees an
 /// ordinary drag.
-struct PadDrag {
-    id: isize,
+pub(crate) struct PadDrag {
+    pub id: isize,
     /// Cursor position minus the window's top-left corner, fixed for the whole drag.
-    grab: (f64, f64),
-    cursor: (f64, f64),
+    pub grab: (f64, f64),
+    pub cursor: (f64, f64),
     /// Union of all monitors (left, top, right, bottom): the cursor, and so the window, never leaves it.
-    limits: (f64, f64, f64, f64),
-    seen: Instant,
+    pub limits: (f64, f64, f64, f64),
+    pub seen: Instant,
     /// Smoothed finger speed (units/s) for the acceleration; a raw per-report speed is noisy, which made
     /// the same swipe move the window by different amounts.
-    speed: f64,
+    pub speed: f64,
     /// When the real window was last moved: moves are rate-limited so they cannot queue up behind a busy app.
-    moved: Instant,
+    pub moved: Instant,
     /// Recent raw finger deltas, newest last, for the lift-off velocity (fling).
-    samples: std::collections::VecDeque<(Instant, f64, f64)>,
+    pub samples: std::collections::VecDeque<(Instant, f64, f64)>,
 }
-struct Engine {
-    pad: Option<PadDrag>,
-    pad_scrolling: bool,
+pub(crate) struct Engine<B: WindowBackend> {
+    pub backend: B,
+    pub pad: Option<PadDrag>,
+    pub pad_scrolling: bool,
     /// When set, a finished touchpad scroll settles (reveal + focus) at this time unless scrolling resumes.
-    settle: Option<Instant>,
-    scroll_frac: f64,
-    renderer: crossbeam_channel::Sender<render::Message>,
-    action: &'static str,
-    cfg: toml::Value,
-    journal: Journal,
-    strips: BTreeMap<Key, Strip>,
-    displays: Vec<(String, Rect, Rect)>,
-    desktop: Option<u128>,
-    active: String,
-    pinned: HashSet<isize>,
-    orphans: HashSet<isize>,
+    pub settle: Option<Instant>,
+    pub scroll_frac: f64,
+    pub renderer: crossbeam_channel::Sender<render::Message>,
+    pub action: &'static str,
+    pub cfg: toml::Value,
+    pub journal: Journal,
+    pub strips: BTreeMap<Key, Strip>,
+    pub displays: Vec<(String, Rect, Rect)>,
+    pub desktop: Option<u128>,
+    pub active: String,
+    pub pinned: HashSet<isize>,
+    pub orphans: HashSet<isize>,
     /// Monitor each orphan lived on before its monitor was detached. `pull-orphans` may move the window onto
     /// another monitor; when its own monitor is attached again it goes back there.
-    homes: HashMap<isize, String>,
-    skipped: HashSet<isize>,
-    paused: bool,
-    locked: bool,
-    deadline: Option<Instant>,
-    dirty: bool,
-    instant: bool,
-    flung: bool,
-    spawn_hint: Option<String>,
-    quick: bool,
-    last_holes: Vec<Rect>,
-    holes_checked: Instant,
-    scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
-    inertia: Option<(bool, f64, Instant)>,
-    v_travel: f64,
-    gesture: Gesture,
-    seq: u64,
-    input: Option<Instant>,
-    input_qpc_us: Option<i64>,
-    started: Instant,
-    config_version: u64,
-    zoomed: HashSet<isize>,
-    drag: Option<DragSession>,
-    last_scan: Instant,
-    placed: HashMap<isize, (u64, Rect)>,
-    diag: diag::Telemetry,
+    pub homes: HashMap<isize, String>,
+    pub skipped: HashSet<isize>,
+    pub paused: bool,
+    pub locked: bool,
+    pub deadline: Option<Instant>,
+    pub dirty: bool,
+    pub instant: bool,
+    pub flung: bool,
+    pub spawn_hint: Option<String>,
+    pub quick: bool,
+    pub last_holes: Vec<Rect>,
+    pub holes_checked: Instant,
+    pub monitors_checked: Instant,
+    pub desktop_checked: Instant,
+    pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
+    pub inertia: Option<(bool, f64, Instant)>,
+    pub v_travel: f64,
+    pub gesture: Gesture,
+    pub seq: u64,
+    pub input: Option<Instant>,
+    pub input_qpc_us: Option<i64>,
+    pub started: Instant,
+    pub config_version: u64,
+    pub zoomed: HashSet<isize>,
+    pub drag: Option<DragSession>,
+    pub last_scan: Instant,
+    pub placed: HashMap<isize, (u64, Rect)>,
+    pub diag: diag::Telemetry,
 }
-fn desktop() -> Option<u128> {
-    winvd::get_current_desktop()
-        .ok()?
-        .get_id()
-        .ok()
-        .map(|g| g.to_u128())
-}
-impl Engine {
+impl<B: WindowBackend> Engine<B> {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        backend: B,
+        cfg: toml::Value,
+        journal: Journal,
+        renderer: crossbeam_channel::Sender<render::Message>,
+    ) -> Self {
+        let diag_enabled = cfg["diagnostics"]["enabled"].as_bool() == Some(true);
+        let desktop = backend.current_desktop();
+        Self {
+            backend,
+            pad: None,
+            pad_scrolling: false,
+            settle: None,
+            scroll_frac: 0.,
+            renderer,
+            action: "open_close",
+            cfg,
+            journal,
+            diag: diag::Telemetry::new(diag_enabled),
+            strips: Default::default(),
+            displays: vec![],
+            desktop,
+            active: String::new(),
+            pinned: Default::default(),
+            orphans: Default::default(),
+            homes: Default::default(),
+            skipped: Default::default(),
+            paused: false,
+            locked: false,
+            deadline: None,
+            dirty: false,
+            instant: false,
+            flung: false,
+            spawn_hint: None,
+            quick: false,
+            last_holes: vec![],
+            holes_checked: Instant::now(),
+            monitors_checked: Instant::now(),
+            desktop_checked: Instant::now(),
+            scroll_samples: Default::default(),
+            inertia: None,
+            v_travel: 0.,
+            gesture: Default::default(),
+            seq: 0,
+            input: None,
+            input_qpc_us: None,
+            started: Instant::now(),
+            config_version: 1,
+            zoomed: Default::default(),
+            drag: None,
+            last_scan: Instant::now(),
+            placed: Default::default(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn expire_timers_for_test(&mut self) {
+        let past = Instant::now() - Duration::from_secs(5);
+        if self.deadline.is_some() {
+            self.deadline = Some(past);
+        }
+        self.holes_checked = past;
+        self.monitors_checked = past;
+        self.desktop_checked = past;
+        self.last_scan = past;
+    }
     fn key(&self) -> Option<Key> {
         Some((self.desktop?, self.active.clone()))
     }
@@ -268,20 +301,23 @@ impl Engine {
         self.dirty = true
     }
     fn add(&mut self, id: isize) {
+        self.add_with_frame(id, None)
+    }
+    fn add_with_frame(&mut self, id: isize, precomputed_rect: Option<Rect>) {
         if self.blocked()
             || self.owning(id).is_some()
             || self.skipped.contains(&id)
-            || !win32::eligible(id, &self.cfg)
+            || !self.backend.eligible(id, &self.cfg)
         {
             return;
         }
-        if winvd::is_window_on_current_desktop(windows58::Win32::Foundation::HWND(id as _)).ok()
-            != Some(true)
-        {
+        if !self.backend.on_current_desktop(id) {
             return;
         }
         let hint = self.spawn_hint.take();
-        let Some(rect) = win32::frame(id) else { return };
+        let Some(rect) = precomputed_rect.or_else(|| self.backend.frame(id)) else {
+            return;
+        };
         // A new window goes to the monitor under the cursor (setting `spawn_on_cursor_monitor`),
         // otherwise to the monitor it mostly overlaps.
         let Some((name, area, _)) = hint
@@ -299,11 +335,12 @@ impl Engine {
         else {
             return;
         };
-        if self.journal.capture(id).is_err() {
+        if self.journal.capture(id, &self.backend).is_err() {
             self.skipped.insert(id);
             return;
         }
-        self.active = name.clone();self.action="open_close";
+        self.active = name.clone();
+        self.action = "open_close";
         let s = self
             .strips
             .entry((self.desktop.unwrap(), name))
@@ -311,10 +348,10 @@ impl Engine {
         s.gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as _;
         s.split = self.cfg["layout"]["first_pair_split"].as_bool().unwrap();
         s.share = self.cfg["layout"]["default_tile_share"].as_float().unwrap();
-        s.insert(id, win32::minimum(id, area.horizontal()));
+        s.insert(id, self.backend.minimum(id, area.horizontal()));
         self.reveal()
     }
-    fn command(
+    pub(crate) fn command(
         &mut self,
         cmd: Command,
         reload: &crossbeam_channel::Sender<toml::Value>,
@@ -323,13 +360,13 @@ impl Engine {
             Command::Stop => {
                 self.paused = true;
                 self.clear()?;
-                self.journal.restore()?
+                self.journal.restore(&self.backend)?
             }
             Command::Reload => {
-                self.cfg = config()?;
+                self.cfg = self.backend.load_config()?;
                 self.config_version += 1;
                 perf::set_diag_enabled(self.cfg["diagnostics"]["enabled"].as_bool() == Some(true));
-                reload.send(self.cfg.clone())?;
+                let _ = reload.send(self.cfg.clone());
                 for s in self.strips.values_mut() {
                     s.gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as _
                 }
@@ -363,11 +400,9 @@ impl Engine {
                         self.strips.get_mut(&k).unwrap().remove(id)
                     }
                     self.orphans.remove(&id);
-                    unsafe {
-                        ShowWindow(id as _, SW_SHOWNOACTIVATE);
-                    }
+                    self.backend.show_no_activate(id);
                     // Stays in `homes`: it goes back to its own monitor once that one is attached again.
-                    let minimum = win32::minimum(id, area.horizontal());
+                    let minimum = self.backend.minimum(id, area.horizontal());
                     self.home_strip(dest.clone(), area).insert(id, minimum);
                 }
                 self.reveal()
@@ -375,7 +410,7 @@ impl Engine {
             Command::Key { name } if name == "panic_exit" => {
                 self.paused = true;
                 self.clear()?;
-                self.journal.restore()?;
+                self.journal.restore(&self.backend)?;
             }
             Command::Key { name } if !self.blocked() => {
                 let valid = matches!(
@@ -433,7 +468,7 @@ impl Engine {
     /// Rectangles of unmanaged app windows on a monitor. Test daemons share the desktop with the developer's
     /// own windows, which they treat as unmanaged; carving those out would hide every border they draw, so an
     /// isolated instance carves out only windows of the class named in PLANOR_HOLES (none if unset).
-    fn state_snapshot(&self, json: bool) -> Result<String> {
+    pub(crate) fn state_snapshot(&self, json: bool) -> Result<String> {
         let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
         let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
         let monitors: Vec<serde_json::Value> = self
@@ -514,7 +549,7 @@ impl Engine {
                     || rect.x + rect.w > bound.x + bound.w
                     || rect.y + rect.h > bound.y + bound.h;
                 let parked = hidden || preview || clipped;
-                let os_rect = win32::frame(id);
+                let os_rect = self.backend.frame(id);
                 let color = if fullscreen {
                     None
                 } else if strip.columns[ci].members.len() > 1 && !preview {
@@ -558,7 +593,7 @@ impl Engine {
         }
 
         for &id in &self.pinned {
-            let os_rect = win32::frame(id);
+            let os_rect = self.backend.frame(id);
             let monitor = os_rect
                 .and_then(|r| {
                     self.displays
@@ -660,19 +695,15 @@ impl Engine {
     }
     fn holes(&self) -> Vec<Rect> {
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonHoles);
-        let only = if instance().is_empty() {
-            None
-        } else {
-            match std::env::var("PLANOR_HOLES") {
-                Ok(class) => Some(class),
-                Err(_) => return vec![],
-            }
+        let Some(only) = self.backend.holes_class_filter() else {
+            return vec![];
         };
-        win32::windows()
+        self.backend
+            .windows()
             .into_iter()
-            .filter(|&w| self.owning(w).is_none() && win32::external(w))
-            .filter(|&w| only.as_ref().is_none_or(|c| win32::class_of(w) == *c))
-            .filter_map(win32::frame)
+            .filter(|&w| self.owning(w).is_none() && self.backend.external(w))
+            .filter(|&w| only.as_ref().is_none_or(|c| self.backend.class_of(w) == *c))
+            .filter_map(|w| self.backend.frame(w))
             .filter(|r| {
                 self.displays.iter().any(|m| {
                     r.x < m.2.x + m.2.w && r.x + r.w > m.2.x && r.y < m.2.y + m.2.h && r.y + r.h > m.2.y
@@ -680,7 +711,7 @@ impl Engine {
             })
             .collect()
     }
-    fn tick(&mut self) -> Result<()> {
+    pub(crate) fn tick(&mut self) -> Result<()> {
         if self.locked {
             return Ok(());
         }
@@ -694,21 +725,27 @@ impl Engine {
         // Explorer reserves a monitor's taskbar space after the display change that brings the monitor back,
         // so the work area read by `topology` can still be the whole monitor. Nothing else re-reads it, and the
         // strip would keep tiles running under the taskbar. Re-run topology when the work areas differ.
-        if self.deadline.is_none() && self.displays != win32::monitors() {
-            self.deadline = Some(Instant::now() + Duration::from_millis(1500));
+        if self.deadline.is_none() && self.monitors_checked.elapsed() >= Duration::from_millis(500) {
+            self.monitors_checked = Instant::now();
+            if self.displays != self.backend.monitors() {
+                self.deadline = Some(Instant::now() + Duration::from_millis(1500));
+            }
         }
         if self.deadline.is_some_and(|t| Instant::now() >= t) {
             self.deadline = None;
             self.topology();
             self.scan()
         }
-        let d = desktop();
-        if d != self.desktop {
-            self.clear()?;
-            self.desktop = d;
-            self.placed.clear();
-            self.instant = true;
-            self.scan()
+        if self.desktop_checked.elapsed() >= Duration::from_millis(150) {
+            self.desktop_checked = Instant::now();
+            let d = self.backend.current_desktop();
+            if d != self.desktop {
+                self.clear()?;
+                self.desktop = d;
+                self.placed.clear();
+                self.instant = true;
+                self.scan()
+            }
         }
         self.refresh();
         if self.pad.as_ref().is_some_and(|p| p.seen.elapsed() > Duration::from_millis(800)) {
@@ -731,30 +768,42 @@ impl Engine {
         }
         if self.last_scan.elapsed() >= Duration::from_secs(1) {
             self.last_scan = Instant::now();
-            for id in win32::windows() {
+            for id in self.backend.windows() {
                 if self.owning(id).is_none() {
                     self.add(id)
                 }
             }
         }
         if self.cfg["layout"]["focus_follows_mouse"].as_bool() == Some(true) {
-            unsafe {
-                let mut p = POINT::default();
-                GetCursorPos(&mut p);
-                let id = GetAncestor(WindowFromPoint(p), GA_ROOT) as isize;
-                if self.owning(id).is_some() && GetForegroundWindow() as isize != id {
-                    self.select(id);
-                    win32::activate(id);
-                    self.dirty = true
-                }
+            let (px, py) = self.backend.cursor_pos();
+            let id = self.backend.window_at_point(px, py);
+            if self.owning(id).is_some() && self.backend.foreground() != id {
+                self.select(id);
+                self.backend.activate(id);
+                self.dirty = true
             }
         }
     }
-    fn scan(&mut self) {
+    pub(crate) fn scan(&mut self) {
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonScan);
-        let mut ids = win32::windows();
-        ids.sort_by_key(|&id| {
-            win32::frame(id).map(|r| {
+        let mut candidates: Vec<(isize, Option<Rect>)> = if self.blocked() {
+            Vec::new()
+        } else {
+            self.backend
+                .windows()
+                .into_iter()
+                .filter(|&id| {
+                    self.owning(id).is_none()
+                        && !self.skipped.contains(&id)
+                        && !self.pinned.contains(&id)
+                        && self.backend.eligible(id, &self.cfg)
+                        && self.backend.on_current_desktop(id)
+                })
+                .map(|id| (id, self.backend.frame(id)))
+                .collect()
+        };
+        candidates.sort_by_key(|(_, rect)| {
+            rect.map(|r| {
                 let portrait = self.displays.iter().any(|(_, b, _)| {
                     r.x >= b.x
                         && r.x < b.x + b.w
@@ -765,10 +814,29 @@ impl Engine {
                 if portrait { r.y } else { r.x }
             })
         });
-        for id in ids {
-            self.add(id)
+        let before: HashSet<isize> = self.journal.entries.keys().copied().collect();
+        self.journal.begin_batch();
+        for (id, rect) in candidates {
+            self.add_with_frame(id, rect)
         }
-        self.select(unsafe { GetForegroundWindow() } as isize);
+        if self.journal.end_batch().is_err() {
+            let unsaved: Vec<isize> = self
+                .journal
+                .entries
+                .keys()
+                .copied()
+                .filter(|id| !before.contains(id))
+                .collect();
+            for id in unsaved {
+                self.journal.entries.remove(&id);
+                self.backend.remove_recovery_cookie(id);
+                if let Some(k) = self.owning(id) {
+                    self.strips.get_mut(&k).unwrap().remove(id);
+                }
+                self.skipped.insert(id);
+            }
+        }
+        self.select(self.backend.foreground());
         self.reveal()
     }
     fn select(&mut self, id: isize) {
@@ -779,26 +847,23 @@ impl Engine {
             }
         }
     }
-    fn topology(&mut self) {
+    pub(crate) fn topology(&mut self) {
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonTopology);
-        let old = std::mem::replace(&mut self.displays, win32::monitors());
+        self.monitors_checked = Instant::now();
+        let old = std::mem::replace(&mut self.displays, self.backend.monitors());
         for ((_, name), s) in &mut self.strips {
             if let Some((_, area, _)) = self.displays.iter().find(|m| &m.0 == name) {
                 s.set_area(*area);
                 for (id, _) in s.rects(0) {
                     if self.orphans.remove(&id) {
-                        unsafe {
-                            ShowWindow(id as _, SW_SHOWNOACTIVATE);
-                        }
+                        self.backend.show_no_activate(id);
                     }
                 }
             } else if old.iter().any(|m| &m.0 == name) {
                 for (id, _) in s.rects(0) {
                     self.orphans.insert(id);
                     self.homes.insert(id, name.clone());
-                    unsafe {
-                        ShowWindow(id as _, SW_SHOWMINNOACTIVE);
-                    }
+                    self.backend.minimize_no_activate(id);
                 }
             }
         }
@@ -850,7 +915,7 @@ impl Engine {
                 } else {
                     0
                 };
-                let minimum = win32::minimum(id, area.horizontal());
+                let minimum = self.backend.minimum(id, area.horizontal());
                 let s = self.home_strip((owner.0, home), area);
                 s.insert(id, minimum);
                 // Inserted columns are focused; show it, so it is not left parked off-screen.
@@ -859,7 +924,7 @@ impl Engine {
             self.orphans.remove(&id);
         }
     }
-    fn layout(&mut self) -> Result<()> {
+    pub(crate) fn layout(&mut self) -> Result<()> {
         if self.blocked() || !self.dirty {
             return Ok(());
         }
@@ -892,8 +957,8 @@ impl Engine {
             }
         }
         let mut tiles = Vec::new();
-        let foreground = unsafe { GetForegroundWindow() } as isize;
-        let external = self.owning(foreground).is_none() && win32::external(foreground);
+        let foreground = self.backend.foreground();
+        let external = self.owning(foreground).is_none() && self.backend.external(foreground);
         // Unmanaged app windows (an elevated Task Manager, a rule-ignored app): the overlay must never be
         // painted over them, whatever the z-order does. They become holes in the overlay (a window region),
         // so borders and peeks stop at their edge and clicks reach them.
@@ -991,7 +1056,7 @@ impl Engine {
             }
         }
         for &id in &self.pinned {
-            if let (Some(rect), Some(saved)) = (win32::frame(id), self.journal.entries.get(&id)) {
+            if let (Some(rect), Some(saved)) = (self.backend.frame(id), self.journal.entries.get(&id)) {
                 if let Some((name, _, _)) = self.displays.iter().find(|(_, _, b)| {
                     rect.x >= b.x && rect.x < b.x + b.w && rect.y >= b.y && rect.y < b.y + b.h
                 }) {
@@ -1086,33 +1151,13 @@ impl Engine {
         Ok(())
     }
     fn pin(&mut self) {
-        let id = unsafe { GetForegroundWindow() } as isize;
+        let id = self.backend.foreground();
         let _ = self.clear();
         if self.pinned.remove(&id) {
-            unsafe {
-                SetWindowPos(
-                    id as _,
-                    HWND_NOTOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
+            self.backend.set_topmost(id, false);
             self.add(id)
         } else if let Some(k) = self.owning(id) {
-            unsafe {
-                SetWindowPos(
-                    id as _,
-                    HWND_TOPMOST,
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                );
-            }
+            self.backend.set_topmost(id, true);
             self.pinned.insert(id);
             self.strips.get_mut(&k).unwrap().remove(id);
             self.reveal()
@@ -1128,7 +1173,7 @@ impl Engine {
             return;
         }
         // Act on the monitor that really holds focus, not the one Planor last recorded.
-        let focused = unsafe { GetForegroundWindow() } as isize;
+        let focused = self.backend.foreground();
         if self.owning(focused).is_some() {
             self.select(focused)
         }
@@ -1220,7 +1265,7 @@ impl Engine {
         let id = s.active();
         self.reveal();
         if let Some(id) = id {
-            win32::activate(id);
+            self.backend.activate(id);
             if self.cfg["layout"]["warp_cursor_to_focused"].as_bool() == Some(true) {
                 if let Some(r) = self.strips[&self.key().unwrap()]
                     .rects(0)
@@ -1228,18 +1273,15 @@ impl Engine {
                     .find(|(wid, _)| *wid == id)
                     .map(|(_, r)| r)
                 {
-                    unsafe {
-                        SetCursorPos(r.x + r.w / 2, r.y + r.h / 2);
-                    }
+                    self.backend.set_cursor_pos(r.x + r.w / 2, r.y + r.h / 2);
                 }
             }
         }
     }
     fn drag_begin(&mut self, id: isize) {
         if let Some(key) = self.owning(id) {
-            if let Some(original) = win32::frame(id) {
-                let mut point = POINT::default();
-                unsafe { GetCursorPos(&mut point) };
+            if let Some(original) = self.backend.frame(id) {
+                let point = self.backend.cursor_pos();
                 self.drag = Some(DragSession {
                     id,
                     key,
@@ -1270,7 +1312,7 @@ impl Engine {
             self.scroll_samples.clear();
             // Resuming within the settle delay keeps the focus the scroll already chose.
             if self.settle.is_none() {
-                let focused = unsafe { GetForegroundWindow() } as isize;
+                let focused = self.backend.foreground();
                 if self.owning(focused).is_some() {
                     self.select(focused)
                 }
@@ -1386,32 +1428,31 @@ impl Engine {
         self.quick = true;
         self.reveal();
         if let Some(id) = id {
-            win32::activate(id)
+            self.backend.activate(id)
         }
     }
     fn pad_begin(&mut self) {
         if self.blocked() || self.drag.is_some() {
             return;
         }
-        let focused = unsafe { GetForegroundWindow() } as isize;
+        let focused = self.backend.foreground();
         if self.owning(focused).is_some() {
             self.select(focused)
         }
         let Some(id) = self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active()) else {
             return;
         };
-        let Some(frame) = win32::frame(id) else { return };
-        let mut rect = RECT::default();
-        if unsafe { GetWindowRect(id as _, &mut rect) } == 0 {
+        let Some(frame) = self.backend.frame(id) else { return };
+        let Some(rect) = self.backend.window_rect(id) else {
             return;
-        }
+        };
         self.drag_begin(id);
         if self.drag.is_none() {
             return;
         }
         // Grab the window at its centre so the cursor and the window stay together.
         let (cx, cy) = (frame.x + frame.w / 2, frame.y + frame.h / 2);
-        unsafe { SetCursorPos(cx, cy) };
+        self.backend.set_cursor_pos(cx, cy);
         // Carrying a window across monitors with different DPI makes the app resize and re-render on
         // every step (the recording shows it flickering to odd sizes and freezing). By default the drag
         // stays on its own monitor and a fling does the crossing in one step.
@@ -1436,7 +1477,7 @@ impl Engine {
         );
         self.pad = Some(PadDrag {
             id,
-            grab: ((cx - rect.left) as f64, (cy - rect.top) as f64),
+            grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
             cursor: (cx as f64, cy as f64),
             limits,
             seen: Instant::now(),
@@ -1463,24 +1504,18 @@ impl Engine {
         let (l, t, r, b) = p.limits;
         p.cursor.0 = (p.cursor.0 + dx * gain).clamp(l, r);
         p.cursor.1 = (p.cursor.1 + dy * gain).clamp(t, b);
-        unsafe {
-            SetCursorPos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
-            // Asynchronous and rate-limited (about 120 per second, latest position wins): a heavy window
-            // (a browser) cannot keep up with every touchpad report, and a queue of stale moves is what
-            // made the window trail the fingers by a growing amount.
-            if now.duration_since(p.moved) >= Duration::from_millis(8) {
-                p.moved = now;
-                let _gspan = perf::SpanGuard::new(perf::SpanKind::GestureToPlace);
-                SetWindowPos(
-                    p.id as _,
-                    null_mut(),
-                    (p.cursor.0 - p.grab.0).round() as i32,
-                    (p.cursor.1 - p.grab.1).round() as i32,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-                );
-            }
+        self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
+        // Asynchronous and rate-limited (about 120 per second, latest position wins): a heavy window
+        // (a browser) cannot keep up with every touchpad report, and a queue of stale moves is what
+        // made the window trail the fingers by a growing amount.
+        if now.duration_since(p.moved) >= Duration::from_millis(8) {
+            p.moved = now;
+            let _gspan = perf::SpanGuard::new(perf::SpanKind::GestureToPlace);
+            self.backend.move_window_async(
+                p.id,
+                (p.cursor.0 - p.grab.0).round() as i32,
+                (p.cursor.1 - p.grab.1).round() as i32,
+            );
         }
     }
     fn pad_end(&mut self) {
@@ -1497,17 +1532,11 @@ impl Engine {
         let (vx, vy) = (vx / 0.12, vy / 0.12);
         // Settle the window synchronously where the cursor is, so the drop reads its real position
         // (the moves above were asynchronous).
-        unsafe {
-            SetWindowPos(
-                p.id as _,
-                null_mut(),
-                (p.cursor.0 - p.grab.0).round() as i32,
-                (p.cursor.1 - p.grab.1).round() as i32,
-                0,
-                0,
-                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
-            );
-        }
+        self.backend.move_window_async(
+            p.id,
+            (p.cursor.0 - p.grab.0).round() as i32,
+            (p.cursor.1 - p.grab.1).round() as i32,
+        );
         let threshold = self.cfg["touchpad"]["swipe_fling_speed"].as_integer().unwrap_or(1500) as f64;
         if self.cfg["touchpad"]["swipe_fling_enabled"].as_bool() == Some(true)
             && vx.hypot(vy) >= threshold
@@ -1532,7 +1561,7 @@ impl Engine {
                 // froze this thread. Only the cursor moves; drag_end re-slots the window on the
                 // destination monitor with the layout (placed off this thread).
                 let b = bounds[i];
-                unsafe { SetCursorPos(b.x + b.w / 2, b.y + b.h / 2) };
+                self.backend.set_cursor_pos(b.x + b.w / 2, b.y + b.h / 2);
                 self.flung = true;
             }
         }
@@ -1540,16 +1569,15 @@ impl Engine {
     }
     fn drag_update(&mut self) {
         let Some(d) = self.drag.as_mut() else { return };
-        let mut p = POINT::default();
-        unsafe { GetCursorPos(&mut p) };
+        let p = self.backend.cursor_pos();
         let elapsed = d.sampled.elapsed().as_secs_f64().max(0.001);
-        let velocity = ((p.x - d.point.x) as f64).hypot((p.y - d.point.y) as f64) / elapsed;
+        let velocity = ((p.0 - d.point.0) as f64).hypot((p.1 - d.point.1) as f64) / elapsed;
         d.point = p;
         d.sampled = Instant::now();
         let Some((monitor, _, _)) = self
             .displays
             .iter()
-            .find(|(_, _, r)| p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h)
+            .find(|(_, _, r)| p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h)
         else {
             d.target = None;
             d.mode = planor::Drag::None;
@@ -1567,9 +1595,9 @@ impl Engine {
             if let Some(s) = self.strips.get_mut(&k) {
                 let horizontal = s.area.horizontal();
                 let (pos, lo, hi) = if horizontal {
-                    (p.x, s.area.x, s.area.x + s.area.w)
+                    (p.0, s.area.x, s.area.x + s.area.w)
                 } else {
-                    (p.y, s.area.y, s.area.y + s.area.h)
+                    (p.1, s.area.y, s.area.y + s.area.h)
                 };
                 let dir = if pos < lo + 48 {
                     -1
@@ -1591,16 +1619,16 @@ impl Engine {
             s.rects(self.cfg["layout"]["stack_peek_px"].as_integer().unwrap() as _)
                 .into_iter()
                 .find(|(id, r)| {
-                    *id != d.id && p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h
+                    *id != d.id && p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
                 })
                 .map(|(id, r)| {
                     let length = if s.area.horizontal() { r.w } else { r.h } as f64;
                     (
                         id,
                         if s.area.horizontal() {
-                            (p.x - r.x) as f64 / r.w as f64
+                            (p.0 - r.x) as f64 / r.w as f64
                         } else {
-                            (p.y - r.y) as f64 / r.h as f64
+                            (p.1 - r.y) as f64 / r.h as f64
                         },
                         length,
                     )
@@ -1608,7 +1636,8 @@ impl Engine {
         });
         let id = target.map(|t| t.0);
         if id != d.target {
-            self.dirty=true;            d.hover = Instant::now();
+            self.dirty = true;
+            d.hover = Instant::now();
             d.target = id
         }
         let vk = match self.cfg["layout"]["drag_stack_modifier"].as_str() {
@@ -1616,8 +1645,7 @@ impl Engine {
             Some("Alt") => 18,
             _ => 16,
         };
-        let freeze =
-            unsafe { windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(vk) } < 0;
+        let freeze = self.backend.key_down(vk);
         let slow = self.cfg["animation"]["drag_slow_velocity_px_s"].as_integer().unwrap() as f64;
         let hover_ms = self.cfg["layout"]["stack_hover_ms"].as_integer().unwrap() as u64;
         let zone = self.cfg["layout"]["stack_center_px"].as_integer().unwrap_or(20) as f64;
@@ -1650,12 +1678,12 @@ impl Engine {
         if id != d.id
             || self.blocked()
             || self.owning(id) != Some(d.key.clone())
-            || desktop() != Some(d.key.0)
+            || self.backend.current_desktop() != Some(d.key.0)
         {
             return;
         }
         // The moves during a pad drag are asynchronous, so a flung window may not have moved yet.
-        let Some(r) = (if flung { Some(d.original) } else { win32::frame(id) }) else { return };
+        let Some(r) = (if flung { Some(d.original) } else { self.backend.frame(id) }) else { return };
         let s = self.strips.get_mut(&d.key).unwrap();
         if r==d.original&&!flung{return}
         // A resize keeps one edge where it was (a move changes both). Dragging an edge far beyond the monitor
@@ -1693,17 +1721,23 @@ impl Engine {
             return;
         }
         let Some(dest) = d.destination else { return };
-        if self.displays!=win32::monitors(){self.deadline=Some(Instant::now()+Duration::from_millis(1500));return}
+        if self.displays != self.backend.monitors() {
+            self.deadline = Some(Instant::now() + Duration::from_millis(1500));
+            return;
+        }
         let Some((_, area, _)) = self.displays.iter().find(|m| m.0 == dest.1).cloned() else {
             return;
         };
         if let Some(target) = d.target {
-            if unsafe { IsWindow(target as _) } == 0 || self.owning(target) != Some(dest.clone()) {
+            if !self.backend.is_window(target) || self.owning(target) != Some(dest.clone()) {
                 return;
             }
         }
         if dest != d.key {
-            if win32::minimum(id,true)>area.w||win32::minimum(id,false)>area.h||!self.transfer_dialogs(id,d.original,area) {
+            if self.backend.minimum(id, true) > area.w
+                || self.backend.minimum(id, false) > area.h
+                || !self.transfer_dialogs(id, d.original, area)
+            {
                 return;
             }
             self.strips.get_mut(&d.key).unwrap().remove(id);
@@ -1712,7 +1746,7 @@ impl Engine {
                 .strips
                 .entry(dest.clone())
                 .or_insert_with(|| Strip::new(area));
-            s.insert(id, win32::minimum(id, area.horizontal()))
+            s.insert(id, self.backend.minimum(id, area.horizontal()))
         }
         if dest != d.key {
             // Crossing monitors: snap into the new slot at once. Animating the whole way across
@@ -1733,14 +1767,14 @@ impl Engine {
         s.select(id);
         self.reveal()
     }
-    fn transfer_dialogs(&mut self,id:isize,owner:Rect,area:Rect)->bool{
+    fn transfer_dialogs(&mut self, id: isize, owner: Rect, area: Rect) -> bool {
         let mut moves = vec![];
-        for dlg in win32::windows() {
-            if unsafe { GetWindow(dlg as _, GW_OWNER) } as isize == id {
-                let Some(r) = win32::frame(dlg) else {
+        for dlg in self.backend.windows() {
+            if self.backend.owner(dlg) == id {
+                let Some(r) = self.backend.frame(dlg) else {
                     return false;
                 };
-                if r.w > area.w || r.h > area.h || self.journal.capture(dlg).is_err() {
+                if r.w > area.w || r.h > area.h || self.journal.capture(dlg, &self.backend).is_err() {
                     return false;
                 }
                 moves.push((
@@ -1753,7 +1787,7 @@ impl Engine {
                 ))
             }
         }
-        moves.is_empty() || win32::place(&moves).is_ok()
+        moves.is_empty() || self.backend.place(&moves).is_ok()
     }
     fn window_state(&mut self, id: isize) {
         if self.drag.is_some() {
@@ -1764,8 +1798,8 @@ impl Engine {
             return;
         };
         let s = self.strips.get_mut(&key).unwrap();
-        if unsafe { IsZoomed(id as _) } != 0 {
-            unsafe { ShowWindow(id as _, SW_RESTORE) };
+        if self.backend.is_zoomed(id) {
+            self.backend.restore_window(id);
             s.select(id);
             s.maximize();
             if !self.zoomed.remove(&id) {
@@ -1774,13 +1808,10 @@ impl Engine {
             self.reveal();
             return;
         }
-        let Some(r) = win32::frame(id) else { return };
-        let full =
-            r == *bounds && unsafe { GetWindowLongW(id as _, GWL_STYLE) } as u32 & WS_CAPTION == 0;
+        let Some(r) = self.backend.frame(id) else { return };
+        let full = r == *bounds && !self.backend.has_caption(id);
         let existing = s.fullscreen_id() == Some(id);
-        if full != existing
-            && (full || unsafe { GetWindowLongW(id as _, GWL_STYLE) } as u32 & WS_CAPTION != 0)
-        {
+        if full != existing && (full || self.backend.has_caption(id)) {
             s.select(id);
             s.fullscreen(full, *bounds);
             // The app resizes itself to full screen at the same moment; animating the strip as well
@@ -1789,12 +1820,12 @@ impl Engine {
             self.reveal()
         }
     }
-    fn event(&mut self, e: Event) {
+    pub(crate) fn event(&mut self, e: Event) {
         match e {
             Event::Peek(id) if !self.blocked() => {
                 self.select(id);
                 self.reveal();
-                win32::activate(id)
+                self.backend.activate(id)
             }
             Event::Rejected(seq, entries) if seq == self.seq && !self.blocked() => {
                 for (id, r) in entries {
@@ -1814,7 +1845,7 @@ impl Engine {
             Event::Frame(f) => {
                 if self.diag.enabled {
                     self.diag.record(f);
-                    if let Ok(dir) = folder("LOCALAPPDATA") {
+                    if let Some(dir) = self.backend.frames_log_dir() {
                         let _ = diag::append(
                             &dir,
                             &serde_json::to_vec(&f).unwrap_or_default(),
@@ -1851,12 +1882,11 @@ impl Engine {
                     if self.cfg["layout"]["spawn_on_cursor_monitor"].as_bool() == Some(true)
                         && e == EVENT_OBJECT_SHOW
                     {
-                        let mut p = POINT::default();
-                        unsafe { GetCursorPos(&mut p) };
+                        let (px, py) = self.backend.cursor_pos();
                         self.spawn_hint = self
                             .displays
                             .iter()
-                            .find(|(_, _, r)| p.x >= r.x && p.x < r.x + r.w && p.y >= r.y && p.y < r.y + r.h)
+                            .find(|(_, _, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
                             .map(|m| m.0.clone());
                     }
                     self.add(id);
@@ -1867,7 +1897,7 @@ impl Engine {
                 EVENT_SYSTEM_FOREGROUND if self.pad_scrolling || self.settle.is_some() || self.pad.is_some() => (),
                 EVENT_SYSTEM_FOREGROUND => {
                     if self.diag.enabled {
-                        diag::trace(format!("FG {id} managed={} external={} pad={}", self.owning(id).is_some(), win32::external(id), self.pad_scrolling));
+                        diag::trace(format!("FG {id} managed={} external={} pad={}", self.owning(id).is_some(), self.backend.external(id), self.pad_scrolling));
                     }
                     let changed = self
                         .key()
@@ -1896,8 +1926,8 @@ impl Engine {
                 // A window that is being closed hides itself a moment before it is destroyed; reacting to the hide
                 // (not only the destroy) takes its border away and starts the neighbour sliding in at once.
                 EVENT_OBJECT_HIDE
-                    if unsafe { IsWindowVisible(id as _) } != 0
-                        || unsafe { IsIconic(id as _) } != 0
+                    if self.backend.is_visible(id)
+                        || self.backend.is_iconic(id)
                         || self.owning(id).is_none() => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if !self.orphans.contains(&id) {
@@ -1908,7 +1938,7 @@ impl Engine {
                             self.strips.get_mut(&k).unwrap().fill();
                             if focused {
                                 if let Some(next) = self.strips[&k].active() {
-                                    win32::activate(next)
+                                    self.backend.activate(next)
                                 }
                             }
                             self.placed.remove(&id);
@@ -2011,9 +2041,10 @@ pub fn run() -> Result<()> {
         return Err("daemon already running or unavailable".into());
     }
     let _mutex = unsafe { File::from_raw_handle(mutex) };
+    let backend = Win32Backend;
     let mut server = PipeServer::new(&pipe_name())?;
     let mut journal = Journal::open(folder("LOCALAPPDATA")?.join("recovery.json"))?;
-    journal.restore()?;
+    journal.restore(&backend)?;
     win32::tweak_system(&folder("LOCALAPPDATA")?.join("system-settings.json"));
     let cfg = config()?;
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
@@ -2026,7 +2057,9 @@ pub fn run() -> Result<()> {
     let (tx, events) = crossbeam_channel::unbounded();
     let (reload, rx) = crossbeam_channel::unbounded();
     win32::events(tx, cfg.clone(), rx);
+    let desktop = backend.current_desktop();
     let mut engine = Engine {
+        backend,
         pad: None,
         pad_scrolling: false,
         settle: None,
@@ -2038,7 +2071,7 @@ pub fn run() -> Result<()> {
         diag,
         strips: Default::default(),
         displays: vec![],
-        desktop: desktop(),
+        desktop,
         active: String::new(),
         pinned: Default::default(),
         orphans: Default::default(),
@@ -2054,6 +2087,8 @@ pub fn run() -> Result<()> {
         quick: false,
         last_holes: vec![],
         holes_checked: Instant::now(),
+        monitors_checked: Instant::now(),
+        desktop_checked: Instant::now(),
         scroll_samples: Default::default(),
         inertia: None,
         v_travel: 0.,
@@ -2072,7 +2107,8 @@ pub fn run() -> Result<()> {
     if engine.cfg["layout"]["tile_existing_on_startup"].as_bool() == Some(true) {
         engine.scan()
     } else {
-        engine.skipped.extend(win32::windows())
+        let existing = engine.backend.windows();
+        engine.skipped.extend(existing)
     }
     let tick = crossbeam_channel::tick(Duration::from_millis(32));
     let result = (|| -> Result<()> {
@@ -2090,6 +2126,14 @@ pub fn run() -> Result<()> {
             };
             if ipc_done {
                 break;
+            }
+            if engine.dirty && !server.closing {
+                let t = Instant::now();
+                {
+                    let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
+                    engine.layout()?;
+                }
+                slow("layout", t);
             }
             if server.has_pending_write() {
                 while let Ok(e) = events.try_recv() {
@@ -2118,7 +2162,7 @@ pub fn run() -> Result<()> {
     let (tx, rx) = crossbeam_channel::bounded(1);
     let _ = engine.renderer.send(render::Message::Stop(tx));
     let _ = rx.recv();
-    let restored = engine.journal.restore();
+    let restored = engine.journal.restore(&engine.backend);
     if let Ok(dir) = folder("LOCALAPPDATA") {
         win32::restore_system(&dir.join("system-settings.json"));
     }
@@ -2136,7 +2180,7 @@ pub fn recover() -> Result<usize> {
     }
     let mut journal = Journal::open(path)?;
     let count = journal.entries.len();
-    journal.restore()?;
+    journal.restore(&Win32Backend)?;
     Ok(count)
 }
 #[cfg(test)]
@@ -2161,7 +2205,7 @@ mod tests {
             },
         );
         j.save().unwrap();
-        Journal::open(path.clone()).unwrap().restore().unwrap();
+        Journal::open(path.clone()).unwrap().restore(&Win32Backend).unwrap();
         assert!(!path.exists())
     }
 }
@@ -2171,6 +2215,7 @@ mod tests {
 /// the log must not become a record of what was typed.
 fn record_input() {
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
     std::thread::spawn(|| {
         let mut down = [false; 256];
         let mut at = (i32::MIN, i32::MIN);

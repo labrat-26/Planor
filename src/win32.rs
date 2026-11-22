@@ -366,6 +366,10 @@ pub fn windows() -> Vec<isize> {
     unsafe { EnumWindows(Some(cb), &mut v as *mut _ as isize) };
     v
 }
+static SELF_ELEVATED: OnceLock<bool> = OnceLock::new();
+fn self_elevated() -> bool {
+    *SELF_ELEVATED.get_or_init(|| elevated(unsafe { GetCurrentProcess() }) == Some(true))
+}
 fn elevated(process: HANDLE) -> Option<bool> {
     unsafe {
         let mut t = null_mut();
@@ -450,7 +454,7 @@ pub fn eligible(id: isize, cfg: &toml::Value) -> bool {
             return false;
         }
         let _process = File::from_raw_handle(handle);
-        if elevated(GetCurrentProcess()) != Some(true) && elevated(handle) != Some(false) {
+        if !self_elevated() && elevated(handle) != Some(false) {
             return false;
         }
         let mut path = [0; 1024];

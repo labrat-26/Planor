@@ -7,15 +7,17 @@ analyzer), `docs/` (plans, results, notes).
 ## Run tests: always through the script
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier unit            # seconds; core, prop_core, lib/bin, planor-rec
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier unit            # seconds; core, prop_core, sim_tests, lib/bin, planor-rec
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier unit -Parallel  # parallel unit targets (MaxJobs=4 default)
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier fast -Perf      # unit + 4 quick live smoke checks + budgets
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier smoke -Perf     # unit + 1 test per scenario (-NoDisplaySwitch skips DisplaySwitch)
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Only scn_drag        # filter by file or test name
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Only scn_drag        # filter by file or test name (supports comma-separated tokens)
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Changed -Tier unit   # run only tests mapped in scripts\test-map.json
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts\verify.ps1 -Tier smoke -Cache    # skip unchanged passing tests via SHA-256 cache
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts\clean-sessions.ps1 -KeepVerify 3 # prune stale verify/stall/temp artifacts safely
 ```
 
-Test daemons default to `PLANOR_TEST_MODE=1` (skipping global hotkeys, LL hooks reinstall, raw input, and Win+W dialogs), so normal live tests run cleanly alongside the user's real `planor.exe`. `verify.ps1` only stops/restarts `target\release\planor.exe` around the 3 exclusive tests (`scn_taskbar::clicking_a_peek_reveals_that_window`, `scn_exit::panic_hotkey`, `scn_exit::ctrl_break_restores_before_exit`).
+Test daemons default to `PLANOR_TEST_MODE=1` (skipping global hotkeys, LL hooks reinstall, raw input, and Win+W dialogs) and use PID-scoped `PlanorSentinel_p<pid>` window rules, so normal live tests run cleanly alongside the user's real `planor.exe` and parallel-safe live batches (`-Parallel`). `verify.ps1` only stops/restarts `target\release\planor.exe` around the 3 exclusive tests (`scn_taskbar::clicking_a_peek_reveals_that_window`, `scn_exit::panic_hotkey`, `scn_exit::ctrl_break_restores_before_exit`). Note: `scripts\verify.ps1` runs serial by default as the reference; `-Parallel` parallelizes unit targets and an explicit allowlist of non-key, non-cursor, non-DXGI live tests before running remaining tests serially.
 
 To rebuild and restart the real daemon cleanly:
 
@@ -49,8 +51,8 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
   verified via `scripts/notes.ps1 -Check`). Win+W saves a diagnostic bundle under `%LOCALAPPDATA%\planor\bundles\<stamp>-<slug>\`
   (note, screenshot PNG, `state.json`, `perf.json`, `perf.trace.json`, trace tail, plus optional ring video dump).
 - Known flaky: `drag_to_portrait_monitor` (passes alone). Check `build\verify\latest.md` for the current table.
-- Pre-commit hook (`scripts/install-hooks.ps1`): checks no `println!` in `src/{daemon,render,win32,perf,watchdog}.rs`,
-  runs `core` + `prop_core`, and checks `notes.ps1 -Check`.
+- Pre-commit hook (`scripts/install-hooks.ps1`): checks no `println!` in `src/{backend,daemon,render,win32,perf,watchdog}.rs`,
+  runs `core`, `prop_core`, and simulated daemon tests (`sim_tests`), and checks `notes.ps1 -Check`.
 
 ## Profiling, state & ring capture
 
@@ -59,8 +61,8 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
   CPU/RAM/GDI/USER/handles, Chrome/Perfetto JSON traces, and budgets (`startup <600ms`, `render.scene <16ms`,
   `gesture_to_place <16ms`, `hook <5ms`). Watchdog logs `STALL <thread> <ms>` and saves `%LOCALAPPDATA%\planor\stalls\`.
 - Trace lines: `EXPECT`, `PLACE`, `SCENE`, `FG`, `SLOW *`, `STALL *`, `INVARIANT *`, `PAD`.
-- Rolling ring capture: `planor-rec ring [--seconds 10 --fps 30]`, `planor-rec ring-status`, `planor-rec dump --out <dir>`,
-  `planor-rec stop --pipe ring`. Correlate video failures with QPC spans via `scripts\correlate.ps1 -Dir <dir>`.
+- Rolling ring capture: `planor-rec ring [--seconds 10 --fps 30 --source dxgi|synthetic]`, `planor-rec ring-status`,
+  `planor-rec dump --out <dir>`, `planor-rec stop --pipe ring`. Correlate video failures with QPC spans via `scripts\correlate.ps1 -Dir <dir>`.
 
 ## Read data through the digest, not raw logs
 

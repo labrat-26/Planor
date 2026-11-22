@@ -12,8 +12,8 @@ $script = @'
 #!/bin/sh
 set -e
 
-echo "[pre-commit] checking for println! in daemon/render/win32/perf/watchdog..."
-for f in src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs; do
+echo "[pre-commit] checking for println! in backend/daemon/render/win32/perf/watchdog..."
+for f in src/backend.rs src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs; do
   if [ -f "$f" ]; then
     if awk '/#\[cfg\(test\)\]/{exit} /(^|[^a-zA-Z0-9_])println!/{print FILENAME ":" NR ": " $0; found=1} END{if(found) exit 1}' "$f"; then
       :
@@ -24,9 +24,10 @@ for f in src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs; d
   fi
 done
 
-echo "[pre-commit] running core unit & invariant tests..."
+echo "[pre-commit] running core, property & simulated daemon unit tests..."
 cargo test --test core --quiet
 cargo test --test prop_core --quiet
+cargo test --bin planor sim_tests --quiet
 
 echo "[pre-commit] checking tracked notes (docs/notes.json <-> docs/NOTES_OPEN.md)..."
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/notes.ps1 -Check

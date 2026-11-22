@@ -166,6 +166,7 @@ struct Surface {
     _target: IDCompositionTarget,
     surface: IDCompositionSurface,
     context: ID2D1DeviceContext,
+    brushes: HashMap<u32, ID2D1SolidColorBrush>,
 }
 impl Surface {
     fn new(h: HWND, b: Rect) -> Result<Self> {
@@ -207,11 +208,12 @@ impl Surface {
                 gpu,
                 surface,
                 context,
+                brushes: HashMap::new(),
             })
         }
     }
     fn draw(
-        &self,
+        &mut self,
         pictures: &[(Rect, ID2D1Bitmap1)],
         lines: &[(Rect, u32)],
         width: f32,
@@ -255,15 +257,21 @@ impl Surface {
                     )
                 }
                 for &(r, c) in lines {
-                    let brush = rt.CreateSolidColorBrush(
-                        &D2D1_COLOR_F {
-                            r: ((c >> 16) & 255) as f32 / 255.,
-                            g: ((c >> 8) & 255) as f32 / 255.,
-                            b: (c & 255) as f32 / 255.,
-                            a: 1.,
-                        },
-                        None,
-                    )?;
+                    let brush = match self.brushes.entry(c) {
+                        std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
+                        std::collections::hash_map::Entry::Vacant(e) => {
+                            let created = rt.CreateSolidColorBrush(
+                                &D2D1_COLOR_F {
+                                    r: ((c >> 16) & 255) as f32 / 255.,
+                                    g: ((c >> 8) & 255) as f32 / 255.,
+                                    b: (c & 255) as f32 / 255.,
+                                    a: 1.,
+                                },
+                                None,
+                            )?;
+                            e.insert(created)
+                        }
+                    };
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
                     let d = width / 2.;
@@ -278,7 +286,7 @@ impl Surface {
                             radiusX: radius,
                             radiusY: radius,
                         },
-                        &brush,
+                        &*brush,
                         width,
                         None,
                     )
@@ -460,6 +468,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         let mut current = HashMap::new();
         let mut origins = HashMap::new();
         let mut pictures = HashMap::<(isize, usize, String), Source>::new();
+        // Cooldown cache so WGC Source::new failures (e.g. elevated/protected windows or
+        // non-input desktops) do not block every subsequent warm scene for ~45 ms/window.
+        let mut failed_sources = HashMap::<(isize, usize, String), Instant>::new();
         let mut scene: Option<Scene> = None;
         let mut begin = Instant::now();
         let mut last = begin;
@@ -506,8 +517,10 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             }
             match rx.recv_timeout(if scene.is_some() {
                 Duration::ZERO
+            } else if !pictures.is_empty() || verify.is_some() {
+                Duration::from_millis(33)
             } else {
-                Duration::from_millis(12)
+                Duration::from_millis(50)
             }) {
                 Ok(Message::Stop(ack)) => {
                     win32::set_peeks(Vec::new());
@@ -534,6 +547,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     scene = None;
                     current.clear();
                     pictures.clear();
+                    failed_sources.clear();
                     win32::set_peeks(Vec::new());
                     let _ = ack.send(());
                     continue;
@@ -572,6 +586,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             .iter()
                             .any(|t| t.id == *id && t.cookie == *c && &t.monitor == name)
                     });
+                    failed_sources.retain(|(id, c, name), _| {
+                        s.tiles
+                            .iter()
+                            .any(|t| t.id == *id && t.cookie == *c && &t.monitor == name)
+                    });
                     {
                         let _hspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderHosts);
                         hosts.retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
@@ -587,22 +606,37 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     let hosts_ms = handle_start.elapsed().as_millis();
                     {
                         let _sspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderSources);
+                        const WGC_RETRY_COOLDOWN: Duration = Duration::from_secs(5);
                         for tile in &s.tiles {
                             let key = (tile.id, tile.cookie, tile.monitor.clone());
-                            if !tile.pinned && !pictures.contains_key(&key) {
-                                if let Some(surface) =
-                                    hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref())
-                                {
-                                    let t = Instant::now();
-                                    match Source::new(tile.id, &surface.gpu) {
-                                        Ok(source) => {
-                                            pictures.insert(key, source);
+                            if tile.pinned || pictures.contains_key(&key) {
+                                continue;
+                            }
+                            if failed_sources
+                                .get(&key)
+                                .is_some_and(|at| at.elapsed() < WGC_RETRY_COOLDOWN)
+                            {
+                                continue;
+                            }
+                            if let Some(surface) =
+                                hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref())
+                            {
+                                let t = Instant::now();
+                                match Source::new(tile.id, &surface.gpu) {
+                                    Ok(source) => {
+                                        failed_sources.remove(&key);
+                                        pictures.insert(key, source);
+                                    }
+                                    Err(e) => {
+                                        let first = failed_sources.insert(key, Instant::now()).is_none();
+                                        if first {
+                                            diag::trace(format!("WGC source creation failed for {}: {e}", tile.id));
+                                            eprintln!("source creation: {e}");
                                         }
-                                        Err(e) => eprintln!("source creation: {e}"),
                                     }
-                                    if t.elapsed().as_millis() >= 100 {
-                                        diag::trace(format!("SLOW render Source::new: {} ms", t.elapsed().as_millis()))
-                                    }
+                                }
+                                if t.elapsed().as_millis() >= 100 {
+                                    diag::trace(format!("SLOW render Source::new: {} ms", t.elapsed().as_millis()))
                                 }
                             }
                         }
@@ -816,7 +850,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         }
                         applied.insert(name.clone(), mine);
                     }
-                    if let Some(surface) = &host.surface {
+                    if let Some(surface) = host.surface.as_mut() {
                         let dpi = GetDpiForWindow(host.h) as f32 / 96.;
                         let t = Instant::now();
                         let drawn = {

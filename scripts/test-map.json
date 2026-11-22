@@ -3,7 +3,7 @@
   "rules": [
     {
       "pattern": "^src/core\\.rs$",
-      "unit": ["--workspace --lib --bins", "--test core", "--test prop_core"],
+      "unit": ["--lib planor", "--bin planor (sim_tests)", "--bin planor (other)", "--test core", "--test prop_core"],
       "live": ["live::state_json_matches_real_windows", "scn_scroll::settled_layout_geometry", "scn_focus::focus_walk_right_then_left_n3"]
     },
     {
@@ -13,37 +13,37 @@
     },
     {
       "pattern": "^src/render\\.rs$",
-      "unit": ["--workspace --lib --bins", "--test core"],
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)", "--test core"],
       "live": ["live::state_json_matches_real_windows", "scn_overlay::border_never_paints_over_an_unmanaged_window", "scn_taskbar::overlay_click_through_everywhere_but_peek", "scn_scroll::peek_visible"]
     },
     {
       "pattern": "^src/input\\.rs$",
-      "unit": ["--workspace --lib --bins", "--test core"],
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)", "--test core"],
       "live": ["scn_focus::focus_walk_right_then_left_n3", "scn_drag::reorder_before_after"]
     },
     {
       "pattern": "^src/win32\\.rs$",
-      "unit": ["--workspace --lib --bins"],
+      "unit": ["--bin planor (other)"],
       "live": ["live::state_json_matches_real_windows", "live::stop_restores_exact_rect", "scn_taskbar::tiles_stay_inside_work_area", "scn_drag::reorder_before_after"]
     },
     {
-      "pattern": "^src/daemon\\.rs$",
-      "unit": ["--workspace --lib --bins", "--test core"],
+      "pattern": "^src/(daemon|backend|sim_tests)\\.rs$",
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)", "--test core"],
       "live": ["live::state_json_matches_real_windows", "live::stop_restores_exact_rect", "live::perf_spans_and_budgets", "scn_exit::stop_with_many_windows"]
     },
     {
       "pattern": "^src/(perf|watchdog)\\.rs$",
-      "unit": ["--workspace --lib --bins"],
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)"],
       "live": ["live::perf_spans_and_budgets"]
     },
     {
       "pattern": "^src/main\\.rs$",
-      "unit": ["--workspace --lib --bins"],
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)"],
       "live": ["live::state_json_matches_real_windows", "live::perf_spans_and_budgets", "live::stop_restores_exact_rect"]
     },
     {
       "pattern": "^src/note\\.rs$",
-      "unit": ["--workspace --lib --bins"],
+      "unit": ["--bin planor (other)"],
       "live": []
     },
     {
@@ -63,7 +63,7 @@
     },
     {
       "pattern": "^tests/common/helpers\\.rs$",
-      "unit": ["--workspace --lib --bins"],
+      "unit": ["--bin planor (other)"],
       "live": ["live::state_json_matches_real_windows", "live::perf_spans_and_budgets", "scn_focus::focus_walk_right_then_left_n3"]
     },
     {
@@ -73,7 +73,7 @@
     },
     {
       "pattern": "^(docs/|scripts/|Cargo\\.toml)",
-      "unit": ["--test core", "--workspace --lib --bins"],
+      "unit": ["--test core", "--lib planor", "--bin planor (sim_tests)", "--bin planor (other)"],
       "live": []
     }
   ]

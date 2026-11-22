@@ -1,9 +1,12 @@
+mod backend;
 mod daemon;
 mod diag;
 mod input;
 mod note;
 mod perf;
 mod render;
+#[cfg(test)]
+mod sim_tests;
 mod watchdog;
 mod win32;
 use clap::{Parser, Subcommand, ValueEnum};

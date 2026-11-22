@@ -49,12 +49,13 @@ flowchart LR
 
 ## Thread Responsibilities
 
-1. **Main Daemon Thread** (`src/daemon.rs::run`, COM `COINIT_MULTITHREADED`):
+1. **Main Daemon Thread** (`src/daemon.rs::run`, COM `COINIT_MULTITHREADED`, parameterized `Engine<B: WindowBackend>` via `src/backend.rs::Win32Backend`):
    - Acquires single-instance mutex `Local\Planor.Daemon[-<PLANOR_INSTANCE>]` and creates non-blocking named pipe `\\.\pipe\planor-ipc[-<PLANOR_INSTANCE>]`.
-   - On startup, restores any leftover `recovery.json`, runs `win32::tweak_system` (only when `PLANOR_INSTANCE` is unset), loads merged config, runs `Engine::topology()`, scans existing windows (unless `tile_existing_on_startup = false`), and runs the main loop:
-     - Calls `engine.layout()` when `dirty` is true.
+   - On startup, restores any leftover `recovery.json`, runs `win32::tweak_system` (only when `PLANOR_INSTANCE` is unset), loads merged config, runs `Engine::topology()`, scans existing windows (unless `tile_existing_on_startup = false`, batching `Journal::save` once across the initial scan), and runs the main loop:
+     - Calls `engine.layout()` when `dirty` is true — both at the top of the loop (for event wakeups) and immediately after `server.poll()` (for zero-wait IPC hotkey/command dispatch).
      - Polls `PipeServer::poll()` for IPC commands (`stop`, `reload`, `pause`, `resume`, `pin`, `pull-orphans`, `diag`, `state`, `perf`, `key`).
-     - `crossbeam_channel::select!` over `events` (from `win32::events` & `render`) and a **32 ms** `tick` timer (`Engine::tick`).
+     - `crossbeam_channel::select!` over `events` (from `win32::events` & `render`) and a **32 ms** `tick` timer (`Engine::tick`, with monitor enumeration throttled to **500 ms** and virtual-desktop checks to **150 ms**).
+   - **Simulated Backend** (`src/backend.rs::sim::FakeBackend` + `src/sim_tests.rs`): implements `WindowBackend` over `Arc<Mutex<SimDesktop>>`, enabling deterministic multi-monitor, display hot-unplug, drag, focus, group, fullscreen, and journal recovery tests in `< 0.5 s` without OS desktop dependencies.
 2. **OS Events Thread** (`src/win32.rs::events`, hidden `Planor.Events` message window):
    - Installs `SetConsoleCtrlHandler(ctrl)` (blocks up to **4500 ms** polling `SHUTDOWN_DONE` so console close/shutdown restores windows before process termination).
    - Calls `WTSRegisterSessionNotification` (session lock/unlock via `WM_WTSSESSION_CHANGE`).
@@ -68,8 +69,8 @@ flowchart LR
 4. **Render Thread** (`src/render.rs::start`, COM `COINIT_APARTMENTTHREADED`):
    - Maintains one `Host` (`Planor.Composition` popup window, `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE`) per monitor bounds `m.2`.
    - `WS_EX_TRANSPARENT` makes every pixel click-through to the taskbar and underlying apps; `WM_NCHITTEST` cannot forward cross-process clicks on Windows.
-   - Owns D3D11 + DirectComposition + Direct2D `Surface` for drawing borders and WGC (`GraphicsCaptureItem`) backing bitmaps (`Source`), plus `DwmRegisterThumbnail` handles for DWM stand-in thumbnails.
-   - Animates active `Scene` at monitor refresh cadence (`DwmFlush()`), preempting immediately whenever `render::EPOCH` advances.
+   - Owns D3D11 + DirectComposition + Direct2D `Surface` (with cached RGB `ID2D1SolidColorBrush` instances) for drawing borders and WGC (`GraphicsCaptureItem`) backing bitmaps (`Source`), plus `DwmRegisterThumbnail` handles for DWM stand-in thumbnails. Caches failing WGC `Source::new` keys for a **5 s** cooldown (`failed_sources`) so un-capturable windows do not stall subsequent warm scenes.
+   - Uses adaptive `recv_timeout` (`0 ms` animating, `33 ms` idle with active sources/verify, `50 ms` idle otherwise), animates active `Scene` at monitor refresh cadence (`DwmFlush()`), and preempts immediately whenever `render::EPOCH` advances.
    - Schedules post-settle `verify` **250 ms** after `t >= 1.0` (up to **2** corrective passes) for windows whose DWM extended frame transiently mismatched on uncloak/desktop switch.
 5. **Watchdog Thread** (`src/watchdog.rs`):
    - Polls atomic QPC heartbeats for `daemon` and `render` every **50 ms**; emits `STALL <thread> <ms> span=<span_name>` if no progress occurs for **>= 300 ms** (configurable via `PLANOR_STALL_MS`), and triggers a stall capture bundle (plus `planor-rec dump` if ring recorder is running).

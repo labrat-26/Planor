@@ -2,6 +2,32 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.3.0] - 2026-11-22
+
+### Added
+- **Fake Window Backend & Simulated Daemon Suite (`src/backend.rs`, `src/sim_tests.rs`, item `9.11`)**: Abstracted OS/Win32/DWM/VirtualDesktop operations behind `WindowBackend` (`Win32Backend` for production, `FakeBackend` / `SimDesktop` for deterministic tests) and parameterized `Engine<B>` and `Journal`. Added 9 simulated multi-monitor & scenario tests covering a 3-monitor landscape+portrait rig, cross-monitor drag with owned modal transfer, all `scn_display` scenarios (`offline_15s_round_trip`, `short_blip_3s_and_delayed_taskbar_work_area`, `pull_orphans`, `offline_then_stop`, `offline_then_kill_recover`, `topology_while_dragging`), and focus/stack/move/pin/fullscreen/rejection/holes/desktop/panic_exit checks in `< 0.5 s`.
+- **Safe Parallel Test Execution (`scripts/verify.ps1 -Parallel`, `tests/common/helpers.rs`, item `5.9`)**: Added PowerShell 5.1-native `ProcessStartInfo` worker pool (`-Parallel`, `-MaxJobs`) and PID-scoped `PlanorSentinel_p<pid>` window class/rules so independent unit targets (`MaxJobs=4`) and an explicit allowlist of non-key, non-cursor, non-DXGI Win32 live tests (`MaxJobs=2`) run safely in parallel while failed first attempts retry serially with recording.
+- **Synthetic Ring Capture Source (`tools/planor-rec/src/ring.rs`, `main.rs`)**: Added `--source dxgi|synthetic` (`--synthetic-size`, `--synthetic-monitors`) to `planor-rec ring` so full live FFmpeg segment-wrap encoding, pipe `ring-status`, `dump` MP4 remuxing, and `analyze` pipelines can be benchmarked & end-to-end verified even without DXGI capture access.
+- **Session & Artifact Cleanup Tooling (`scripts/clean-sessions.ps1`)**: Safe pruning of stale `build\verify\20*` folders, `%LOCALAPPDATA%\planor\stalls\*` bundles, and temporary Planor test folders while preserving `latest*.{md,json}`, `latest-perf.json`, cache, and user config.
+
+### Fixed & Optimized
+- **WGC Failure Retry Storm (`src/render.rs`)**: Added `failed_sources` 5-second per-tile cooldown next to `pictures`, eliminating synchronous ~45 ms/window WGC `Source::new` stalls on un-capturable windows and stderr log spam.
+- **Immediate Post-IPC Layout Dispatch (`src/daemon.rs`)**: Triggered `engine.layout()` immediately after `PipeServer::poll()` when `dirty` is set (instead of waiting up to a Windows 32–47 ms timer tick in `select!`).
+- **Daemon & Render Overhead (`src/daemon.rs`, `src/render.rs`, `src/win32.rs`, `src/perf.rs`)**: Cached Direct2D solid-color brushes in `Surface`, used adaptive idle `recv_timeout` (`33 ms` / `50 ms`), throttled idle `monitors()` (`500 ms`) and `current_desktop()` (`150 ms`) polling, filtered `Engine::scan()` candidates before DWM frame sorting and batched initial `Journal` writes (`begin_batch`/`end_batch`), cached `SELF_ELEVATED` via `OnceLock`, made `SpanKind::from_u8` O(1), and resolved workspace Clippy lints (`possible_missing_else` / collapsible `if` / range checks).
+
+### Verified Numbers (`v0.3.0`)
+- **All 4 Performance Budgets Pass (`live::perf_spans_and_budgets -Perf`, `budgets.all_pass = true` in `2.31 s`)**:
+  - `render_scene_warm_p99_ms`: `136.398 ms -> 0.065 ms` (`< 16.0 ms`, **-99.95%**)
+  - `gesture_to_place_p99_ms`: `154.816 ms -> 2.699 ms` (`< 16.0 ms`, **-98.3%**)
+  - `startup_first_place_ms`: `450.988 ms -> 320.636 ms` (`< 600.0 ms`, **-28.9%**)
+  - `daemon.scan`: `36.395 ms -> 22.53 ms` (**-38.1%**)
+  - `daemon.tick`: p50 `2.464 ms -> 0.02 ms`, p99 `5.481 ms -> 2.55 ms` (**123x** p50 speedup); `process.cpu_avg_pct`: `17.68% -> 11.4%`; `stalls = 0`.
+- **Parallel Execution Speedups**:
+  - Unit tier (`6/6` pass including `sim_tests` `9/9`): `3.62 s` serial -> `1.82 s` `-Parallel` (**-49.8%**).
+  - Safe Win32 live subset (`7/7` pass): `7.24 s` serial -> `4.13 s` `-Parallel` (**-42.9%**).
+- **Live 5 s Synthetic Ring Benchmark (`1280x720 @ 30 fps`)**: `126` frames written, `0` dropped, `1.4%` CPU, `63.89 MB` working set, `0.07 MB` disk; `dump` produced `video-0.mp4` (`42,669` B), `frames-0.csv` (`2,845` B, `121` rows), `events.jsonl`, `meta.json`; `planor-rec analyze` decoded `120/121` frames cleanly.
+- **Release Builds**: `planor.exe` (`7.25 s`, `0` warnings) & `planor-rec.exe` (`8.52 s`, `0` warnings).
+
 ## [0.2.0] - 2026-11-22
 
 ### Added

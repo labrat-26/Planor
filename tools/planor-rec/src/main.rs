@@ -143,6 +143,15 @@ enum Command {
         /// Scratch directory for temporary rolling TS segments.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Frame capture source (`dxgi` for real desktop, `synthetic` for headless/pipeline checks).
+        #[arg(long, value_enum, default_value_t = ring::RingSource::Dxgi)]
+        source: ring::RingSource,
+        /// Resolution `WxH` per monitor when `--source synthetic` is used.
+        #[arg(long, default_value = "640x360", value_parser = ring::parse_synthetic_size)]
+        synthetic_size: (u32, u32),
+        /// Number of simulated monitors (1..=3) when `--source synthetic` is used.
+        #[arg(long, default_value_t = 1)]
+        synthetic_monitors: u32,
     },
     /// Dump the active ring buffer window into `<out>` (`video-N.mp4`, `frames-N.csv`, `events.jsonl`, `meta.json`).
     Dump {
@@ -250,6 +259,9 @@ fn main() {
             pipe,
             trace,
             dir,
+            source,
+            synthetic_size,
+            synthetic_monitors,
         } => ring::run(ring::RingArgs {
             seconds,
             fps,
@@ -259,6 +271,9 @@ fn main() {
             pipe,
             trace,
             dir,
+            source,
+            synthetic_size,
+            synthetic_monitors,
         }),
         Command::Dump { out, reason, pipe } => {
             ring::send_dump(&out, reason.as_deref(), pipe.as_deref())

@@ -10,7 +10,7 @@ use crate::{
     events::{self, EventWriter},
     pipe::{self, CommandHandler},
     record::{default_trace_path, select_monitors, CaptureStats, Meta, ENCODER_QUEUE_FRAMES},
-    timeline::{self, FrameSink, Push, RealClock, Row, TimelineCfg, CSV_HEADER},
+    timeline::{self, FrameSink, FrameSource, Opener, Push, RealClock, Row, TimelineCfg, CSV_HEADER},
     util::{self, qpc_frequency, qpc_us, unix_ms, Rect},
 };
 use serde::{Deserialize, Serialize};
@@ -87,6 +87,113 @@ unsafe extern "system" {
     ) -> i32;
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RingSource {
+    Dxgi,
+    Synthetic,
+}
+
+pub fn parse_synthetic_size(raw: &str) -> Result<(u32, u32), String> {
+    let lower = raw.trim().to_ascii_lowercase();
+    let (w_s, h_s) = lower
+        .split_once('x')
+        .ok_or_else(|| format!("expected WxH (e.g. 1280x720), got {raw:?}"))?;
+    let w: u32 = w_s.parse().map_err(|_| format!("invalid width in {raw:?}"))?;
+    let h: u32 = h_s.parse().map_err(|_| format!("invalid height in {raw:?}"))?;
+    if !(64..=7680).contains(&w) || !(64..=4320).contains(&h) {
+        return Err(format!("synthetic size {w}x{h} out of range (64..=7680 x 64..=4320)"));
+    }
+    Ok((w & !1, h & !1))
+}
+
+pub struct SyntheticSource {
+    width: u32,
+    height: u32,
+    rect: Rect,
+    interval_us: i64,
+    next_frame_us: i64,
+    frame_no: u64,
+}
+
+impl SyntheticSource {
+    pub fn new(rect: Rect, fps: u32) -> Self {
+        let width = (rect.w.max(64) as u32) & !1;
+        let height = (rect.h.max(64) as u32) & !1;
+        Self {
+            width,
+            height,
+            rect: Rect::new(rect.x, rect.y, width as i32, height as i32),
+            interval_us: (1_000_000i64 / fps.max(1) as i64).max(1),
+            next_frame_us: 0,
+            frame_no: 0,
+        }
+    }
+
+    fn paint_frame(&self, out: &mut Vec<u8>) {
+        let w = self.width as usize;
+        let h = self.height as usize;
+        let needed = w * h * 4;
+        if out.len() != needed {
+            out.resize(needed, 0);
+        }
+        // Planor backdrop color RGB(0, 0, 90) -> BGRA [90, 0, 0, 255].
+        let bg = [90u8, 0, 0, 255];
+        for px in out.chunks_exact_mut(4) {
+            px.copy_from_slice(&bg);
+        }
+        // Moving bright box (BGR [246, 130, 59, 255] ~ focus blue) for real motion/encoding load.
+        let box_w = (w / 5).max(32);
+        let box_h = (h / 4).max(24);
+        let travel_x = (w.saturating_sub(box_w + 16)).max(1);
+        let x0 = 8 + ((self.frame_no as usize * 11) % travel_x);
+        let y0 = (h / 6).min(h.saturating_sub(box_h));
+        let fg = [246u8, 130, 59, 255];
+        for y in y0..(y0 + box_h).min(h) {
+            let row = &mut out[(y * w + x0) * 4..(y * w + (x0 + box_w).min(w)) * 4];
+            for px in row.chunks_exact_mut(4) {
+                px.copy_from_slice(&fg);
+            }
+        }
+    }
+}
+
+impl FrameSource for SyntheticSource {
+    fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
+    fn rect(&self) -> Rect {
+        self.rect
+    }
+
+    fn acquire_into(&mut self, out: &mut Vec<u8>, timeout_ms: u32) -> Result<bool, String> {
+        let now = qpc_us();
+        if self.next_frame_us > now {
+            let wait_ms = ((self.next_frame_us - now) / 1000)
+                .clamp(1, timeout_ms.max(1) as i64) as u64;
+            thread::sleep(Duration::from_millis(wait_ms));
+            if qpc_us() < self.next_frame_us {
+                return Ok(false);
+            }
+        }
+        self.next_frame_us = qpc_us() + self.interval_us;
+        self.paint_frame(out);
+        self.frame_no += 1;
+        Ok(true)
+    }
+}
+
+struct SyntheticOpener {
+    rect: Rect,
+    fps: u32,
+}
+
+impl Opener for SyntheticOpener {
+    fn open(&mut self) -> Result<Box<dyn FrameSource>, String> {
+        Ok(Box::new(SyntheticSource::new(self.rect, self.fps)))
+    }
+}
+
 pub struct RingArgs {
     pub seconds: u32,
     pub fps: u32,
@@ -96,6 +203,9 @@ pub struct RingArgs {
     pub pipe: Option<String>,
     pub trace: Option<PathBuf>,
     pub dir: Option<PathBuf>,
+    pub source: RingSource,
+    pub synthetic_size: (u32, u32),
+    pub synthetic_monitors: u32,
 }
 
 static RING_CTRL_C: AtomicBool = AtomicBool::new(false);
@@ -743,6 +853,7 @@ fn parse_dump_request(rest: &str) -> Result<(PathBuf, String), String> {
 
 fn run_ring_monitor(
     handle: Arc<MonitorRingHandle>,
+    source_kind: RingSource,
     fps: u32,
     wrap: u32,
     preset: String,
@@ -822,24 +933,44 @@ fn run_ring_monitor(
     handle.child_pid.store(child.id(), Ordering::Relaxed);
     let stdin = child.stdin.take().ok_or_else(|| util::fmt_err("ffmpeg stdin"))?;
 
-    let capture = match Duplicator::open_by_device(Some(&handle.info.device), idx) {
-        Ok(c) => c,
-        Err(e) => {
-            drop(stdin);
-            let _ = child.wait();
-            handle.child_pid.store(0, Ordering::Relaxed);
-            return util::anyhow_lite::err(format!("opening monitor {idx} for ring capture: {e}"));
+    let (capture, mut opener): (Box<dyn FrameSource>, Box<dyn Opener>) = match source_kind {
+        RingSource::Dxgi => {
+            let cap = match Duplicator::open_by_device(Some(&handle.info.device), idx) {
+                Ok(c) => c,
+                Err(e) => {
+                    drop(stdin);
+                    let _ = child.wait();
+                    handle.child_pid.store(0, Ordering::Relaxed);
+                    return util::anyhow_lite::err(format!(
+                        "opening monitor {idx} for ring capture: {e}"
+                    ));
+                }
+            };
+            if (cap.width, cap.height) != size {
+                drop(stdin);
+                let _ = child.wait();
+                handle.child_pid.store(0, Ordering::Relaxed);
+                return util::anyhow_lite::err(format!(
+                    "monitor {idx}: capture is {}x{} but meta says {}x{}",
+                    cap.width, cap.height, size.0, size.1
+                ));
+            }
+            (
+                Box::new(cap),
+                Box::new(DxgiOpener {
+                    device: handle.info.device.clone(),
+                    index: idx,
+                }),
+            )
         }
+        RingSource::Synthetic => (
+            Box::new(SyntheticSource::new(handle.info.rect, fps)),
+            Box::new(SyntheticOpener {
+                rect: handle.info.rect,
+                fps,
+            }),
+        ),
     };
-    if (capture.width, capture.height) != size {
-        drop(stdin);
-        let _ = child.wait();
-        handle.child_pid.store(0, Ordering::Relaxed);
-        return util::anyhow_lite::err(format!(
-            "monitor {idx}: capture is {}x{} but meta says {}x{}",
-            capture.width, capture.height, size.0, size.1
-        ));
-    }
 
     let mut sink = RingFrameSink::new(
         Box::new(stdin),
@@ -850,14 +981,10 @@ fn run_ring_monitor(
     );
     let mut cfg = TimelineCfg::new(idx, fps, size);
     cfg.topology_epoch = Some(epoch);
-    let mut opener = DxgiOpener {
-        device: handle.info.device.clone(),
-        index: idx,
-    };
     let result = timeline::run_timeline(
         &cfg,
-        Box::new(capture),
-        &mut opener,
+        capture,
+        &mut *opener,
         &mut sink as &mut dyn FrameSink,
         &*writer,
         &RealClock,
@@ -928,9 +1055,34 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
 
     capture::dpi_aware();
     let qpc_freq = qpc_frequency();
-    let monitors =
-        capture::monitors().map_err(|e| util::fmt_err(format!("enumerating monitors: {e}")))?;
-    let taskbars = capture::taskbar_rects();
+    let (monitors, taskbars) = match args.source {
+        RingSource::Dxgi => (
+            capture::monitors().map_err(|e| util::fmt_err(format!("enumerating monitors: {e}")))?,
+            capture::taskbar_rects(),
+        ),
+        RingSource::Synthetic => {
+            let count = args.synthetic_monitors.clamp(1, 3);
+            let (sw, sh) = (args.synthetic_size.0 & !1, args.synthetic_size.1 & !1);
+            let tb_h = (sh as i32 / 15).clamp(24, 48);
+            let mut mons = Vec::with_capacity(count as usize);
+            let mut tbs = Vec::with_capacity(count as usize);
+            for i in 0..count {
+                let x = i as i32 * sw as i32;
+                let rect = Rect::new(x, 0, sw as i32, sh as i32);
+                let work = Rect::new(x, 0, sw as i32, sh as i32 - tb_h);
+                mons.push(MonitorInfo {
+                    index: i,
+                    device: format!(r"\\.\SYNTHETIC{}", i + 1),
+                    rect,
+                    work,
+                    dpi: 96,
+                    primary: i == 0,
+                });
+                tbs.push(Rect::new(x, sh as i32 - tb_h, sw as i32, tb_h));
+            }
+            (mons, tbs)
+        }
+    };
     let selected = select_monitors(&monitors, &args.monitors)?;
 
     let window_us = (seconds as i64 + 4) * 1_000_000;
@@ -1006,13 +1158,17 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
     let input = events::spawn_input(writer.clone(), stop.clone());
     let os = events::spawn_os(writer.clone(), stop.clone());
     let epoch = Arc::new(AtomicU64::new(0));
-    let topology = spawn_topology_watcher(
-        monitors,
-        stop.clone(),
-        writer.clone(),
-        epoch.clone(),
-        topology_log,
-    );
+    let topology = if args.source == RingSource::Dxgi {
+        Some(spawn_topology_watcher(
+            monitors,
+            stop.clone(),
+            writer.clone(),
+            epoch.clone(),
+            topology_log,
+        ))
+    } else {
+        None
+    };
 
     let trace_stop = stop.clone();
     let trace_tail_bg = trace_tail.clone();
@@ -1031,6 +1187,7 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
     });
 
     let mut mon_threads = Vec::new();
+    let source_kind = args.source;
     for mh in monitor_handles {
         let stop_m = stop.clone();
         let writer_m = writer.clone();
@@ -1039,7 +1196,17 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
         let enc_threads = args.encoder_threads;
         let idx = mh.info.index;
         let jh = thread::spawn(move || {
-            run_ring_monitor(mh, fps, wrap, preset, enc_threads, stop_m, writer_m, epoch_m)
+            run_ring_monitor(
+                mh,
+                source_kind,
+                fps,
+                wrap,
+                preset,
+                enc_threads,
+                stop_m,
+                writer_m,
+                epoch_m,
+            )
         });
         mon_threads.push((idx, jh));
     }
@@ -1062,7 +1229,9 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
     }
     let _ = input.join();
     let _ = os.join();
-    let _ = topology.join();
+    if let Some(t) = topology {
+        let _ = t.join();
+    }
     let _ = trace_thread.join();
     thread::sleep(Duration::from_millis(60));
     drop(pipe_thread);
@@ -1293,5 +1462,20 @@ seg-0-005.ts,5.000000,5.400000
             "missing MP4 ftyp header box"
         );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn synthetic_source_generates_even_bgra_motion_frames() {
+        assert_eq!(parse_synthetic_size("1280x720").unwrap(), (1280, 720));
+        assert_eq!(parse_synthetic_size("641x361").unwrap(), (640, 360));
+        let mut src = SyntheticSource::new(Rect::new(0, 0, 320, 180), 60);
+        assert_eq!(src.size(), (320, 180));
+        let mut buf1 = Vec::new();
+        let mut buf2 = Vec::new();
+        assert_eq!(src.acquire_into(&mut buf1, 50), Ok(true));
+        src.next_frame_us = 0;
+        assert_eq!(src.acquire_into(&mut buf2, 50), Ok(true));
+        assert_eq!(buf1.len(), 320 * 180 * 4);
+        assert_ne!(buf1, buf2, "expected moving synthetic pattern between frames");
     }
 }

@@ -118,11 +118,11 @@ pub fn parse_pad_trace(text: &str) -> Vec<ReplayEvent> {
             continue;
         };
         t_us += day_offset;
-        if let Some(prev) = prev_t {
-            if t_us + 12 * 3_600_000_000 < prev {
-                day_offset += 24 * 3_600_000_000;
-                t_us += 24 * 3_600_000_000;
-            }
+        if let Some(prev) = prev_t
+            && t_us + 12 * 3_600_000_000 < prev
+        {
+            day_offset += 24 * 3_600_000_000;
+            t_us += 24 * 3_600_000_000;
         }
         prev_t = Some(t_us);
         let Some(body) = rest.strip_prefix("PAD ") else {
@@ -130,14 +130,15 @@ pub fn parse_pad_trace(text: &str) -> Vec<ReplayEvent> {
         };
         if let Some(after) = body.strip_prefix("contacts ") {
             let mut pts = Vec::new();
-            if let Some(pts_str) = kv(after, "pts=") {
-                if !pts_str.is_empty() && pts_str != "-" {
-                    for pair in pts_str.split(';') {
-                        if let Some((x, y)) = pair.split_once(',') {
-                            if let (Ok(px), Ok(py)) = (x.parse::<f64>(), y.parse::<f64>()) {
-                                pts.push((px, py));
-                            }
-                        }
+            if let Some(pts_str) = kv(after, "pts=")
+                && !pts_str.is_empty()
+                && pts_str != "-"
+            {
+                for pair in pts_str.split(';') {
+                    if let Some((x, y)) = pair.split_once(',')
+                        && let (Ok(px), Ok(py)) = (x.parse::<f64>(), y.parse::<f64>())
+                    {
+                        pts.push((px, py));
                     }
                 }
             }
@@ -195,14 +196,11 @@ pub fn parse_events_jsonl(text: &str) -> Vec<ReplayEvent> {
                 let mut pts = Vec::new();
                 if let Some(arr) = v.get("pts").and_then(|p| p.as_array()) {
                     for item in arr {
-                        if let Some(pair) = item.as_array() {
-                            if pair.len() >= 2 {
-                                if let (Some(x), Some(y)) =
-                                    (pair[0].as_f64(), pair[1].as_f64())
-                                {
-                                    pts.push((x, y));
-                                }
-                            }
+                        if let Some(pair) = item.as_array()
+                            && pair.len() >= 2
+                            && let (Some(x), Some(y)) = (pair[0].as_f64(), pair[1].as_f64())
+                        {
+                            pts.push((x, y));
                         }
                     }
                 }

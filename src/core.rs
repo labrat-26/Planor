@@ -51,7 +51,7 @@ impl Column {
     pub fn shown(&self, j: usize) -> bool {
         let n = self.members.len();
         let r = self.relative(j);
-        r.abs() < 0.5 || (r >= 0.5 && r <= 1.5) || (n >= 3 && r <= -0.5 && r >= -1.5)
+        r.abs() < 0.5 || (0.5..=1.5).contains(&r) || (n >= 3 && (-1.5..=-0.5).contains(&r))
     }
 }
 #[derive(Clone, Debug)]
@@ -205,12 +205,12 @@ impl Strip {
         }
     }
     pub fn ungroup(&mut self, id: WindowId) {
-        if let Some((i, _)) = self.locate(id) {
-            if self.columns[i].members.len() > 1 {
-                self.focus = i;
-                self.remove(id);
-                self.insert(id, 1)
-            }
+        if let Some((i, _)) = self.locate(id)
+            && self.columns[i].members.len() > 1
+        {
+            self.focus = i;
+            self.remove(id);
+            self.insert(id, 1)
         }
     }
     pub fn navigate(&mut self, step: isize, cross: bool) {
@@ -309,14 +309,14 @@ impl Strip {
                 self.focus = self.columns.len();
                 self.columns.push(c)
             }
-        } else if !enter {
-            if let Some((id, i, length)) = self.fullscreen.take() {
-                if let Some((j, _)) = self.locate(id) {
-                    let mut c = self.columns.remove(j);
-                    c.length = length;
-                    self.focus = i.min(self.columns.len());
-                    self.columns.insert(self.focus, c);
-                }
+        } else if !enter
+            && let Some((id, i, length)) = self.fullscreen.take()
+        {
+            if let Some((j, _)) = self.locate(id) {
+                let mut c = self.columns.remove(j);
+                c.length = length;
+                self.focus = i.min(self.columns.len());
+                self.columns.insert(self.focus, c);
             }
             self.scroll(0);
         }
@@ -613,8 +613,33 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
         .map(|(_, i)| i)
 }
 #[derive(Default)]
-pub struct ContactFrame{waiting:bool,target:usize,points:std::collections::BTreeMap<u32,(f64,f64)>}
-impl ContactFrame{pub fn packet(&mut self,count:u32,contacts:impl IntoIterator<Item=(u32,(f64,f64))>)->Option<Vec<(f64,f64)>>{if count!=0{self.points.clear();self.waiting=count==3||count==4;self.target=count as usize}if !self.waiting{return Some(vec![])}self.points.extend(contacts);if self.points.len()<self.target{return None}self.waiting=false;Some(std::mem::take(&mut self.points).into_values().collect())}}
+pub struct ContactFrame {
+    waiting: bool,
+    target: usize,
+    points: std::collections::BTreeMap<u32, (f64, f64)>,
+}
+impl ContactFrame {
+    pub fn packet(
+        &mut self,
+        count: u32,
+        contacts: impl IntoIterator<Item = (u32, (f64, f64))>,
+    ) -> Option<Vec<(f64, f64)>> {
+        if count != 0 {
+            self.points.clear();
+            self.waiting = count == 3 || count == 4;
+            self.target = count as usize;
+        }
+        if !self.waiting {
+            return Some(vec![]);
+        }
+        self.points.extend(contacts);
+        if self.points.len() < self.target {
+            return None;
+        }
+        self.waiting = false;
+        Some(std::mem::take(&mut self.points).into_values().collect())
+    }
+}
 
 impl Strip {
     /// Roll the focused group by `delta` members (touchpad scroll through a stack). Wraps around.
@@ -778,10 +803,10 @@ pub fn check_strip_invariants(strip: &Strip, stack_peek: i32) -> Vec<InvariantVi
     let all_rects = strip.rects(stack_peek);
     let mut active_rects: Vec<(usize, WindowId, Rect)> = Vec::new();
     for (ci, col) in strip.columns.iter().enumerate() {
-        if let Some(&id) = col.members.get(col.active) {
-            if let Some((_, r)) = all_rects.iter().find(|(wid, _)| *wid == id) {
-                active_rects.push((ci, id, *r));
-            }
+        if let Some(&id) = col.members.get(col.active)
+            && let Some((_, r)) = all_rects.iter().find(|(wid, _)| *wid == id)
+        {
+            active_rects.push((ci, id, *r));
         }
     }
 

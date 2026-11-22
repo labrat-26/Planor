@@ -38,7 +38,14 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: usize, l: isize) -> isize {
             };
             let mut rect = RECT::default();
             GetClientRect(h, &mut rect);
-            FillRect(dc, &rect, GetClassLongPtrW(h, GCLP_HBRBACKGROUND) as HBRUSH);
+            let prop = wide("Planor.Test.Brush");
+            let custom = GetPropW(h, prop.as_ptr()) as HBRUSH;
+            let brush = if !custom.is_null() {
+                custom
+            } else {
+                GetClassLongPtrW(h, GCLP_HBRBACKGROUND) as HBRUSH
+            };
+            FillRect(dc, &rect, brush);
             if m == WM_PAINT {
                 EndPaint(h, &ps);
             }
@@ -54,6 +61,11 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: usize, l: isize) -> isize {
         }
     }
     if m == WM_DESTROY {
+        let prop = wide("Planor.Test.Brush");
+        let custom = unsafe { RemovePropW(h, prop.as_ptr()) } as HBRUSH;
+        if !custom.is_null() {
+            unsafe { DeleteObject(custom as _) };
+        }
         unsafe { PostQuitMessage(0) };
         return 0;
     }
@@ -68,7 +80,7 @@ impl Sentinel {
         let (tx, rx) = std::sync::mpsc::channel();
         let join = thread::spawn(move || unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            let name = wide(&format!("PlanorSentinel{index}"));
+            let name = wide(&format!("PlanorSentinel_p{}", std::process::id()));
             let inst = GetModuleHandleW(null());
             let brush = CreateSolidBrush([0xff00ff, 0xffff00, 0x00ffff][index % 3]);
             RegisterClassW(&WNDCLASSW {
@@ -92,6 +104,7 @@ impl Sentinel {
                 inst,
                 null(),
             );
+            SetPropW(h, wide("Planor.Test.Brush").as_ptr(), brush as HANDLE);
             UpdateWindow(h);
             tx.send(h as isize).unwrap();
             let mut m = MSG::default();
@@ -99,8 +112,6 @@ impl Sentinel {
                 TranslateMessage(&m);
                 DispatchMessageW(&m);
             }
-            UnregisterClassW(name.as_ptr(), inst);
-            DeleteObject(brush);
         });
         let hwnd = rx.recv().unwrap();
         assert_ne!(hwnd, 0);
@@ -259,13 +270,14 @@ impl Daemon {
         let dir = daemon_dir(label);
         fs::create_dir_all(dir.join("planor")).unwrap();
         let config = format!(
-            "{}\n[[rules]]\nprocess={:?}\naction=\"tile\"\n[[rules]]\nclass=\"*\"\naction=\"ignore\"\n",
+            "{}\n[[rules]]\nprocess={:?}\nclass={:?}\naction=\"tile\"\n[[rules]]\nclass=\"*\"\naction=\"ignore\"\n",
             config_for_test(include_str!("../../planor.example.toml"), animated),
             std::env::current_exe()
                 .unwrap()
                 .file_name()
                 .and_then(OsStr::to_str)
-                .unwrap()
+                .unwrap(),
+            format!("PlanorSentinel_p{}", std::process::id())
         );
         fs::write(dir.join("planor/planor.toml"), config).unwrap();
         Self {
