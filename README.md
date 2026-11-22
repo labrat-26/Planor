@@ -77,7 +77,13 @@ Slide **three fingers sideways** on your touchpad. The strip follows your finger
   <img src="docs/img/gesture-scroll.svg" alt="Animation: three fingers swipe on the touchpad and the strip scrolls" width="800">
 </p>
 
-No touchpad? Hold <kbd>Win</kbd> and turn the **mouse wheel**. Or use <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd>.
+**Prefer a mouse?** Hold <kbd>Win</kbd> and turn the **mouse wheel**. Every notch moves the strip one fixed step.
+
+<p align="center">
+  <img src="docs/img/mouse-scroll.svg" alt="Animation: holding the Win key and turning the mouse wheel scrolls the strip" width="800">
+</p>
+
+Keyboard only? <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> moves focus along the strip, and the strip scrolls to follow.
 
 ### 2. Stack windows together
 
@@ -93,9 +99,40 @@ Pick a window up with **four fingers** (or drag it with the mouse), then drop it
   <img src="docs/img/stack.svg" alt="Animation: a window dropped on the middle zone of another stacks with it" width="800">
 </p>
 
-Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window. Hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the mouse wheel to roll through a stack.
+Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window.
 
-### 3. Throw a window to another monitor
+**Switching inside a stack.** Once windows are stacked, the slot shows them as a **vertical list**. The purple box marks the one you are looking at. Press <kbd>Alt</kbd>+<kbd>↓</kbd> or <kbd>Alt</kbd>+<kbd>↑</kbd> to move the selection, and the window in the slot changes with it. With a mouse, hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the wheel.
+
+<p align="center">
+  <img src="docs/img/stack-switch.svg" alt="Animation: a stack lists its windows vertically and the selection steps down through them" width="800">
+</p>
+
+### 3. Vertical (portrait) monitors work too
+
+Planor reads each monitor's orientation. On a **landscape** monitor the strip runs sideways. On a **portrait** monitor it runs **up and down**, so you scroll the other way. Stacking, pinning and flinging work the same way.
+
+<p align="center">
+  <img src="docs/img/portrait.svg" alt="Animation: on a landscape monitor the strip scrolls sideways, on a portrait monitor it scrolls vertically" width="800">
+</p>
+
+Hold <kbd>Win</kbd> and turn the mouse wheel to scroll a portrait strip up and down. <kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> steps focus along it.
+
+### 4. New windows tile themselves
+
+You never have to arrange anything. Planor decides the layout as windows open:
+
+1. **Nothing open:** an empty screen, and nothing to do.
+2. **First window:** it fills the screen.
+3. **Second window:** the screen splits in half, one window each.
+4. **Third window and beyond:** each new window joins the strip at the same comfortable size. The strip scrolls to bring it into view, and the older windows wait just off-screen.
+
+<p align="center">
+  <img src="docs/img/auto-tile.svg" alt="Animation: an empty screen, then one window fills it, a second splits it, a third starts the scrolling strip" width="800">
+</p>
+
+Close a window and the others close the gap. Want a different split or size? Change `default_tile_share` and `first_pair_split` in the [settings](#-making-it-yours).
+
+### 5. Throw a window to another monitor
 
 Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor.
 
@@ -105,7 +142,7 @@ Carry a window with four fingers and **flick** it sideways as you lift. It flies
 
 You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <kbd>Alt</kbd>+<kbd>[</kbd> to jump focus between monitors.
 
-### 4. What the coloured outlines mean
+### 6. What the coloured outlines mean
 
 | Outline | Meaning |
 |---|---|
