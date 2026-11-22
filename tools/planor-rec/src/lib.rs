@@ -14,6 +14,7 @@ pub mod pipe;
 pub mod prune;
 pub mod record;
 pub mod review;
+pub mod ring;
 pub mod timeline;
 pub mod trace;
 pub mod util;

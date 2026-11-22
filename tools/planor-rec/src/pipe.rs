@@ -70,20 +70,27 @@ pub fn client(command: &str, pipe: Option<&str>) -> io::Result<String> {
             CloseHandle(handle);
             return Err(io::Error::last_os_error());
         }
-        let mut buf = [0u8; 256];
-        let mut read = 0u32;
-        let ok = ReadFile(
-            handle,
-            buf.as_mut_ptr(),
-            buf.len() as u32,
-            &mut read,
-            std::ptr::null_mut(),
-        );
-        CloseHandle(handle);
-        if ok == 0 {
-            return Err(io::Error::last_os_error());
+        let mut bytes = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let mut read = 0u32;
+            let ok = ReadFile(
+                handle,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut read,
+                std::ptr::null_mut(),
+            );
+            if ok == 0 || read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&buf[..read as usize]);
         }
-        Ok(String::from_utf8_lossy(&buf[..read as usize]).trim().to_string())
+        CloseHandle(handle);
+        if bytes.is_empty() {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty pipe reply"));
+        }
+        Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }
 }
 
@@ -131,11 +138,23 @@ fn reply(handle: HANDLE, text: &str) {
     }
 }
 
+pub type CommandHandler = Arc<dyn Fn(&str, &str) -> Option<String> + Send + Sync>;
+
 /// Serve `stop`, `mark <text>` and `ping` until the recorder stops.
 pub fn spawn_server(
     writer: Arc<EventWriter>,
     stop: Arc<AtomicBool>,
     pipe: Option<String>,
+) -> thread::JoinHandle<()> {
+    spawn_server_with(writer, stop, pipe, None)
+}
+
+/// Serve pipe commands plus an optional custom command handler (used by ring capture for `dump` and `status`).
+pub fn spawn_server_with(
+    writer: Arc<EventWriter>,
+    stop: Arc<AtomicBool>,
+    pipe: Option<String>,
+    handler: Option<CommandHandler>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let name = wide(&pipe_path(pipe.as_deref()));
@@ -146,8 +165,8 @@ pub fn spawn_server(
                     PIPE_ACCESS_DUPLEX,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                     PIPE_UNLIMITED_INSTANCES,
-                    4096,
-                    4096,
+                    8192,
+                    8192,
                     0,
                     std::ptr::null(),
                 )
@@ -160,23 +179,34 @@ pub fn spawn_server(
             if connected {
                 if let Some(command) = read_command(handle) {
                     let mut words = command.splitn(2, char::is_whitespace);
-                    match words.next().unwrap_or("") {
+                    let verb = words.next().unwrap_or("");
+                    let rest = words.next().unwrap_or("").trim();
+                    match verb {
                         "stop" => {
                             reply(handle, "ok: stopping");
                             stop.store(true, Ordering::Relaxed);
                         }
                         "mark" => {
-                            let text = words.next().unwrap_or("").trim().to_string();
-                            let text = if text.is_empty() {
+                            let text = if rest.is_empty() {
                                 "mark".to_string()
                             } else {
-                                text
+                                rest.to_string()
                             };
                             writer.write(json!({"kind": "mark", "text": text, "source": "pipe"}));
                             reply(handle, "ok: marked");
                         }
                         "ping" => reply(handle, "ok: recording"),
-                        other => reply(handle, &format!("error: unknown command `{other}`")),
+                        other => {
+                            if let Some(h) = &handler {
+                                if let Some(resp) = h(other, rest) {
+                                    reply(handle, &resp);
+                                } else {
+                                    reply(handle, &format!("error: unknown command `{other}`"));
+                                }
+                            } else {
+                                reply(handle, &format!("error: unknown command `{other}`"));
+                            }
+                        }
                     }
                 }
             }

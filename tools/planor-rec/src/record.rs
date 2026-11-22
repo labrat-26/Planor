@@ -146,7 +146,7 @@ unsafe extern "system" fn ctrl_handler(_ctrl_type: u32) -> i32 {
     1
 }
 
-fn default_trace_path() -> Option<PathBuf> {
+pub fn default_trace_path() -> Option<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|p| p.join("planor/trace.log"))
@@ -201,7 +201,7 @@ pub fn follow_trace_once(
         }
     }
 }
-fn select_monitors(monitors: &[MonitorInfo], spec: &str) -> util::anyhow_lite::Result<Vec<u32>> {
+pub fn select_monitors(monitors: &[MonitorInfo], spec: &str) -> util::anyhow_lite::Result<Vec<u32>> {
     if monitors.is_empty() {
         return util::anyhow_lite::err("no monitors found");
     }

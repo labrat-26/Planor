@@ -1,7 +1,7 @@
 //! `planor-rec`: record the desktop on one clock, then check Planor's claims against pixels.
 
 use clap::{Parser, Subcommand};
-use planor_rec::{analyze, capture, pipe, prune, record, review, util};
+use planor_rec::{analyze, capture, pipe, prune, record, review, ring, util};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -117,6 +117,51 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run a continuous low-cost rolling video/event ring buffer (default 10 s @ 30 fps).
+    Ring {
+        /// Rolling window duration in seconds (2..120).
+        #[arg(long, default_value_t = 10)]
+        seconds: u32,
+        /// Capture frame rate on the ring timeline.
+        #[arg(long, default_value_t = 30)]
+        fps: u32,
+        /// `all` or a monitor index.
+        #[arg(long, default_value = "all")]
+        monitors: String,
+        /// x264 preset.
+        #[arg(long, default_value = "ultrafast")]
+        preset: String,
+        /// Threads per FFmpeg encoder.
+        #[arg(long, default_value_t = 2)]
+        encoder_threads: u32,
+        /// Pipe name suffix (defaults to `ring`, listening on `\\.\pipe\planor-rec-ring`).
+        #[arg(long)]
+        pipe: Option<String>,
+        /// Optional trace file to tail into dumps (defaults to `%LOCALAPPDATA%\planor\trace.log`).
+        #[arg(long)]
+        trace: Option<PathBuf>,
+        /// Scratch directory for temporary rolling TS segments.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Dump the active ring buffer window into `<out>` (`video-N.mp4`, `frames-N.csv`, `events.jsonl`, `meta.json`).
+    Dump {
+        /// Target folder for the dumped clip.
+        #[arg(long)]
+        out: PathBuf,
+        /// Reason tag recorded in `meta.json` and `events.jsonl`.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Pipe name suffix (defaults to `ring`).
+        #[arg(long)]
+        pipe: Option<String>,
+    },
+    /// Query live CPU, memory, disk and frame stats of a running `planor-rec ring`.
+    RingStatus {
+        /// Pipe name suffix (defaults to `ring`).
+        #[arg(long)]
+        pipe: Option<String>,
+    },
 }
 
 fn unreachable_recorder(pipe_name: &Option<String>, e: std::io::Error) -> Box<dyn std::error::Error + Send + Sync> {
@@ -196,6 +241,29 @@ fn main() {
             }
         }
         Command::Prune { dir, keep, dry_run } => prune::run(&dir, keep, dry_run),
+        Command::Ring {
+            seconds,
+            fps,
+            monitors,
+            preset,
+            encoder_threads,
+            pipe,
+            trace,
+            dir,
+        } => ring::run(ring::RingArgs {
+            seconds,
+            fps,
+            monitors,
+            preset,
+            encoder_threads,
+            pipe,
+            trace,
+            dir,
+        }),
+        Command::Dump { out, reason, pipe } => {
+            ring::send_dump(&out, reason.as_deref(), pipe.as_deref())
+        }
+        Command::RingStatus { pipe } => ring::send_status(pipe.as_deref()),
     };
     if let Err(e) = result {
         eprintln!("planor-rec: {e}");

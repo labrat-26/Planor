@@ -8,6 +8,7 @@ use crate::util::{qpc_us, Rect};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::VecDeque,
     fs::OpenOptions,
     io::{BufWriter, Write},
     sync::{
@@ -41,10 +42,84 @@ pub struct OsWindow {
     pub minimized: bool,
 }
 
+struct EventRing {
+    buf: VecDeque<(i64, Value)>,
+    last_os: Option<(i64, Value)>,
+    window_us: i64,
+    max_events: usize,
+}
+
+impl EventRing {
+    fn new(window_us: i64, max_events: usize) -> Self {
+        Self {
+            buf: VecDeque::new(),
+            last_os: None,
+            window_us: window_us.max(1_000_000),
+            max_events: max_events.max(64),
+        }
+    }
+
+    fn push(&mut self, t: i64, event: Value) {
+        if event.get("kind").and_then(|v| v.as_str()) == Some("os") {
+            self.last_os = Some((t, event.clone()));
+        }
+        self.buf.push_back((t, event));
+        while self.buf.len() > self.max_events
+            || self
+                .buf
+                .front()
+                .map(|(front_t, _)| t - *front_t > self.window_us && self.buf.len() > 32)
+                .unwrap_or(false)
+        {
+            if let Some((old_t, old_ev)) = self.buf.pop_front() {
+                if old_ev.get("kind").and_then(|v| v.as_str()) == Some("os") {
+                    if self.last_os.as_ref().map(|(lt, _)| *lt <= old_t).unwrap_or(true) {
+                        self.last_os = Some((old_t, old_ev));
+                    }
+                }
+            }
+        }
+    }
+
+    fn snapshot_since(&self, since_us: i64) -> Vec<Value> {
+        let mut out = Vec::with_capacity(self.buf.len() + 1);
+        let first_os_in_range = self
+            .buf
+            .iter()
+            .any(|(t, v)| *t >= since_us && v.get("kind").and_then(|k| k.as_str()) == Some("os"));
+        let mut pre_os: Option<(i64, &Value)> = self.last_os.as_ref().map(|(t, v)| (*t, v));
+        for (t, v) in &self.buf {
+            if *t < since_us && v.get("kind").and_then(|k| k.as_str()) == Some("os") {
+                if pre_os.as_ref().map(|(pt, _)| *t >= *pt).unwrap_or(true) {
+                    pre_os = Some((*t, v));
+                }
+            }
+        }
+        if let Some((_, os_ev)) = pre_os {
+            if !first_os_in_range || self.buf.iter().all(|(t, _)| *t < since_us) {
+                out.push(os_ev.clone());
+            } else if let Some((first_t, _)) = self.buf.iter().find(|(t, v)| {
+                *t >= since_us && v.get("kind").and_then(|k| k.as_str()) == Some("os")
+            }) {
+                if *first_t > since_us + 100_000 {
+                    out.push(os_ev.clone());
+                }
+            }
+        }
+        for (t, v) in &self.buf {
+            if *t >= since_us {
+                out.push(v.clone());
+            }
+        }
+        out
+    }
+}
+
 /// Appends JSON lines from several threads. One file handle behind a mutex; every line is flushed so
-/// a crash leaves a usable event stream.
+/// a crash leaves a usable event stream. Optionally retains an in-memory rolling ring buffer.
 pub struct EventWriter {
     file: Mutex<Option<BufWriter<std::fs::File>>>,
+    ring: Mutex<Option<EventRing>>,
 }
 
 impl EventWriter {
@@ -56,13 +131,31 @@ impl EventWriter {
             .open(dir.join("events.jsonl"))?;
         Ok(Arc::new(Self {
             file: Mutex::new(Some(BufWriter::new(file))),
+            ring: Mutex::new(None),
         }))
+    }
+
+    pub fn open_ring(window_us: i64, max_events: usize) -> Arc<Self> {
+        Arc::new(Self {
+            file: Mutex::new(None),
+            ring: Mutex::new(Some(EventRing::new(window_us, max_events))),
+        })
     }
 
     /// Write one event. `t` is a QPC microsecond stamp; missing `t` is stamped now.
     pub fn write(&self, mut event: Value) {
-        if event.get("t").is_none() {
-            event["t"] = json!(qpc_us());
+        let t = match event.get("t").and_then(|v| v.as_i64()) {
+            Some(t) => t,
+            None => {
+                let now = qpc_us();
+                event["t"] = json!(now);
+                now
+            }
+        };
+        if let Ok(mut guard) = self.ring.lock() {
+            if let Some(ring) = guard.as_mut() {
+                ring.push(t, event.clone());
+            }
         }
         if let Ok(mut guard) = self.file.lock() {
             if let Some(file) = guard.as_mut() {
@@ -71,6 +164,22 @@ impl EventWriter {
                 let _ = file.flush();
             }
         }
+    }
+
+    pub fn snapshot_since(&self, since_us: i64) -> Vec<Value> {
+        self.ring
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.snapshot_since(since_us)))
+            .unwrap_or_default()
+    }
+
+    pub fn ring_len(&self) -> usize {
+        self.ring
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.buf.len()))
+            .unwrap_or(0)
     }
 
     pub fn mark(&self, text: &str) {
