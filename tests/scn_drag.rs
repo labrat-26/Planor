@@ -81,6 +81,28 @@ fn grab(w: &Sentinel) -> Option<(i32, i32)> {
     }
     Some(((left + right) / 2, w.rect()[1] + 12))
 }
+/// `grab`, but only when the window is the one under the point after raising it (None when another window
+/// covers the caption, which the callers report as having no caption to grab).
+fn grab_raised(w: &Sentinel) -> Option<(i32, i32)> {
+    let p = grab(w)?;
+    raise_until_hit(w, p).then_some(p)
+}
+/// The window the mouse would hit at screen point `p` (0 when none).
+fn window_at(p: (i32, i32)) -> isize {
+    unsafe { WindowFromPoint(POINT { x: p.0, y: p.1 }) as isize }
+}
+/// Bring a sentinel to the front and wait until it is the window under `p`. Closing a window makes Windows
+/// activate the next one in z-order, which can be an unrelated window (the user's) left covering the caption
+/// that a drag starts on, so earlier scenarios would change the outcome of this one.
+fn raise_until_hit(w: &Sentinel, p: (i32, i32)) -> bool {
+    eventually(3, || {
+        unsafe {
+            SetForegroundWindow(w.hwnd as _);
+            BringWindowToTop(w.hwnd as _);
+        }
+        window_at(p) == w.hwnd
+    })
+}
 
 /// Real mouse input. Releases the left button, the Shift key and restores the cursor on drop, even on panic.
 struct Mouse {
@@ -294,7 +316,7 @@ fn monitor_roundtrip(mon: usize, vertical: bool, label: &str) {
     );
 
     // Drag window 2 from the primary onto the target monitor (drop at its outer edge => Before, no stacking).
-    let from = grab(&mover).unwrap_or_else(|| {
+    let from = grab_raised(&mover).unwrap_or_else(|| {
         panic!(
             "{kind}: window 2 has no on-screen caption on the primary (visible rect {:?})",
             vis(&mover)
@@ -328,7 +350,7 @@ fn monitor_roundtrip(mon: usize, vertical: bool, label: &str) {
     );
 
     // Drag it back to the primary: the primary now holds only window 3, so drop on its left edge.
-    let from = grab(&mover).unwrap_or_else(|| {
+    let from = grab_raised(&mover).unwrap_or_else(|| {
         panic!(
             "{kind}: window 2 has no on-screen caption on monitor {mon} before the return drag (visible rect {:?})",
             vis(&mover)
@@ -389,7 +411,7 @@ fn reorder_before_after() {
     );
 
     // Phase A (Before): window 1 dropped on the outer 25% left edge of window 0 => [1, 0].
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("phase A precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     let to = left_point(&ws[0], 0.10);
@@ -410,7 +432,7 @@ fn reorder_before_after() {
 
     // Phase B (After): window 1 (now the left tile) dropped on the outer 25% right edge of window 0 => [0, 1].
     assert_all_reachable(&both, "precondition (reorder, phase B)");
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("phase B precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     let to = right_point(&ws[0], 0.10);
@@ -441,7 +463,7 @@ fn drop_on_center_stacks() {
     let mut m = Mouse::begin();
     d.start();
     thread::sleep(SETTLE);
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     // Centre of window 0 is the middle 50% of its width: hover there for HOVER, then drop.
@@ -505,7 +527,7 @@ fn shift_freezes_reflow() {
     for _ in 0..3 {
         press(&[ALT], LEFT);
     }
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     let to = left_point(&ws[0], 0.10);
@@ -553,7 +575,7 @@ fn drag_out_of_stack() {
         press(&[ALT], LEFT);
     }
     // Setup: window 1 dropped on the centre of window 0 to form a stack.
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("setup precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     m.drag(from, centre(vis(&ws[0])));
@@ -569,7 +591,7 @@ fn drag_out_of_stack() {
     let active = if r[0] { 0 } else { 1 };
 
     // Drag the stack's active member out, dropping it on the outer 25% left edge of window 2 (Before).
-    let from = grab(&ws[active]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[active]).unwrap_or_else(|| {
         panic!("precondition: stack member {active} has no on-screen caption; {}", describe(&ws))
     });
     let to = left_point(&ws[2], 0.10);
@@ -644,7 +666,7 @@ fn drag_cancel_escape() {
     }
     let before: Vec<[i32; 4]> = (0..3).map(|i| vis(&ws[i])).collect();
     let before_order = order(&ws);
-    let from = grab(&ws[1]).unwrap_or_else(|| {
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
         panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
     });
     let to = left_point(&ws[0], 0.10);
