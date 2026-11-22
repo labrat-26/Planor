@@ -10,6 +10,7 @@ mod install;
 mod note;
 mod perf;
 mod render;
+mod theme;
 #[cfg(test)]
 mod sim_tests;
 mod watchdog;
