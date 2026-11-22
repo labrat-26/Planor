@@ -1,7 +1,6 @@
 //! Settings model shared by the settings window (and the legacy TUI until it is removed): defaults, help
 //! text and sections come from the embedded `planor.example.toml`, values from the user's file. Edits are
 //! validated by the daemon's own rule (`crate::valid_value`) and saved with comments preserved (`toml_edit`).
-#![allow(dead_code)] // consumed by the settings window (later tasks); removed in the final cleanup
 use crate::Result;
 use std::path::{Path, PathBuf};
 use toml_edit::DocumentMut;
@@ -163,17 +162,6 @@ impl Model {
             }
             _ => return Err("type a new value with Enter".into()),
         })
-    }
-
-    /// +1 / -1: step a number, cycle a choice, flip a yes/no.
-    pub fn step(&mut self, i: usize, dir: i64) -> std::result::Result<(), String> {
-        let v = self.stepped(i, dir)?;
-        self.set(i, v)
-    }
-
-    pub fn reset(&mut self, i: usize) -> std::result::Result<(), String> {
-        let d = self.entries[i].default.clone();
-        self.set(i, d)
     }
 
     pub fn save(&mut self) -> Result<()> {
@@ -357,10 +345,12 @@ mod tests {
         assert!(m.set(colour, toml::Value::String("blue".into())).is_err());
         m.set(colour, toml::Value::String("#112233".into())).unwrap();
         let curve = idx(&m, "animation", "curve");
-        m.step(curve, 1).unwrap();
+        let next = m.stepped(curve, 1).unwrap();
+        m.set(curve, next).unwrap();
         assert_eq!(m.value(curve), toml::Value::String("spring".into()));
         let inertia = idx(&m, "touchpad", "swipe_inertia");
-        m.step(inertia, 1).unwrap();
+        let flipped = m.stepped(inertia, 1).unwrap();
+        m.set(inertia, flipped).unwrap();
         assert_eq!(m.value(inertia), toml::Value::Boolean(false));
         let gain = idx(&m, "touchpad", "swipe_scroll_gain");
         m.set(gain, toml::Value::Integer(3)).unwrap();
@@ -374,7 +364,8 @@ mod tests {
         assert_eq!(cfg["layout"]["gap_px"].as_integer(), Some(10));
         assert_eq!(cfg["animation"]["curve"].as_str(), Some("spring"));
         assert_eq!(cfg["touchpad"]["swipe_inertia"].as_bool(), Some(false));
-        m.reset(gap).unwrap();
+        let default = m.entries[gap].default.clone();
+        m.set(gap, default).unwrap();
         assert_eq!(m.value(gap), toml::Value::Integer(6));
     }
 

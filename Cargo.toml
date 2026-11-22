@@ -24,5 +24,4 @@ crossbeam-queue="0.3"
 tracing="0.1"
 windows58={package="windows",version="0.58",features=["Win32_Foundation"]}
 png = "0.18"
-ratatui = "0.30"
 toml_edit = "0.25.20"

@@ -1,7 +1,6 @@
 //! Per-user install: copy the exe to `%LOCALAPPDATA%\Planor\planor.exe`, start that copy, and let it autostart
 //! at sign-in through the `HKCU\...\Run` key. Autostart only ever points at the installed copy, never at a
 //! development build under `target\`.
-#![allow(dead_code)] // consumed by the settings window (later tasks); removed in the final cleanup
 use crate::{Command, Result, client, pipe_name, wide};
 use std::{
     io,

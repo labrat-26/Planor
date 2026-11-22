@@ -1,5 +1,4 @@
 mod backend;
-mod config_tui;
 mod settings_model;
 mod settings_ui;
 mod daemon;
@@ -76,7 +75,7 @@ fn config() -> Result<toml::Value> {
     };
     parse(&fs::read_to_string(path)?)
 }
-/// Choices for the settings that take one of a few words (also offered by `planor config`).
+/// Choices for the settings that take one of a few words (offered by the settings window).
 pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
     match key {
         "curve" => Some(&["ease_out_cubic", "spring"]),
@@ -85,7 +84,7 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
     }
 }
 /// Whether `v` may replace the default `old` for setting `k`: same type, sane range, a known word, a
-/// `#RRGGBB` colour. Shared by the daemon's config merge and `planor config`.
+/// `#RRGGBB` colour. Shared by the daemon config merge and the settings window.
 pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
     let typed = old.type_str() == v.type_str()
         && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
@@ -189,7 +188,7 @@ enum Command {
     },
     /// Open the settings window (the planor.toml in the roaming AppData planor folder).
     Settings,
-    /// Edit settings in a terminal UI (replaced by `settings`).
+    /// Same as `settings` (kept so older habits and scripts keep working).
     Config,
 }
 #[derive(Subcommand, Serialize, Deserialize, Debug)]
@@ -621,8 +620,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Settings => settings_ui::run(&folder("APPDATA")?.join("planor.toml")),
-        Command::Config => config_tui::run(&folder("APPDATA")?.join("planor.toml")),
+        Command::Settings | Command::Config => settings_ui::run(&folder("APPDATA")?.join("planor.toml")),
         Command::Gestures {
             action: GestureAction::Record { name, seconds, out, passive },
         } => record_gestures(name, seconds, out, passive),

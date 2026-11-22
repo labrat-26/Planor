@@ -1,6 +1,5 @@
 //! Windows theme helpers for the tray menu and the settings window: system light/dark, dark title bar and
 //! Mica, dark classic controls, accent colour. Every OS call degrades silently to the classic look.
-#![allow(dead_code)] // consumed by the tray and settings window (later tasks); removed in the final cleanup
 use crate::wide;
 use windows_sys::Win32::{
     Foundation::HWND,
@@ -77,18 +76,6 @@ pub fn apply_control(hwnd: HWND, dark: bool) {
     let theme = wide(if dark { "DarkMode_Explorer" } else { "Explorer" });
     unsafe { SetWindowTheme(hwnd, theme.as_ptr(), std::ptr::null()) };
 }
-/// Edit boxes and combo boxes: the dark "CFD" look, or the default theme in light mode.
-pub fn apply_input(hwnd: HWND, dark: bool) {
-    let theme = wide("DarkMode_CFD");
-    unsafe {
-        if dark {
-            SetWindowTheme(hwnd, theme.as_ptr(), std::ptr::null());
-        } else {
-            SetWindowTheme(hwnd, std::ptr::null(), std::ptr::null());
-        }
-    }
-}
-
 /// DWM colorization `0xAARRGGBB` to a GDI `COLORREF` (`0x00BBGGRR`).
 pub fn argb_to_colorref(argb: u32) -> u32 {
     let (r, g, b) = ((argb >> 16) & 0xFF, (argb >> 8) & 0xFF, argb & 0xFF);
@@ -104,6 +91,7 @@ pub fn accent_color() -> u32 {
 }
 
 /// The app icon embedded as resource 1 (see `planor.rc`), loaded at `size` x `size` pixels.
+#[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCE: resource id 1, not a pointer
 pub fn app_icon(size: i32) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
     use windows_sys::Win32::{
         System::LibraryLoader::GetModuleHandleW,

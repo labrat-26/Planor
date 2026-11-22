@@ -2,6 +2,22 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [Unreleased]
+
+### Added
+- **Tray icon**: Planor shows an icon in the notification area with Pause/Resume, Configure and Exit (not in test mode).
+- **Settings window** (`planor settings`, also `planor config`): a native, Windows 11 Settings style window (cards, switches, rounded fields, light/dark and accent colour follow the system) covering every setting in `planor.toml`, a Rules editor, a colour picker, hotkey capture and an Install page. Changes apply to the running daemon within a second.
+- **Per-user install**: Install copies Planor to `%LOCALAPPDATA%\Planor\planor.exe`, Uninstall removes it; **autostart** can only be switched on from the installed copy.
+- **Hot reload**: the daemon also reloads when `planor.toml` is edited by hand (300 ms debounce).
+- App icon (`assets/planor.ico`), embedded in the exe.
+
+### Changed
+- `planor autostart on` now requires the installed copy (it used to register whichever exe ran it).
+- Planor's own settings window floats; it is never tiled.
+
+### Removed
+- The terminal settings editor (`src/config_tui.rs`) and the `ratatui` dependency; the settings window replaces it.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added

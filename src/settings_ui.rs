@@ -1,7 +1,6 @@
 //! `planor settings`: the native settings window. Pages are generated from `settings_model::Model`, so a new
 //! key in `planor.example.toml` shows up without UI work. Every change is validated, saved after a short
 //! quiet period (so typing is not a write per keystroke) and the running daemon is told to reload.
-#![allow(dead_code)] // pages and controls are completed in the following tasks; removed in the final cleanup
 use crate::{Result, settings_model::{Entry, Model}};
 use std::time::{Duration, Instant};
 
