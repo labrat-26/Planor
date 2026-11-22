@@ -45,3 +45,17 @@ and expect other windows to interfere. A test that passes alone and fails in the
 - Trace lines: `EXPECT` (what Planor claims a tile rect should be), `PLACE` (actual window moves), `SCENE`, `FG`, `SLOW *`
   (anything over 100 ms), `PAD` (touchpad). `planor state` (when available) dumps strips and tiles.
 - Recorder: `tools/planor-rec/README.md`. Reports in `%TEMP%\planor-rec-*\report.md`.
+
+## Read data through the digest, not raw logs
+
+Raw traces, recorder reports and cargo logs are huge. Shrink them first (scripts run with
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\<name>.ps1`, since script execution is disabled by default):
+
+```powershell
+scripts\digest.ps1                   # latest verify results: failures and flakes only, one line each
+scripts\digest.ps1 -Log <test log>   # the failing assertion and the lines around it
+scripts\digest.ps1 -Rec <rec dir>    # recorder findings grouped by kind with counts and the first example
+scripts\digest.ps1 -Trace <trace>    # scene-to-first-PLACE latency, SLOW lines collapsed, notes, warnings
+```
+
+Add `-Max N` to cap the output. Open a raw file only for the one thing the digest points at.
