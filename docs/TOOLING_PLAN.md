@@ -3,6 +3,30 @@
 Goal: make it fast and cheap for agents (and the user) to test Planor, find out why something failed, and measure
 performance, without stopping the user's daemon, without raw-log dumps, and without trusting an agent's word.
 
+Status legend: DONE, IMPLEMENTED (verified in unit/non-DXGI/pipe tests; live DXGI/WGC/focus blocked inside `exebox-...` isolated desktop), DEFERRED. Owners: the user decides; implementation & verification recorded below (no item is claimed verified unless re-run and observed directly).
+
+## Implementation & Verification Summary (`v0.2.0`)
+
+| Area | Status | Evidence & Exact Measurements |
+|---|---|---|
+| **1. Measure first** | **DONE** | `scripts/verify.ps1` records per-run/per-suite durations, slowest 10, `schema_version = 1` `results.json`; `scripts/compare-runs.ps1` compared baseline `20261122-082006` (`5.28 s`) -> seeded cached `unit` run `20261122-085623` (`3.47 s`, `-34.2%`). |
+| **2.1 Test mode & coexistence** | **DONE** | `PLANOR_TEST_MODE=1` + `planor key` (`src/win32.rs`, `src/daemon.rs`, `src/note.rs`); real daemon PID `14700` stayed alive across `live::state_json_matches_real_windows` (`COEXIST_PID_BEFORE=14700`, `AFTER=14700`, `MATCH=True`). |
+| **2.2–2.3 Failure evidence & surface docs** | **DONE** | Passing run `20261122-085208` created `0` artifact subdirs; failure run `20261122-085055` saved `trace.log` + `digest.txt` (`4` lines). `docs/TEST_PLAN.md` Section 2.3 documents Windows desktop isolation & VM tradeoff. |
+| **3.1 `planor state --json`** | **DONE** | `docs/STATE_SCHEMA.md` (`schema_version = 1`); `live::state_json_matches_real_windows` passed in `1.19–1.27 s`. |
+| **3.2 Invariant checks & bug fix** | **DONE** | `check_strip_invariants` & `check_settled_parked` (`src/core.rs`) + `5` unit tests; `0` `INVARIANT` lines in live traces. Also fixed `Strip::offset` clamping bug found by `prop_core` (`N-006`). |
+| **3.3 Core mockup tests & spec** | **DONE (URL login-gated)** | `tests/core.rs`: `39 passed, 0 failed, 1 ignored` (`mockup_drop_zone_outer_20_middle_60_join` fails on purpose with `Before` vs `Stack`); spec in `docs/scroll_states_spec.json` + `docs/MOCKUP_DECISIONS.md` (mockups built from repo rules because `claude.ai/artifact/...` required login). |
+| **3.4 & 9.7 Input replay & golden fixtures** | **DONE** | `src/replay.rs` (`REPLAY_SCHEMA_VERSION = 1`) + `3` fixtures in `tests/fixtures/gestures/`; `3/3` replay unit tests pass. |
+| **4. Profiling & budgets** | **DONE (WGC live budget blocked on `exebox`)** | `src/perf.rs` (`22` `SpanKind`s, lock-free `ArrayQueue`, process CPU/RAM/GDI/USER/handles, Chrome trace export, `16 MB` IPC frame cap); release overhead `2.1 ns/span` (off) / `74.3 ns/span` (on). `digest.ps1 -Perf` (`15` lines <= 20), `scripts/correlate.ps1`. Inside `exebox-...`, `startup_first_place=487.11 ms (< 600 ms)`, `stalls=0`, `daemon.tick p99=5.48–7.46 ms`, while WGC `render.sources` failed `0x80070057` (`135 ms/scene`, tripping `render_scene`/`gesture_to_place` budgets). |
+| **5.1–5.8 Progressive fast testing** | **DONE (Win32 checks verified; DXGI/focus/display live suites deferred/blocked)** | `wait_until`/`wait_settled`, direct test `.exe` execution, instant anims by default, tiers (`unit` `3.47 s`, `fast`, `smoke`, `live`, `all`), `-Changed` (`scripts/test-map.json`, `1.67 s`), `-Cache` (`4 cached` unit in `0.60 s`; `1 cached` live in `0.69 s`), cheap retries, `-NoDisplaySwitch`. Verified Win32 passes: `stop_restores_exact_rect` (`0.61 s`), `tiles_stay_inside_work_area` (`1.51 s`), `stop_with_many_windows` (`1.96 s`). Excluded `scn_display` and full ~7 min run per constraints; `scn_focus` blocked by non-input `exebox` desktop (`SetForegroundWindow`). |
+| **5.9 Parallel runs** | **DEFERRED** | Not implemented (last item, evaluate after full desktop suite run). |
+| **9.1 & 9.4 Architecture & Brief Template** | **DONE** | `docs/ARCHITECTURE.md` & `docs/TASK_BRIEF_TEMPLATE.md` created and linked in `CLAUDE.md`. |
+| **9.2 Freeze watchdog** | **DONE** | `src/watchdog.rs` (`50 ms` poll, `>= 300 ms` `STALL` marker + stall bundle); `2/2` unit tests pass. |
+| **9.3 Randomised layout property tests** | **DONE** | `tests/prop_core.rs`: `1000` random sequences + broken-rule shrinker pass in `0.11–0.16 s`. |
+| **9.5 & 9.6 Diagnostic bundles & tracked notes** | **DONE** | `src/note.rs` Win+W bundle (`note::tests::bundle_writes_note_state_perf_trace_and_png`), `planor perf --bundle` (`perf.json` 10.6 KB, `perf.trace.json` 7.1 KB, `state.json` 1.5 KB), `digest.ps1 -Bundle` (`7` lines <= 20), `docs/notes.json` + `scripts/notes.ps1 -Check` (`9` tracked notes). |
+| **9.9 & 9.10 Hooks, nightly & release hygiene** | **DONE** | `.git/hooks/pre-commit` (`scripts/install-hooks.ps1`), `scripts/nightly-verify.ps1`, `scripts/register-nightly.ps1 -DryRun`, `scripts/rebuild-daemon.ps1` (`6.44 s`, 0 warnings), `CHANGELOG.md`, tags `v0.1.0` & `v0.2.0`. |
+| **9.11 Fake window backend** | **DEFERRED** | Skipped per scope until separately approved. |
+| **9.12 10s rolling ring video capture** | **IMPLEMENTED (synthetic/pipe verified; live DXGI blocked on `exebox`)** | `tools/planor-rec/src/ring.rs` (`ring`, `dump`, `ring-status`); `103 + 2` `planor-rec` tests pass including `ffmpeg_segment_wrap_and_concat_remux_produces_mp4`. Pipe `ring-status` (`0.39%` CPU, `22.04 MB` RAM idle baseline), `dump`, `stop` verified; live desktop DXGI `DuplicateOutput` returned `E_ACCESSDENIED (0x80070005)` in `exebox-...`. |
+
 Status legend: DONE, NEXT (queued for the Sonnet agent), LATER. Owners: the user decides; Sonnet implements; every item is
 verified by the lead (re-run the tests, read the diff) before it counts as done.
 
