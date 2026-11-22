@@ -2,6 +2,7 @@ mod backend;
 mod config_tui;
 mod settings_model;
 mod daemon;
+mod config_watch;
 mod diag;
 mod gpu;
 mod guide;
