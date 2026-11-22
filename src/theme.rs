@@ -22,6 +22,12 @@ pub fn parse_light_theme(value: Option<u32>) -> bool {
 }
 /// Whether apps should draw dark (Settings > Personalization > Colors > Choose your mode).
 pub fn system_is_dark() -> bool {
+    // Screenshots and tests can force a theme without touching the user's system setting.
+    match std::env::var("PLANOR_THEME").as_deref() {
+        Ok("dark") => return true,
+        Ok("light") => return false,
+        _ => (),
+    }
     let mut data = 0u32;
     let mut len = 4u32;
     let status = unsafe {
@@ -70,6 +76,17 @@ pub fn apply_window(hwnd: HWND, dark: bool) {
 pub fn apply_control(hwnd: HWND, dark: bool) {
     let theme = wide(if dark { "DarkMode_Explorer" } else { "Explorer" });
     unsafe { SetWindowTheme(hwnd, theme.as_ptr(), std::ptr::null()) };
+}
+/// Edit boxes and combo boxes: the dark "CFD" look, or the default theme in light mode.
+pub fn apply_input(hwnd: HWND, dark: bool) {
+    let theme = wide("DarkMode_CFD");
+    unsafe {
+        if dark {
+            SetWindowTheme(hwnd, theme.as_ptr(), std::ptr::null());
+        } else {
+            SetWindowTheme(hwnd, std::ptr::null(), std::ptr::null());
+        }
+    }
 }
 
 /// DWM colorization `0xAARRGGBB` to a GDI `COLORREF` (`0x00BBGGRR`).

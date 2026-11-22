@@ -1,6 +1,7 @@
 mod backend;
 mod config_tui;
 mod settings_model;
+mod settings_ui;
 mod daemon;
 mod config_watch;
 mod diag;
@@ -186,7 +187,9 @@ enum Command {
         #[command(subcommand)]
         action: GestureAction,
     },
-    /// Edit settings (%APPDATA%\planor\planor.toml) in a terminal UI.
+    /// Open the settings window (the planor.toml in the roaming AppData planor folder).
+    Settings,
+    /// Edit settings in a terminal UI (replaced by `settings`).
     Config,
 }
 #[derive(Subcommand, Serialize, Deserialize, Debug)]
@@ -618,6 +621,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Command::Settings => settings_ui::run(&folder("APPDATA")?.join("planor.toml")),
         Command::Config => config_tui::run(&folder("APPDATA")?.join("planor.toml")),
         Command::Gestures {
             action: GestureAction::Record { name, seconds, out, passive },
