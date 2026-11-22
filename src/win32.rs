@@ -16,6 +16,7 @@ impl Event {
             Event::Window(..) => "window",
             Event::Key(_) => "key",
             Event::Contacts(_) => "contacts",
+            Event::Wheel { .. } => "wheel",
             Event::Suspend(_) => "suspend",
             Event::Topology => "topology",
             Event::Stop => "stop",
@@ -29,6 +30,9 @@ pub enum Event {
     Window(u32, isize),
     Key(String),
     Contacts(Vec<(f64, f64)>),
+    /// Mouse wheel turned with the Windows key held (`delta` in notches of 120; `tilt`: the horizontal
+    /// wheel; `shift`: Shift held too), at screen point `x`, `y`.
+    Wheel { delta: i32, tilt: bool, shift: bool, x: i32, y: i32 },
     Suspend(bool),
     Topology,
     Stop,
@@ -68,6 +72,27 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
             }
         } else if w == WM_LBUTTONUP as usize && SWALLOW_UP.swap(false, AcqRel) {
             return 1;
+        } else if w == WM_MOUSEWHEEL as usize || w == WM_MOUSEHWHEEL as usize {
+            // Win + wheel scrolls the strip under the cursor (Win + Shift + wheel rolls its group).
+            let down = |vk| unsafe { KeyboardAndMouse::GetAsyncKeyState(vk) < 0 };
+            if down(0x5B) || down(0x5C) {
+                let info = unsafe { &*(l as *const MSLLHOOKSTRUCT) };
+                let delta = (info.mouseData >> 16) as u16 as i16 as i32;
+                emit(Event::Wheel {
+                    delta,
+                    tilt: w == WM_MOUSEHWHEEL as usize,
+                    shift: down(0x10),
+                    x: info.pt.x,
+                    y: info.pt.y,
+                });
+                // Releasing Win with nothing else pressed would open the Start menu; a keystroke that maps
+                // to nothing in between cancels that (same as Win+W).
+                unsafe {
+                    KeyboardAndMouse::keybd_event(0xE8, 0, 0, 0);
+                    KeyboardAndMouse::keybd_event(0xE8, 0, KeyboardAndMouse::KEYEVENTF_KEYUP, 0);
+                }
+                return 1;
+            }
         }
     }
     unsafe { CallNextHookEx(null_mut(), code, w, l) }
@@ -318,6 +343,17 @@ pub fn frame(id: isize) -> Option<Rect> {
         } else {
             None
         }
+    }
+}
+/// Offset of the visible frame inside the full window rectangle (the invisible resize borders): left, top.
+pub fn insets(id: isize) -> Option<(i32, i32)> {
+    unsafe {
+        let mut r = RECT::default();
+        if GetWindowRect(id as _, &mut r) == 0 {
+            return None;
+        }
+        let v = frame(id)?;
+        Some(((v.x - r.left).max(0), (v.y - r.top).max(0)))
     }
 }
 pub fn monitors() -> Vec<(String, Rect, Rect)> {

@@ -106,9 +106,18 @@ fn motion_drag() {
         assert_eq!(motion(0., spring), 0.);
         assert_eq!(motion(1., spring), 1.)
     }
-    assert_eq!(drag(0.1, 10., 300., 0, 350, false), Drag::Before);
-    assert_eq!(drag(0.1, 10., 300., 0, 350, true), Drag::None);
-    assert_eq!(drag(0.5, 0., 300., 350, 350, true), Drag::Stack)
+    // Drop modes are positional only (N-012, N-015, N-016: no speed or dwell, so nothing flickers).
+    // drag(in_zone, fraction, dragged window is grouped, target is its sibling)
+    assert_eq!(drag(true, 0.5, false, false, false), Drag::Stack, "in the stack zone: join");
+    assert_eq!(drag(false, 0.1, false, false, false), Drag::Swap, "lone window on a window: swap");
+    assert_eq!(drag(false, 0.9, false, false, false), Drag::Swap);
+    assert_eq!(drag(false, 0.1, true, false, false), Drag::Before, "grouped window pulled out: beside, left half");
+    assert_eq!(drag(false, 0.9, true, false, false), Drag::After);
+    assert_eq!(drag(false, 0.5, true, true, false), Drag::Swap, "onto a sibling peek: reorder within the group (N-018)");
+    assert_eq!(drag(false, 0.2, false, false, true), Drag::Before, "from another monitor: beside, never a swap");
+    assert_eq!(drag(false, 0.8, false, false, true), Drag::After);
+    assert_eq!(drag(true, 0.5, false, false, true), Drag::Stack, "the zone works across monitors too");
+    assert_eq!(drag(true, 0.5, true, true, false), Drag::Swap, "own group is never a stack target")
 }
 #[test]
 fn synthetic_contacts() {
@@ -192,8 +201,13 @@ fn group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape() {
     pair.insert(2, 1);
     pair.group(2, 1);
     let two = pair.rects(28);
-    assert_eq!((rect_of(&two, 2).y, rect_of(&two, 2).h), (0, 600 - 28), "active member of a pair: full height minus one peek");
-    assert_eq!((rect_of(&two, 1).y, rect_of(&two, 1).h), (600 - 28, 600 - 28), "the pair's next member is full size, starting at the peek line");
+    // N-010 (2026-11-22): a pair does not wrap. Grouping makes the dropped window (the second member)
+    // active, so the first peeks ABOVE it; it used to be drawn below, as if the deck looped round.
+    assert_eq!((rect_of(&two, 2).y, rect_of(&two, 2).h), (28, 600 - 28), "active member of a pair: full height minus one peek");
+    assert_eq!((rect_of(&two, 1).y + rect_of(&two, 1).h, rect_of(&two, 1).h), (28, 600 - 28), "the pair's other member is full size, ending at the peek line above");
+    pair.select(1);
+    let first = pair.rects(28);
+    assert_eq!((rect_of(&first, 1).y, rect_of(&first, 2).y), (0, 600 - 28), "first member active: the second peeks below");
     let three = group_of_three(area).rects(28);
     let active = rect_of(&three, 3);
     assert_eq!((active.y, active.h), (28, 600 - 56), "active member of three sits between two peeks");
@@ -728,12 +742,17 @@ fn mockup_spec_states_match_layout() {
 }
 
 #[test]
-#[ignore = "MOCKUP_DISAGREEMENT: owner decision pending (outer 20% / middle 60% vs code 25% / 50% / 25%)"]
-fn mockup_drop_zone_outer_20_middle_60_join() {
-    // Mockup spec: outer 20% beside (<0.20 Before, >0.80 After), middle 60% (0.20..=0.80) join stack.
-    // Current code in src/core.rs::drag uses 0.25 / 0.25..=0.75 / 0.75.
-    assert_eq!(drag(0.22, 0.0, 300.0, 400, 350, false), Drag::Stack);
-    assert_eq!(drag(0.78, 0.0, 300.0, 400, 350, false), Drag::Stack);
+fn drop_zone_is_a_small_centre_box_owner_decision_n012() {
+    // Owner decision (note N-012, 2026-11-22) supersedes the mockup's outer 20% / middle 60% bands: the stack
+    // zone is a small box in the middle of the window (stack_zone_px, at most a third either way) and every
+    // other point of a window swaps.
+    let r = Rect { x: 100, y: 50, w: 1200, h: 900 };
+    assert_eq!(stack_zone(r, 120), Rect { x: 640, y: 440, w: 120, h: 120 });
+    let small = Rect { x: 0, y: 0, w: 240, h: 150 };
+    assert_eq!(stack_zone(small, 120), Rect { x: 80, y: 50, w: 80, h: 50 }, "never more than a third");
+    let z = stack_zone(r, 120);
+    let area = (z.w * z.h) as f64 / (r.w * r.h) as f64;
+    assert!(area < 0.02, "the zone covers {:.1}% of the window, expected < 2%", area * 100.);
 }
 
 // ---- Section 3.4 & 9.7: Input replay and golden gesture fixture tests ----
@@ -850,4 +869,133 @@ fn unmaximizing_or_shrinking_clamps_offset_no_empty_space_on_right() {
         "invariants after shrink resize: {:?}",
         check_strip_invariants(&s, 28)
     );
+}
+
+// ---- 2026-11-22 Win+W notes N-010..N-024 ----
+
+fn pair(area: Rect) -> Strip {
+    let mut s = Strip::new(area);
+    s.insert(1, 1);
+    s.insert(2, 1);
+    s.group(2, 1);
+    s.select(1);
+    assert_eq!(s.columns[0].members, [1, 2]);
+    s
+}
+const LANDSCAPE: Rect = Rect { x: 0, y: 0, w: 2560, h: 1392 };
+const PORTRAIT: Rect = Rect { x: -1440, y: -1859, w: 1440, h: 2512 };
+
+#[test]
+fn n010_a_pair_does_not_loop_around() {
+    // "if there is no window on the top, do not loop around": a pair shows nothing above the active
+    // member, so rolling stops at both ends (landscape and portrait alike).
+    for area in [LANDSCAPE, PORTRAIT] {
+        let mut s = pair(area);
+        s.roll(-0.4);
+        assert_eq!((s.active(), s.columns[0].frac), (Some(1), 0.), "{area:?}: rolling back from the first member stays put");
+        s.roll(3.7);
+        assert_eq!((s.active(), s.columns[0].frac), (Some(2), 0.), "{area:?}: rolling forward stops at the last member");
+        s.roll(-0.3);
+        s.settle_roll();
+        assert_eq!(s.active(), Some(2), "{area:?}: a small roll back settles where it was");
+        s.roll(-0.7);
+        s.settle_roll();
+        assert_eq!(s.active(), Some(1), "{area:?}: past half way back settles on the first member");
+        assert!(check_strip_invariants(&s, 96).is_empty());
+    }
+    // Three or more still wrap: the previous member peeks above, so there is something to come back to.
+    let mut three = group_of_three(LANDSCAPE);
+    three.roll(-1.2);
+    assert_eq!(three.active(), Some(2));
+}
+
+#[test]
+fn n017_past_half_way_the_next_member_takes_over() {
+    // "in grouped, if scrolled above 50 %, scroll the next window in view and focus".
+    for area in [LANDSCAPE, PORTRAIT] {
+        let mut s = pair(area);
+        s.roll(0.55);
+        s.settle_roll();
+        assert_eq!(s.active(), Some(2), "{area:?}: 55% settles on the next member");
+        let mut s = pair(area);
+        s.roll(0.45);
+        s.settle_roll();
+        assert_eq!(s.active(), Some(1), "{area:?}: 45% settles back");
+        let mut g = group_of_three(area);
+        g.roll(0.6);
+        g.settle_roll();
+        assert_eq!(g.active(), Some(1), "{area:?}: three members, 60% forward");
+    }
+}
+
+#[test]
+fn a_member_sliding_out_stays_drawn_until_it_has_left() {
+    // It used to be hidden at half way (a pop while rolling).
+    let mut s = pair(LANDSCAPE);
+    s.roll(0.7);
+    assert!(s.columns[0].shown(0), "70% rolled: the outgoing member is still partly in the column");
+    assert!(s.columns[0].shown(1));
+    s.settle_roll();
+    let c = &s.columns[0];
+    assert_eq!((c.shown(0), c.shown(1)), (true, true));
+    // Settled on the second member of a pair, the first peeks ABOVE it (it used to wrap round below).
+    let rs = s.rects(96);
+    let (first, second) = (rect_of(&rs, 1), rect_of(&rs, 2));
+    assert_eq!(first.y + first.h, second.y, "first member ends where the active second one starts");
+    assert_eq!(second.y, 96, "peek strip above, active member fills the rest");
+    assert_eq!(second.y + second.h, LANDSCAPE.h);
+}
+
+#[test]
+fn n012_swap_exchanges_places_and_slots_keep_their_size() {
+    for area in [LANDSCAPE, PORTRAIT] {
+        let mut s = Strip::new(area);
+        for id in 1..=3 {
+            s.insert(id, 1)
+        }
+        let lengths: Vec<i32> = s.columns.iter().map(|c| c.length).collect();
+        s.swap(3, 1);
+        let order: Vec<WindowId> = s.columns.iter().map(|c| c.members[0]).collect();
+        assert_eq!(order, [3, 2, 1], "{area:?}");
+        assert_eq!(s.columns.iter().map(|c| c.length).collect::<Vec<_>>(), lengths, "{area:?}: slot sizes unchanged");
+        assert_eq!(s.active(), Some(3), "{area:?}: the dropped window has the focus");
+        assert!(check_strip_invariants(&s, 96).is_empty());
+    }
+}
+
+#[test]
+fn n018_swap_reorders_within_a_group() {
+    // "cannot 4 finger move within the group": dropping a member on its sibling's peek swaps them.
+    for area in [LANDSCAPE, PORTRAIT] {
+        let mut s = group_of_three(area);
+        s.select(3);
+        s.swap(3, 1);
+        assert_eq!(s.columns[0].members, [3, 2, 1], "{area:?}");
+        assert_eq!(s.active(), Some(3), "{area:?}");
+        assert_eq!(s.columns.len(), 1, "{area:?}: still one group");
+        assert!(check_strip_invariants(&s, 96).is_empty());
+    }
+}
+
+
+#[test]
+fn gesture_survives_fingers_lifting_one_by_one() {
+    // Trace 14:31:00.804: four fingers -> three at lift ended the drag and the remaining three started a
+    // scroll. The gesture now stays what it started as until fewer than three fingers remain.
+    let mut g = Gesture::default();
+    g.sample(&[(0., 0.); 4], 12., 100.);
+    assert_eq!(g.sample(&[(20., 0.); 4], 12., 100.), Swipe::DragStart);
+    assert_eq!(g.sample(&[(30., 0.); 4], 12., 100.), Swipe::DragMove(30., 0.));
+    // One finger lifts: its absence moves the centroid, which must not count as travel.
+    assert_eq!(g.sample(&[(80., 40.); 3], 12., 100.), Swipe::None);
+    assert_eq!(g.sample(&[(85., 40.); 3], 12., 100.), Swipe::DragMove(5., 0.));
+    assert_eq!(g.sample(&[(85., 40.); 2], 12., 100.), Swipe::DragEnd);
+    assert_eq!(g.sample(&[], 12., 100.), Swipe::None, "no scroll and no second drop after the lift");
+    // A fourth finger touching mid-scroll does not pick a window up.
+    let mut g = Gesture::default();
+    g.sample(&[(0., 0.); 3], 12., 100.);
+    assert_eq!(g.sample(&[(10., 0.); 3], 12., 100.), Swipe::Scroll(10.));
+    assert_eq!(g.sample(&[(50., 50.); 4], 12., 100.), Swipe::None);
+    assert_eq!(g.sample(&[(60., 50.); 4], 12., 100.), Swipe::Scroll(10.));
+    assert_eq!(g.sample(&[], 12., 100.), Swipe::ScrollEnd);
 }

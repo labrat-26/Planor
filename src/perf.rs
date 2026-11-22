@@ -149,10 +149,12 @@ pub enum SpanKind {
     InputContacts = 20,
     GestureToPlace = 21,
     StartupFirstPlace = 22,
+    /// GPU execution time of one overlay draw (D3D11 timestamp queries), recorded frames later.
+    GpuDraw = 23,
 }
 
 impl SpanKind {
-    pub const ALL: [SpanKind; 22] = [
+    pub const ALL: [SpanKind; 23] = [
         SpanKind::DaemonTick,
         SpanKind::DaemonLayout,
         SpanKind::DaemonEvent,
@@ -175,6 +177,7 @@ impl SpanKind {
         SpanKind::InputContacts,
         SpanKind::GestureToPlace,
         SpanKind::StartupFirstPlace,
+        SpanKind::GpuDraw,
     ];
 
     pub fn from_u8(v: u8) -> Self {
@@ -201,6 +204,7 @@ impl SpanKind {
             20 => SpanKind::InputContacts,
             21 => SpanKind::GestureToPlace,
             22 => SpanKind::StartupFirstPlace,
+            23 => SpanKind::GpuDraw,
             _ => SpanKind::Idle,
         }
     }
@@ -230,6 +234,7 @@ impl SpanKind {
             SpanKind::InputContacts => "input.contacts",
             SpanKind::GestureToPlace => "gesture.to_place",
             SpanKind::StartupFirstPlace => "startup.first_place",
+            SpanKind::GpuDraw => "gpu.draw",
         }
     }
 
@@ -255,6 +260,7 @@ impl SpanKind {
             SpanKind::Win32Place => "win32",
             SpanKind::HookMouse | SpanKind::HookKeyboard | SpanKind::InputContacts => "input",
             SpanKind::GestureToPlace | SpanKind::StartupFirstPlace => "e2e",
+            SpanKind::GpuDraw => "gpu",
         }
     }
 
@@ -264,6 +270,7 @@ impl SpanKind {
             SpanKind::GestureToPlace => 16_000,
             SpanKind::RenderScene => 30_000,
             SpanKind::StartupFirstPlace => 600_000,
+            SpanKind::GpuDraw => 8_000,
             _ => 100_000,
         }
     }
@@ -325,6 +332,7 @@ pub struct CounterSample {
     pub gdi_objects: u32,
     pub user_objects: u32,
     pub os_handles: u32,
+    pub gpu: crate::gpu::GpuSample,
 }
 
 #[derive(Clone)]
@@ -358,8 +366,8 @@ struct Store {
 }
 
 struct AggState {
-    buckets: [Vec<u64>; 23],
-    max_record: [Option<(i64, u64, u32, u64)>; 23],
+    buckets: [Vec<u64>; 24],
+    max_record: [Option<(i64, u64, u32, u64)>; 24],
     ring: VecDeque<SpanRecord>,
     markers: VecDeque<InstantMarker>,
     counters: VecDeque<CounterSample>,
@@ -370,7 +378,7 @@ impl Default for AggState {
     fn default() -> Self {
         Self {
             buckets: std::array::from_fn(|_| Vec::new()),
-            max_record: [None; 23],
+            max_record: [None; 24],
             ring: VecDeque::with_capacity(4096),
             markers: VecDeque::with_capacity(256),
             counters: VecDeque::with_capacity(COUNTER_CAP),
@@ -540,6 +548,13 @@ fn push_span(kind: SpanKind, start_qpc_us: i64, dur_us: u64, arg: u64) {
     }
 }
 
+/// Record a span measured elsewhere (GPU timestamps).
+pub fn record_span(kind: SpanKind, start_qpc_us: i64, dur_us: u64, arg: u64) {
+    if PERF_ENABLED.load(Ordering::Relaxed) {
+        push_span(kind, start_qpc_us, dur_us, arg);
+    }
+}
+
 pub fn record_duration_from(kind: SpanKind, start_qpc_us: i64, arg: u64) {
     if !PERF_ENABLED.load(Ordering::Relaxed) || start_qpc_us <= 0 {
         return;
@@ -613,6 +628,9 @@ pub fn sample_counters() {
     };
     let (user_ms, kernel_ms, ws_mb, priv_mb, gdi, user_objs, handles) = read_os_counters();
     let total_cpu_ms = user_ms + kernel_ms;
+    // GPU counters come from their own thread (PDH and DXGI can take hundreds of ms to set up, which
+    // must never delay the watchdog's stall checks); this only reads the latest sample.
+    let gpu = crate::gpu::latest();
     let Ok(mut agg) = store().agg.lock() else {
         return;
     };
@@ -636,6 +654,7 @@ pub fn sample_counters() {
         gdi_objects: gdi,
         user_objects: user_objs,
         os_handles: handles,
+        gpu,
     });
 }
 
@@ -719,6 +738,8 @@ pub struct ProcessProfile {
     pub gdi_objects: u32,
     pub user_objects: u32,
     pub os_handles: u32,
+    /// Latest GPU sample (engine utilisation, video memory, DWM composition rate).
+    pub gpu: Option<crate::gpu::GpuSample>,
 }
 
 #[derive(Serialize)]
@@ -974,6 +995,7 @@ pub fn build_report(frame_telemetry: Option<serde_json::Value>) -> PerfReport {
             gdi_objects: gdi,
             user_objects: user_objs,
             os_handles: handles,
+            gpu: counters.last().map(|c| c.gpu),
         },
         threads,
         spans,
@@ -1000,6 +1022,20 @@ pub fn format_summary(report: &PerfReport) -> String {
         report.process.user_objects,
         report.process.os_handles
     ));
+    if let Some(g) = report.process.gpu {
+        let f = |v: Option<f64>, d: usize| v.map(|v| format!("{v:.d$}")).unwrap_or_else(|| "n/a".into());
+        out.push(format!(
+            "GPU: engine {}% · VRAM local {} MB shared {} MB · DWM compose {} fps @ {} Hz (late {}, dropped {}, missed {})",
+            f(g.engine_pct, 1),
+            f(g.local_mb, 1),
+            f(g.shared_mb, 1),
+            f(g.dwm_compose_fps, 0),
+            f(g.dwm_refresh_hz, 0),
+            g.dwm_frames_late,
+            g.dwm_frames_dropped,
+            g.dwm_frames_missed
+        ));
+    }
     out.push(format!(
         "{:<22} {:>7} {:>8} {:>8} {:>8} {:>5}",
         "span", "count", "p50(ms)", "p99(ms)", "max(ms)", "slow"
@@ -1034,7 +1070,7 @@ pub fn reset() {
         for b in &mut agg.buckets {
             b.clear();
         }
-        agg.max_record = [None; 23];
+        agg.max_record = [None; 24];
         agg.ring.clear();
         agg.markers.clear();
         agg.counters.clear();
@@ -1120,6 +1156,9 @@ pub fn export_chrome_trace(seconds: Option<u64>) -> serde_json::Value {
                     "gdi_objects": c.gdi_objects,
                     "user_objects": c.user_objects,
                     "os_handles": c.os_handles,
+                    "gpu_engine_pct": c.gpu.engine_pct,
+                    "gpu_local_mb": c.gpu.local_mb,
+                    "dwm_compose_fps": c.gpu.dwm_compose_fps,
                 }
             }));
         }

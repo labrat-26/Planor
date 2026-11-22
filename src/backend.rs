@@ -405,6 +405,7 @@ pub(crate) mod sim {
         pub epoch: u64,
         pub tiles_len: usize,
         pub holes: Vec<Rect>,
+        pub zones: Vec<render::Zone>,
     }
 
     pub(crate) struct SimDesktop {
@@ -518,6 +519,7 @@ pub(crate) mod sim {
                 epoch: scene.epoch,
                 tiles_len: scene.tiles.len(),
                 holes: scene.holes.clone(),
+                zones: scene.zones.clone(),
             });
             rejected
         }

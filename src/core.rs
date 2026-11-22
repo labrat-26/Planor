@@ -38,6 +38,9 @@ impl Column {
     pub fn relative(&self, j: usize) -> f64 {
         let n = self.members.len() as f64;
         let mut r = j as f64 - (self.active as f64 + self.frac);
+        if !self.wraps() {
+            return r;
+        }
         while r > n / 2. {
             r -= n
         }
@@ -47,11 +50,21 @@ impl Column {
         r
     }
     /// True for the active member and its visible neighbours (next; also previous with 3+ members); the
-    /// rest are hidden behind the next peek.
+    /// rest are hidden behind the next peek. While the deck rolls, a member sliding out over the top stays
+    /// drawn until it has fully left the column (it used to vanish at half way, a visible pop).
     pub fn shown(&self, j: usize) -> bool {
         let n = self.members.len();
         let r = self.relative(j);
-        r.abs() < 0.5 || (0.5..=1.5).contains(&r) || (n >= 3 && (-1.5..=-0.5).contains(&r))
+        if n == 2 {
+            // A pair is a two-item list: the other member always peeks from the side it is on.
+            return true;
+        }
+        (r > -1. && r <= 1.5) || (n >= 3 && (-1.5..=-0.5).contains(&r))
+    }
+    /// The deck wraps around only when something is shown above the active member (3+ members show the
+    /// previous one there). A pair shows nothing above, so rolling stops at either end instead of looping.
+    pub fn wraps(&self) -> bool {
+        self.members.len() >= 3
     }
 }
 #[derive(Clone, Debug)]
@@ -407,13 +420,21 @@ impl Strip {
             // the column and clipped away. Exactly like the windows peeking in from the sides of a strip:
             // nothing is squashed, and no member is ever resized when the deck rolls, it only slides.
             // "Depth" is the column height in a landscape strip and its width in a portrait one.
+            // A pair does not wrap: its other member peeks below while the first is active and above
+            // while the second is, sliding smoothly between the two as the deck rolls.
             let both = n >= 3;
             let peek = if n > 1 { stack_peek.clamp(0, depth / if both { 4 } else { 2 }) } else { 0 };
-            let before = if both { peek } else { 0 };
-            let size = depth - before - peek;
+            let size = depth - peek - if both { peek } else { 0 };
+            let before = if both {
+                peek as f64
+            } else if n == 2 {
+                (c.active as f64 + c.frac).clamp(0., 1.) * peek as f64
+            } else {
+                0.
+            };
             for (j, &id) in c.members.iter().enumerate() {
                 let r = if n > 1 { c.relative(j) } else { 0. };
-                let cross = before as f64 + r * size as f64;
+                let cross = before + r * size as f64;
                 out.push((id, self.area.project(start, c.length, cross.round() as i32, size)));
             }
             start += c.length + self.gap
@@ -431,31 +452,39 @@ pub fn motion(t: f64, spring: bool) -> f64 {
         1. - (1. - t).powi(3)
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Drag {
     None,
+    /// Pull a grouped window out and put it before / after the target (by which half the cursor is in).
     Before,
     After,
+    /// Join the target's group (the cursor is in the small zone in the middle of the target).
     Stack,
+    /// Exchange places with the target.
+    Swap,
 }
-pub fn drag(
-    fraction: f64,
-    speed: f64,
-    threshold: f64,
-    dwell: u64,
-    hover: u64,
-    freeze: bool,
-) -> Drag {
-    if (0.25..=0.75).contains(&fraction) && dwell >= hover {
+/// The stack zone: a small box in the middle of a window, `side` px square at most and never more than a
+/// third of the window either way. Shown filled while a window is being dragged.
+pub fn stack_zone(r: Rect, side: i32) -> Rect {
+    let w = side.min(r.w / 3).max(1);
+    let h = side.min(r.h / 3).max(1);
+    Rect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h }
+}
+/// What a drop does. Purely positional (no speed or dwell), so it never flickers:
+/// in the stack zone it groups; elsewhere over a window on the same monitor a lone window swaps places
+/// with it, while a window dragged out of a group swaps with a sibling or is pulled out beside any other
+/// window. Arriving from another monitor (`crossing`) it goes beside the target, never swaps: a monitor
+/// filled by one window must still be able to take another.
+/// `fraction` is the cursor position along the strip axis inside the target (0..1).
+pub fn drag(in_zone: bool, fraction: f64, grouped: bool, sibling: bool, crossing: bool) -> Drag {
+    if in_zone && !sibling {
         Drag::Stack
-    } else if freeze || speed.abs() > threshold {
-        Drag::None
-    } else if fraction < 0.25 {
+    } else if !crossing && (!grouped || sibling) {
+        Drag::Swap
+    } else if fraction < 0.5 {
         Drag::Before
-    } else if fraction > 0.75 {
-        Drag::After
     } else {
-        Drag::None
+        Drag::After
     }
 }
 /// Multi-finger swipe recogniser. Three or four fingers moving together lock to one axis (after the
@@ -506,18 +535,22 @@ impl Gesture {
             *self = Self::default();
             return end;
         }
-        if self.fingers != n {
-            // Finger count changed mid-gesture: start over with the new count.
-            let end = ended(self);
-            *self = Self { fingers: n, ..Self::default() };
-            if end != Swipe::None {
-                return end;
-            }
-        }
         let pos = (
             points.iter().map(|p| p.0).sum::<f64>() / n as f64,
             points.iter().map(|p| p.1).sum::<f64>() / n as f64,
         );
+        if self.fingers != n {
+            if self.dragging || self.scrolling {
+                // The gesture is locked once it started: fingers rarely lift together, and the first one
+                // up used to end a drag and start a three-finger scroll with the rest (a jerk at every
+                // drop). Keep the gesture and re-base the centroid so it does not jump.
+                self.fingers = n;
+                self.last = pos;
+                return Swipe::None;
+            }
+            // Still inside the dead zone: start over with the new count.
+            *self = Self { fingers: n, ..Self::default() };
+        }
         let Some(origin) = self.origin else {
             self.origin = Some(pos);
             self.last = pos;
@@ -525,7 +558,7 @@ impl Gesture {
         };
         let dx = pos.0 - origin.0;
         let dy = pos.1 - origin.1;
-        if n == 4 {
+        if (n == 4 && !self.scrolling) || self.dragging {
             if !self.dragging {
                 if dx.hypot(dy) < deadzone {
                     return Swipe::None;
@@ -651,6 +684,16 @@ impl Strip {
         if n < 2 {
             return false;
         }
+        if !c.wraps() {
+            // No window above: clamp to the ends instead of looping round.
+            let p = (c.active as f64 + c.frac + delta).clamp(0., (n - 1) as f64);
+            c.active = p.floor() as usize;
+            c.frac = p - c.active as f64;
+            if c.active as isize == n - 1 {
+                c.frac = 0.
+            }
+            return true;
+        }
         c.frac += delta;
         while c.frac >= 1. {
             c.frac -= 1.;
@@ -667,11 +710,31 @@ impl Strip {
         for c in &mut self.columns {
             if c.frac != 0. {
                 let n = c.members.len() as isize;
+                // Past half way the next member is the one mostly in view: it becomes active.
                 let step = c.frac.round() as isize;
-                c.active = (c.active as isize + step).rem_euclid(n.max(1)) as usize;
+                c.active = if c.wraps() {
+                    (c.active as isize + step).rem_euclid(n.max(1)) as usize
+                } else {
+                    (c.active as isize + step).clamp(0, n - 1) as usize
+                };
                 c.frac = 0.;
             }
         }
+    }
+    /// Exchange two windows' places (columns or group slots, the slots keep their sizes). Used when a
+    /// window is dropped onto another one. The moved window becomes the focus.
+    pub fn swap(&mut self, a: WindowId, b: WindowId) {
+        let (Some((i, j)), Some((k, l))) = (self.locate(a), self.locate(b)) else {
+            return;
+        };
+        if a == b {
+            return;
+        }
+        self.columns[i].members[j] = b;
+        self.columns[k].members[l] = a;
+        self.focus = k;
+        self.columns[k].active = l;
+        self.scroll(0)
     }
     /// No empty space on the monitor: when the columns do not reach the end of the viewport, the last
     /// one takes the rest. Not used while a column is fullscreen.

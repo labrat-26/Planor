@@ -1,6 +1,7 @@
 mod backend;
 mod daemon;
 mod diag;
+mod gpu;
 mod input;
 mod note;
 mod perf;

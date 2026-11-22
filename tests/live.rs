@@ -440,7 +440,13 @@ fn perf_spans_and_budgets() {
     assert!(v["process"]["working_set_mb"].as_f64().unwrap_or(0.0) > 0.0);
     assert!(v["process"]["os_handles"].as_u64().unwrap_or(0) > 0);
     let spans = v["spans"].as_array().expect("spans array");
-    for required in ["daemon.tick", "daemon.layout", "render.scene", "win32.place"] {
+    // GPU profiling: overlay draws timed on the GPU, and the DWM/GPU counters sampled.
+    let gpu = &v["process"]["gpu"];
+    assert!(
+        gpu["dwm_refresh_hz"].as_f64().unwrap_or(0.0) > 0.0,
+        "perf report has no DWM refresh rate in process.gpu: {gpu}"
+    );
+    for required in ["daemon.tick", "daemon.layout", "render.scene", "win32.place", "gpu.draw"] {
         assert!(
             spans.iter().any(|s| s["name"].as_str() == Some(required)),
             "missing expected span {required} in perf report"

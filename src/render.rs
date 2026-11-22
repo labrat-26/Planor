@@ -49,6 +49,15 @@ pub struct Scene {
     pub radius: f32,
     /// Rectangles of unmanaged app windows (desktop coordinates): cut out of the overlay.
     pub holes: Vec<Rect>,
+    /// Filled boxes drawn under the borders: the stack drop zones while a window is carried.
+    pub zones: Vec<Zone>,
+}
+#[derive(Clone, Debug)]
+pub struct Zone {
+    pub rect: Rect,
+    pub monitor: String,
+    pub color: u32,
+    pub alpha: f32,
 }
 pub enum Message {
     Scene(Scene),
@@ -167,6 +176,7 @@ struct Surface {
     surface: IDCompositionSurface,
     context: ID2D1DeviceContext,
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
+    timer: crate::gpu::GpuTimer,
 }
 impl Surface {
     fn new(h: HWND, b: Rect) -> Result<Self> {
@@ -209,18 +219,21 @@ impl Surface {
                 surface,
                 context,
                 brushes: HashMap::new(),
+                timer: Default::default(),
             })
         }
     }
     fn draw(
         &mut self,
         pictures: &[(Rect, ID2D1Bitmap1)],
+        fills: &[(Rect, u32, f32)],
         lines: &[(Rect, u32)],
         width: f32,
         radius: f32,
     ) -> Result<()> {
         unsafe {
             let mut off = F::POINT::default();
+            let mark = self.timer.begin(&self.gpu);
             let dx: IDXGISurface = self.surface.BeginDraw(None, &mut off)?;
             let result = (|| -> Result<()> {
                 let props = D2D1_BITMAP_PROPERTIES1 {
@@ -256,7 +269,8 @@ impl Surface {
                         None,
                     )
                 }
-                for &(r, c) in lines {
+                let strokes = fills.iter().map(|&(r, c, a)| (r, c, a, true)).chain(lines.iter().map(|&(r, c)| (r, c, 1., false)));
+                for (r, c, alpha, filled) in strokes {
                     let brush = match self.brushes.entry(c) {
                         std::collections::hash_map::Entry::Occupied(e) => e.into_mut(),
                         std::collections::hash_map::Entry::Vacant(e) => {
@@ -274,6 +288,18 @@ impl Surface {
                     };
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
+                    brush.SetOpacity(alpha);
+                    if filled {
+                        rt.FillRoundedRectangle(
+                            &D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: x, top: y, right: x + r.w as f32, bottom: y + r.h as f32 },
+                                radiusX: radius,
+                                radiusY: radius,
+                            },
+                            &*brush,
+                        );
+                        continue;
+                    }
                     let d = width / 2.;
                     rt.DrawRoundedRectangle(
                         &D2D1_ROUNDED_RECT {
@@ -297,6 +323,7 @@ impl Surface {
                 Ok(())
             })();
             self.surface.EndDraw()?;
+            self.timer.end(&self.gpu, mark);
             result?;
             self.dev.Commit()?;
             Ok(())
@@ -403,8 +430,18 @@ impl Host {
             if DwmQueryThumbnailSourceSize(t, &mut size) < 0 {
                 return false;
             }
-            let x = clip.x - r.x;
-            let y = clip.y - r.y;
+            // One source pixel per screen pixel, never scaled: the thumbnail source is the whole window
+            // (with its invisible resize borders), and a parked group member is often not exactly the tile
+            // size yet. Scaling `clip` by source/tile size stretched peeks (title bars drawn elongated).
+            // When the source is smaller than the clip, the destination shrinks with it instead.
+            let (ox, oy) = win32::insets(id).unwrap_or(((size.cx - r.w).max(0) / 2, 0));
+            let sx = ox + clip.x - r.x;
+            let sy = oy + clip.y - r.y;
+            let sw = clip.w.min(size.cx - sx).max(0);
+            let sh = clip.h.min(size.cy - sy).max(0);
+            if sw == 0 || sh == 0 {
+                return false;
+            }
             let props = DWM_THUMBNAIL_PROPERTIES {
                 dwFlags: DWM_TNP_RECTDESTINATION
                     | DWM_TNP_RECTSOURCE
@@ -413,14 +450,14 @@ impl Host {
                 rcDestination: RECT {
                     left: clip.x - self.b.x,
                     top: clip.y - self.b.y,
-                    right: clip.x + clip.w - self.b.x,
-                    bottom: clip.y + clip.h - self.b.y,
+                    right: clip.x + sw - self.b.x,
+                    bottom: clip.y + sh - self.b.y,
                 },
                 rcSource: RECT {
-                    left: x * size.cx / r.w,
-                    top: y * size.cy / r.h,
-                    right: (x + clip.w) * size.cx / r.w,
-                    bottom: (y + clip.h) * size.cy / r.h,
+                    left: sx,
+                    top: sy,
+                    right: sx + sw,
+                    bottom: sy + sh,
                 },
                 opacity: 255,
                 fVisible: 1,
@@ -778,11 +815,15 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             }
                         }
                         if let Some(color) = tile.color {
+                            // The border follows what is drawn: during motion that is the stand-in (`rs`,
+                            // the window's real size gliding), not the in-between rectangle, which grew or
+                            // shrank ahead of the picture ("border grows faster than the animation").
+                            let b = if proxy { rs } else { r };
                             lines.push((
                                 Rect {
-                                    x: r.x - host.b.x,
-                                    y: r.y - host.b.y,
-                                    ..r
+                                    x: b.x - host.b.x,
+                                    y: b.y - host.b.y,
+                                    ..b
                                 },
                                 color,
                             ))
@@ -820,7 +861,16 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 if !full {
                     hits.append(&mut host_hits)
                 }
-                if full || (keep.is_empty() && lines.is_empty()) {
+                let fills: Vec<(Rect, u32, f32)> = s
+                    .zones
+                    .iter()
+                    .filter(|z| &z.monitor == name)
+                    .filter_map(|z| {
+                        intersect(z.rect, host.b)
+                            .map(|r| (Rect { x: r.x - host.b.x, y: r.y - host.b.y, ..r }, z.color, z.alpha))
+                    })
+                    .collect();
+                if full || (keep.is_empty() && lines.is_empty() && fills.is_empty()) {
                     ShowWindow(host.h, SW_HIDE);
                 } else {
                     ShowWindow(host.h, SW_SHOWNOACTIVATE);
@@ -855,7 +905,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         let t = Instant::now();
                         let drawn = {
                             let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
-                            surface.draw(&backing, &lines, s.width * dpi, s.radius * dpi)
+                            surface.draw(&backing, &fills, &lines, s.width * dpi, s.radius * dpi)
                         };
                         if t.elapsed().as_millis() >= 100 {
                             diag::trace(format!("SLOW render draw: {} ms", t.elapsed().as_millis()))

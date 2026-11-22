@@ -2,6 +2,30 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.4.0] - 2026-11-22
+
+Win+W notes N-010..N-024, each checked on landscape and portrait monitors, plus GPU profiling.
+
+### Changed
+- **Same controls on every monitor, turned with it (N-014, N-011)**: three fingers along the strip scroll it 1:1 (sideways on landscape, up/down on portrait); across the strip they roll the focused group, or with no group hop to the monitor that way, once per gesture. On portrait this used to hop focus one window at a time and a sideways swipe could never go back right.
+- **Drag and drop (N-012, N-015, N-016, N-018, N-004)**: nothing dodges any more. While a window is carried, every window on the monitor under the cursor shows a small filled stack zone (`layout.stack_zone_px = 120`, at most a third of the window); the zones move with the cursor to another monitor. Drop in a zone: group. Drop elsewhere on a window of the same monitor: the two swap places (onto a sibling peek: reorder within the group). A grouped window dropped on another window goes beside it; from another monitor a drop goes beside, never swaps. Modes are positional (no speed or dwell). `stack_hover_ms`, `stack_center_px` and `animation.drag_slow_velocity_px_s` are gone; holding `drag_stack_modifier` makes the drop do nothing.
+- **Groups (N-010, N-017)**: a pair no longer loops round; its other member peeks from the side it is on and glides between them. Past 50 % the next member settles in and gets focus; a member rolling out no longer vanishes at half way.
+
+### Added
+- **Win + wheel (N-023)**: scrolls the strip under the cursor along its axis; Win + Shift + wheel rolls the focused group one member per notch (`mouse.win_wheel_step_px = 240`). Start menu is suppressed like Win+W.
+- **GPU profiling (`src/gpu.rs`)**: `gpu.draw` span from D3D11 timestamp queries around each overlay draw (read back without stalls); a `Planor.Gpu` thread samples this process's GPU engine utilisation (PDH), dedicated/shared video memory (DXGI) and DWM composition rate vs refresh rate with late/dropped/missed frames. In `planor perf` (`process.gpu`, summary line), the Chrome trace counters and `digest.ps1 -Perf`.
+
+### Fixed
+- **Gesture lock**: fingers lifting one by one no longer end a four-finger drag and start a three-finger scroll (the jerk at every drop); a fourth finger touching mid-scroll no longer picks a window up.
+- **New windows that move themselves (N-020)**: put back in their slot during their first 2.5 s (at most 6 times).
+- **Momentum (N-013, not verified live)**: stepped every 8 ms on a frame-rate timer and placed directly, instead of a 70 ms ease restarted every 32 ms.
+- **Render (N-022, N-024, not verified live)**: during motion the border follows the gliding stand-in; peek thumbnails map one source pixel to one screen pixel (title bars were stretched).
+
+### Tests
+- `tests/core.rs`: 7 new (pair no-wrap, 50 % settle, sliding member drawn, swap, group reorder, drop decision, gesture lock); the drop-zone mockup disagreement became a passing owner-decision test. One stale assertion updated: `group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape` expected the pair's first member below the second (the loop-around N-010 removes).
+- `src/sim_tests.rs`: 7 new, every one on landscape and portrait (scroll axis, monitor hop, Win+wheel, swap and zone, group reorder, cross-monitor drop, newborn window).
+- `tests/live.rs::perf_spans_and_budgets` also requires `gpu.draw` and a DWM refresh rate.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added

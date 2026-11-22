@@ -58,7 +58,7 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 
 - `planor state --json`: dump live monitors, strips, active/parked tiles, expected rects, and config version.
 - `planor perf [--json | --trace <file> | --bundle <dir> | --reset]`: QPC span latency percentiles (p50/p95/p99/max),
-  CPU/RAM/GDI/USER/handles, Chrome/Perfetto JSON traces, and budgets (`startup <600ms`, `render.scene <16ms`,
+  CPU/RAM/GDI/USER/handles, GPU (`gpu.draw` GPU time per overlay draw, engine %, VRAM, DWM compose fps vs refresh Hz), Chrome/Perfetto JSON traces, and budgets (`startup <600ms`, `render.scene <16ms`,
   `gesture_to_place <16ms`, `hook <5ms`). Watchdog logs `STALL <thread> <ms>` and saves `%LOCALAPPDATA%\planor\stalls\`.
 - Trace lines: `EXPECT`, `PLACE`, `SCENE`, `FG`, `SLOW *`, `STALL *`, `INVARIANT *`, `PAD`.
 - Rolling ring capture: `planor-rec ring [--seconds 10 --fps 30 --source dxgi|synthetic]`, `planor-rec ring-status`,

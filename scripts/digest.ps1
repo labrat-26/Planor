@@ -39,6 +39,12 @@ if ($Perf) {
   $Max = [Math]::Min($Max, 20)
   Add-Line ("perf: $perfPath (pid=$($p.process.pid) uptime=$([Math]::Round($p.uptime_ms / 1000.0, 1))s stalls=$($p.stalls))")
   Add-Line ("os: cpu={0:N1}% ws={1:N1}MB peak={2:N1}MB priv={3:N1}MB gdi={4} user={5} handles={6}" -f $p.process.cpu_avg_pct, $p.process.working_set_mb, $p.process.peak_working_set_mb, $p.process.private_mb, $p.process.gdi_objects, $p.process.user_objects, $p.process.os_handles)
+  $g = $p.process.gpu
+  if ($g) {
+    $gd = @($p.spans | Where-Object { $_.name -eq "gpu.draw" }) | Select-Object -First 1
+    $gdText = if ($gd) { "gpu.draw n={0} p50={1:N3}ms p99={2:N3}ms" -f $gd.count, ($gd.p50_us / 1000.0), ($gd.p99_us / 1000.0) } else { "gpu.draw n=0" }
+    Add-Line ("gpu: engine={0}% vram_local={1}MB shared={2}MB dwm={3}fps@{4}Hz late={5} dropped={6} missed={7} {8}" -f $g.engine_pct, $g.local_mb, $g.shared_mb, $g.dwm_compose_fps, $g.dwm_refresh_hz, $g.dwm_frames_late, $g.dwm_frames_dropped, $g.dwm_frames_missed, $gdText)
+  }
   $b = $p.budgets
   Add-Line ("budgets all_pass=$($b.all_pass): startup=$($b.startup_first_place_ms)/$($b.startup_budget_ms)ms(ok=$($b.startup_ok)) render_p99=$($b.render_scene_warm_p99_ms)/$($b.render_scene_budget_ms)ms(ok=$($b.render_scene_ok)) gesture_p99=$($b.gesture_to_place_p99_ms)/$($b.gesture_budget_ms)ms(ok=$($b.gesture_ok)) hook_max=$($b.hook_callbacks_max_ms)/$($b.hook_budget_ms)ms(ok=$($b.hook_ok))")
   foreach ($s in ($p.spans | Sort-Object p99_us -Descending | Select-Object -First 8)) {

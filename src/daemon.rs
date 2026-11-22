@@ -197,6 +197,11 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
     pub inertia: Option<(bool, f64, Instant)>,
     pub v_travel: f64,
+    /// A cross-axis swipe already hopped to another monitor: the rest of that gesture is ignored.
+    pub hopped: bool,
+    /// Newly managed windows and how many times they were put back after moving themselves (apps restore
+    /// their own saved position just after they appear).
+    pub born: HashMap<isize, (Instant, u8)>,
     pub gesture: Gesture,
     pub seq: u64,
     pub input: Option<Instant>,
@@ -253,6 +258,8 @@ impl<B: WindowBackend> Engine<B> {
             scroll_samples: Default::default(),
             inertia: None,
             v_travel: 0.,
+        hopped: false,
+        born: HashMap::new(),
             gesture: Default::default(),
             seq: 0,
             input: None,
@@ -349,7 +356,33 @@ impl<B: WindowBackend> Engine<B> {
         s.split = self.cfg["layout"]["first_pair_split"].as_bool().unwrap();
         s.share = self.cfg["layout"]["default_tile_share"].as_float().unwrap();
         s.insert(id, self.backend.minimum(id, area.horizontal()));
+        self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
+        self.born.insert(id, (Instant::now(), 0));
         self.reveal()
+    }
+    /// A window that just appeared and then moved itself (apps restore their saved position after showing,
+    /// "new window struggling to keep the position"): put it back in its slot at once. Only for the first
+    /// 2.5 s and at most 6 times, so an app that insists cannot start a tug of war.
+    fn hold_newborn(&mut self, id: isize, r: Rect) {
+        let Some((t, n)) = self.born.get_mut(&id) else { return };
+        if t.elapsed() > Duration::from_millis(2500) || *n >= 6 {
+            self.born.remove(&id);
+            return;
+        }
+        if self.drag.is_some() || self.pad.is_some() || self.pad_scrolling {
+            return;
+        }
+        let Some(&(_, want)) = self.placed.get(&id) else { return };
+        let park = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let off = |a: i32, b: i32| (a - b).abs() > 2;
+        if r.x != park && (off(r.x, want.x) || off(r.y, want.y) || off(r.w, want.w) || off(r.h, want.h)) {
+            *n += 1;
+            if self.diag.enabled {
+                diag::trace(format!("NEWBORN {id} moved itself to {r:?}, back to {want:?} (#{n})"));
+            }
+            self.instant = true;
+            self.dirty = true;
+        }
     }
     pub(crate) fn command(
         &mut self,
@@ -751,7 +784,8 @@ impl<B: WindowBackend> Engine<B> {
         if self.pad.as_ref().is_some_and(|p| p.seen.elapsed() > Duration::from_millis(800)) {
             self.pad_end()
         }
-        if self.inertia.is_some() {
+        // Momentum normally runs on `fast_tick`; this keeps it going if the fast timer is not wired (tests).
+        if self.inertia.is_some_and(|(_, _, last)| last.elapsed() >= Duration::from_millis(30)) {
             self.pad_inertia()
         }
         if self.settle.is_some_and(|t| Instant::now() >= t) {
@@ -761,6 +795,19 @@ impl<B: WindowBackend> Engine<B> {
             self.drag_update()
         }
         Ok(())
+    }
+    /// True while the strip moves by itself and should be stepped at frame rate.
+    pub(crate) fn wants_fast_tick(&self) -> bool {
+        self.inertia.is_some()
+    }
+    /// One frame-rate step (about 8 ms): momentum after a swipe.
+    pub(crate) fn fast_tick(&mut self) {
+        if self.locked {
+            return;
+        }
+        if self.inertia.is_some() {
+            self.pad_inertia()
+        }
     }
     fn refresh(&mut self) {
         if self.blocked() {
@@ -976,16 +1023,23 @@ impl<B: WindowBackend> Engine<B> {
                 None
             }
         };
-        let mut preview = self.strips.clone();
+        // While a window is carried nothing dodges out of its way (that reflow was erratic: too eager or not
+        // at all). Instead every window on the monitor under the cursor shows its stack zone, filled; the
+        // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
+        let mut zones = vec![];
         if let Some(d) = &self.drag {
-            if let (Some(k), Some(target)) = (&d.destination, d.target) {
-                if k == &d.key && matches!(d.mode, planor::Drag::Before | planor::Drag::After) {
-                    if let Some(s) = preview.get_mut(k) {
-                        s.reorder(d.id, target, d.mode == planor::Drag::After)
+            if let (Some(k), Some(c)) = (&d.destination, color("drop_target_color")) {
+                if let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop) {
+                    let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
+                    let side = self.cfg["layout"]["stack_zone_px"].as_integer().unwrap_or(120) as i32;
+                    for (id, _, z) in drop_zones(s, peek, side, d.id) {
+                        let hot = d.target == Some(id) && d.mode == planor::Drag::Stack;
+                        zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot { 0.85 } else { 0.35 } });
                     }
                 }
             }
         }
+        let preview = std::mem::take(&mut self.strips);
         for ((desk, name), strip) in &preview {
             if Some(*desk) != self.desktop {
                 continue;
@@ -1012,11 +1066,10 @@ impl<B: WindowBackend> Engine<B> {
                     }
                     let c = if fullscreen {
                         None
-                    } else if self
-                        .drag
-                        .as_ref()
-                        .is_some_and(|d| d.target == Some(id) && d.mode == planor::Drag::Stack)
-                    {
+                    } else if self.drag.as_ref().is_some_and(|d| {
+                        d.target == Some(id) && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
+                    }) {
+                        // The window a drop would swap with (or pull out beside).
                         color("drop_target_color")
                     } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
@@ -1055,6 +1108,7 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
+        self.strips = preview;
         for &id in &self.pinned {
             if let (Some(rect), Some(saved)) = (self.backend.frame(id), self.journal.entries.get(&id)) {
                 if let Some((name, _, _)) = self.displays.iter().find(|(_, _, b)| {
@@ -1138,6 +1192,7 @@ impl<B: WindowBackend> Engine<B> {
                 .as_integer()
                 .unwrap() as f32,
             holes: holes.clone(),
+            zones,
         }))?;
         if self.diag.enabled {
             diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, holes.len()));
@@ -1309,6 +1364,7 @@ impl<B: WindowBackend> Engine<B> {
             self.scroll_frac = 0.;
             self.inertia = None;
             self.v_travel = 0.;
+            self.hopped = false;
             self.scroll_samples.clear();
             // Resuming within the settle delay keeps the focus the scroll already chose.
             if self.settle.is_none() {
@@ -1333,18 +1389,31 @@ impl<B: WindowBackend> Engine<B> {
         let gain = self.cfg["touchpad"]["swipe_scroll_gain"].as_float().unwrap_or(1.);
         let natural = self.cfg["touchpad"]["swipe_natural_direction"].as_bool() == Some(true);
         let signed = if natural { -d } else { d } * gain;
+        if self.hopped {
+            return;
+        }
         let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) else {
             return;
         };
-        if vertical {
+        // The same controls on every monitor, turned with it: fingers along the strip scroll it (sideways
+        // on a landscape monitor, up and down on a portrait one); fingers across it roll the group.
+        let along = vertical != s.area.horizontal();
+        if !along {
             let depth = if s.area.horizontal() { s.area.h } else { s.area.w } as f64;
             if !s.roll(signed / (depth * 0.5)) {
-                // No group here: a long vertical swipe hops to the monitor above or below instead.
+                // No group here: a long swipe across the strip hops to the monitor that way instead
+                // (up/down from a landscape monitor, left/right from a portrait one), once per gesture.
                 self.v_travel += d;
                 if self.v_travel.abs() >= 90. {
-                    let down = (self.v_travel > 0.) != natural;
+                    let forward = (self.v_travel > 0.) != natural;
                     self.v_travel = 0.;
-                    self.keypress(if down { "focus_down" } else { "focus_up" });
+                    self.hopped = true;
+                    self.keypress(match (vertical, forward) {
+                        (true, true) => "focus_down",
+                        (true, false) => "focus_up",
+                        (false, true) => "focus_right",
+                        (false, false) => "focus_left",
+                    });
                 }
                 return;
             }
@@ -1355,13 +1424,11 @@ impl<B: WindowBackend> Engine<B> {
             s.scroll(whole as i32);
             s.focus_nearest_center();
         }
-        // Under the fingers the strip follows with no easing at all (one to one); the momentum after the
-        // lift is eased a little because it only updates 30 times a second.
-        if live {
-            self.instant = true;
-        } else {
-            self.quick = true;
-        }
+        // Under the fingers the strip follows with no easing at all (one to one). The momentum after the
+        // lift is stepped at frame rate (see `fast_tick`), so it is placed directly too: re-targeting a
+        // 70 ms ease every step restarted the curve each time, the stutter in "scroll is not smooth".
+        let _ = live;
+        self.instant = true;
         if self.diag.enabled {
             let frac = s.columns.get(s.focus).map(|c| c.frac).unwrap_or(0.0);
             diag::trace(format!(
@@ -1373,6 +1440,42 @@ impl<B: WindowBackend> Engine<B> {
         }
         self.action = "scroll";
         self.dirty = true
+    }
+    /// Win + mouse wheel: scroll the strip of the monitor under the cursor along its own axis (sideways on
+    /// a landscape monitor, up and down on a portrait one); wheel down / tilt right moves forward. With
+    /// Shift (or on a portrait monitor, the tilt wheel) it rolls the focused group instead. Focus follows
+    /// the window nearest the centre and settles shortly after the wheel stops, like a touchpad scroll.
+    fn wheel(&mut self, delta: i32, tilt: bool, shift: bool, at: (i32, i32)) {
+        if self.blocked() || self.drag.is_some() || self.pad.is_some() {
+            return;
+        }
+        let Some(name) = self.displays.iter().find(|m| contains(m.2, at)).map(|m| m.0.clone()) else {
+            return;
+        };
+        if self.desktop.is_some_and(|d| self.strips.contains_key(&(d, name.clone()))) {
+            self.active = name;
+        }
+        let step = self.cfg["mouse"]["win_wheel_step_px"].as_integer().unwrap_or(240) as f64;
+        // Wheel down is a negative delta; the tilt wheel is positive to the right.
+        let notches = if tilt { delta } else { -delta } as f64 / 120.;
+        let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) else { return };
+        let roll = shift || (tilt && !s.area.horizontal());
+        if roll {
+            // One member per notch: a wheel has no lift to settle on, so it never leaves the deck half rolled.
+            if !s.roll(notches.signum() * notches.abs().round().max(1.)) {
+                return;
+            }
+        } else {
+            s.scroll((notches * step).round() as i32);
+            s.focus_nearest_center();
+        }
+        if self.diag.enabled {
+            diag::trace(format!("WHEEL delta={delta} tilt={tilt} shift={shift} offset={} focus={}", s.offset, s.focus));
+        }
+        self.action = "scroll";
+        self.quick = true;
+        self.dirty = true;
+        self.settle = Some(Instant::now() + Duration::from_millis(260));
     }
     fn pad_scroll_end(&mut self) {
         if !std::mem::take(&mut self.pad_scrolling) {
@@ -1516,6 +1619,8 @@ impl<B: WindowBackend> Engine<B> {
                 (p.cursor.0 - p.grab.0).round() as i32,
                 (p.cursor.1 - p.grab.1).round() as i32,
             );
+            // Targets and zones follow the fingers at this rate, not only on the 32 ms tick.
+            self.drag_update();
         }
     }
     fn pad_end(&mut self) {
@@ -1615,23 +1720,26 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
+        let _ = velocity;
+        let peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(96) as i32;
+        let side = self.cfg["layout"]["stack_zone_px"].as_integer().unwrap_or(120) as i32;
+        // Hit-test the visible part of each window (a group member beyond its peek is clipped away).
         let target = self.strips.get(&k).and_then(|s| {
-            s.rects(self.cfg["layout"]["stack_peek_px"].as_integer().unwrap() as _)
+            s.rects(peek)
                 .into_iter()
-                .find(|(id, r)| {
-                    *id != d.id && p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
-                })
-                .map(|(id, r)| {
-                    let length = if s.area.horizontal() { r.w } else { r.h } as f64;
-                    (
-                        id,
-                        if s.area.horizontal() {
-                            (p.0 - r.x) as f64 / r.w as f64
-                        } else {
-                            (p.1 - r.y) as f64 / r.h as f64
-                        },
-                        length,
-                    )
+                .filter(|(id, _)| *id != d.id)
+                .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v)))
+                .find(|(_, v)| contains(*v, p))
+                .map(|(id, v)| {
+                    let fraction = if s.area.horizontal() {
+                        (p.0 - v.x) as f64 / v.w.max(1) as f64
+                    } else {
+                        (p.1 - v.y) as f64 / v.h.max(1) as f64
+                    };
+                    let in_zone = drop_zones(s, peek, side, d.id)
+                        .iter()
+                        .any(|z| z.0 == id && contains(z.2, p));
+                    (id, fraction, in_zone)
                 })
         });
         let id = target.map(|t| t.0);
@@ -1640,24 +1748,22 @@ impl<B: WindowBackend> Engine<B> {
             d.hover = Instant::now();
             d.target = id
         }
+        let home = self.strips.get(&d.key);
+        let column = home.and_then(|s| s.locate(d.id)).map(|(i, _)| i);
+        let grouped = home.zip(column).is_some_and(|(s, i)| s.columns[i].members.len() > 1);
+        // Holding the drag modifier (Shift by default) makes the drop do nothing: the window goes back.
         let vk = match self.cfg["layout"]["drag_stack_modifier"].as_str() {
             Some("Ctrl") => 17,
             Some("Alt") => 18,
             _ => 16,
         };
-        let freeze = self.backend.key_down(vk);
-        let slow = self.cfg["animation"]["drag_slow_velocity_px_s"].as_integer().unwrap() as f64;
-        let hover_ms = self.cfg["layout"]["stack_hover_ms"].as_integer().unwrap() as u64;
-        let zone = self.cfg["layout"]["stack_center_px"].as_integer().unwrap_or(20) as f64;
-        let crossing = k != d.key;
+        let held = self.backend.key_down(vk);
         let mode = target
-            .map(|(_, fraction, length)| {
-                // Stacking is offered only on the same monitor and only near the middle of the
-                // window; elsewhere the drop can only reorder (before / after).
-                let may_stack = !crossing && (fraction - 0.5).abs() * length <= zone;
-                let dwell = if may_stack { d.hover.elapsed().as_millis() as u64 } else { 0 };
-                let hover = if may_stack { hover_ms } else { u64::MAX };
-                planor::drag(fraction, velocity, slow, dwell, hover, freeze)
+            .filter(|_| !held)
+            .map(|(t, fraction, in_zone)| {
+                let sibling = k == d.key
+                    && home.and_then(|s| s.locate(t)).map(|(i, _)| i) == column;
+                planor::drag(in_zone, fraction, grouped, sibling, k != d.key)
             })
             .unwrap_or(planor::Drag::None);
         if mode != d.mode {
@@ -1732,6 +1838,16 @@ impl<B: WindowBackend> Engine<B> {
             if !self.backend.is_window(target) || self.owning(target) != Some(dest.clone()) {
                 return;
             }
+        }
+        if let (planor::Drag::Swap, Some(target), true) = (d.mode, d.target, dest == d.key) {
+            // Dropped on a window of the same monitor (not in its stack zone): the two exchange places.
+            // Within a group this reorders the group.
+            self.strips.get_mut(&dest).unwrap().swap(id, target);
+            self.active = dest.1.clone();
+            self.strips.get_mut(&dest).unwrap().select(id);
+            self.action = "drag_reflow";
+            self.reveal();
+            return;
         }
         if dest != d.key {
             if self.backend.minimum(id, true) > area.w
@@ -1817,8 +1933,10 @@ impl<B: WindowBackend> Engine<B> {
             // The app resizes itself to full screen at the same moment; animating the strip as well
             // made the two fight and the transition lag.
             self.instant = true;
-            self.reveal()
+            self.reveal();
+            return;
         }
+        self.hold_newborn(id, r)
     }
     pub(crate) fn event(&mut self, e: Event) {
         match e {
@@ -1956,6 +2074,7 @@ impl<B: WindowBackend> Engine<B> {
                 EVENT_OBJECT_LOCATIONCHANGE => self.window_state(id),
                 _ => (),
             },
+            Event::Wheel { delta, tilt, shift, x, y } => self.wheel(delta, tilt, shift, (x, y)),
             Event::Contacts(p)
                 if !self.blocked()
                     && self.cfg["touchpad"]["three_finger_enabled"].as_bool() == Some(true) =>
@@ -2020,6 +2139,29 @@ impl<B: WindowBackend> Engine<B> {
             _ => (),
         }
     }
+}
+fn clip(a: Rect, b: Rect) -> Option<Rect> {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    let w = (a.x + a.w).min(b.x + b.w) - x;
+    let h = (a.y + a.h).min(b.y + b.h) - y;
+    (w > 0 && h > 0).then_some(Rect { x, y, w, h })
+}
+fn contains(r: Rect, p: (i32, i32)) -> bool {
+    p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
+}
+/// The stack drop zones of a strip while `dragged` is carried: one small box in the middle of the visible
+/// part of every column's active window (not the dragged window's own column). (window, visible rect, zone)
+pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec<(isize, Rect, Rect)> {
+    let own = s.locate(dragged).map(|(i, _)| i);
+    s.rects(peek)
+        .into_iter()
+        .filter(|(id, _)| {
+            *id != dragged
+                && s.locate(*id).is_some_and(|(i, j)| Some(i) != own && s.columns[i].active == j)
+        })
+        .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
+        .collect()
 }
 /// Log any step of the daemon loop that blocks for noticeable time (finds UI stalls).
 fn slow(what: &str, since: Instant) {
@@ -2092,6 +2234,8 @@ pub fn run() -> Result<()> {
         scroll_samples: Default::default(),
         inertia: None,
         v_travel: 0.,
+        hopped: false,
+        born: HashMap::new(),
         gesture: Default::default(),
         seq: 0,
         input: None,
@@ -2111,6 +2255,10 @@ pub fn run() -> Result<()> {
         engine.skipped.extend(existing)
     }
     let tick = crossbeam_channel::tick(Duration::from_millis(32));
+    // Frame-rate steps while something moves by itself (momentum, edge scroll during a drag); a
+    // never-firing channel otherwise, so an idle daemon does not wake 120 times a second.
+    let fast = crossbeam_channel::tick(Duration::from_millis(8));
+    let never = crossbeam_channel::never::<Instant>();
     let result = (|| -> Result<()> {
         loop {
             perf::heartbeat_daemon();
@@ -2155,7 +2303,7 @@ pub fn run() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}let _span=perf::SpanGuard::new(perf::SpanKind::DaemonEvent);engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();let _span=perf::SpanGuard::new(perf::SpanKind::DaemonTick);engine.tick()?;slow("tick",t)}}}
+            crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}let _span=perf::SpanGuard::new(perf::SpanKind::DaemonEvent);engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();let _span=perf::SpanGuard::new(perf::SpanKind::DaemonTick);engine.tick()?;slow("tick",t)}},recv(if engine.wants_fast_tick(){&fast}else{&never})->_=>{if !server.closing{engine.fast_tick()}}}
         }
         Ok(())
     })();

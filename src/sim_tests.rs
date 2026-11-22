@@ -1,4 +1,4 @@
-use crate::backend::sim::{FakeBackend, SimDesktop, SimWindow};
+﻿use crate::backend::sim::{FakeBackend, SimDesktop, SimWindow};
 use crate::backend::WindowBackend;
 use crate::daemon::{Engine, Journal};
 use crate::win32::Event;
@@ -156,6 +156,13 @@ impl SimHarness {
     }
 
     fn settle(&mut self) {
+        self.settle_inner(true)
+    }
+    /// Settle without the os_rect == expected_rect check (mid-drag, the carried window is where the mouse is).
+    fn settle_quiet(&mut self) {
+        self.settle_inner(false)
+    }
+    fn settle_inner(&mut self, check: bool) {
         for _ in 0..16 {
             let mut progressed = false;
             if self.engine.dirty {
@@ -183,7 +190,9 @@ impl SimHarness {
             !self.engine.dirty || self.engine.paused || self.engine.locked || self.engine.deadline.is_some(),
             "engine stayed dirty after settle iterations"
         );
-        self.assert_invariants_and_sync();
+        if check {
+            self.assert_invariants_and_sync();
+        }
     }
 
     fn state(&self) -> serde_json::Value {
@@ -771,4 +780,284 @@ fn sim_focus_stack_move_pin_fullscreen_rejection_holes_desktop_and_panic_exit() 
     assert_eq!(h.rect(1), Rect { x: 130, y: 80, w: 600, h: 400 });
     assert_eq!(h.rect(800), Rect { x: 50, y: 50, w: 700, h: 500 });
     h.stopped = true;
+}
+
+// ---- 2026-11-22 Win+W notes: the same controls on landscape and portrait monitors ----
+
+fn note_cfg() -> toml::Value {
+    let mut cfg = test_cfg();
+    // Deterministic: no momentum after the synthetic lift (its speed is effectively infinite).
+    cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(false);
+    cfg
+}
+
+/// Three windows on every monitor of the rig (MON0 landscape, MON1 landscape right of it, MON2 portrait left).
+fn three_per_monitor(sim: &mut SimDesktop) {
+    for i in 0..3 {
+        sim.add_window(SimWindow::new(101 + i, Rect { x: 100 + 300 * i as i32, y: 100, w: 600, h: 400 }));
+        sim.add_window(SimWindow::new(201 + i, Rect { x: 2100 + 300 * i as i32, y: 100, w: 600, h: 400 }));
+        sim.add_window(SimWindow::new(301 + i, Rect { x: -1300, y: 100 + 500 * i as i32, w: 900, h: 400 }));
+    }
+    sim.foreground = 101;
+}
+
+/// Feed a touchpad swipe of `fingers` fingers from `from` to `to` in `steps` reports, then lift.
+fn swipe(h: &mut SimHarness, fingers: usize, from: (f64, f64), to: (f64, f64), steps: usize) {
+    for i in 0..=steps {
+        let t = i as f64 / steps as f64;
+        let p = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        h.engine.event(Event::Contacts(vec![p; fingers]));
+        h.settle();
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+fn settle_now(h: &mut SimHarness) {
+    if h.engine.settle.is_some() {
+        h.engine.settle = Some(Instant::now() - Duration::from_millis(1));
+    }
+    h.tick_now();
+}
+
+fn focus(h: &mut SimHarness, id: isize) {
+    h.desktop.0.lock().unwrap().foreground = id;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, id));
+    h.settle();
+}
+
+/// Focus the first window of a monitor's strip so it is scrolled to its start.
+fn to_start(h: &mut SimHarness, mon: &str) {
+    let first = h.engine.strips[&(1, mon.to_string())].columns[0].members[0];
+    focus(h, first);
+    assert_eq!(h.engine.strips[&(1, mon.to_string())].offset, 0, "{mon} scrolled to its start");
+}
+
+fn zones(h: &SimHarness) -> Vec<render::Zone> {
+    h.desktop.0.lock().unwrap().scenes.last().unwrap().zones.clone()
+}
+
+#[test]
+fn n014_portrait_scrolls_with_vertical_fingers_like_landscape_with_sideways() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let (land, port) = ((1, "MON0".to_string()), (1, "MON2".to_string()));
+    // Landscape: sideways fingers scroll the strip continuously.
+    to_start(&mut h, "MON0");
+    let before = h.engine.strips[&land].offset;
+    swipe(&mut h, 3, (300., 200.), (200., 200.), 10);
+    settle_now(&mut h);
+    let after = h.engine.strips[&land].offset;
+    assert!(after > before, "landscape: fingers left (natural) scroll the strip on: {before} -> {after}");
+    // Portrait: the same gesture turned with the monitor, fingers up scroll it on, continuously.
+    to_start(&mut h, "MON2");
+    let before = h.engine.strips[&port].offset;
+    let mut seen = vec![before];
+    for i in 0..=10 {
+        h.engine.event(Event::Contacts(vec![(200., 300. - 10. * i as f64); 3]));
+        h.settle();
+        seen.push(h.engine.strips[&port].offset);
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let distinct = seen.windows(2).filter(|w| w[1] != w[0]).count();
+    assert!(seen.last() > seen.first(), "portrait: fingers up scroll the strip on: {seen:?}");
+    assert!(distinct >= 5, "portrait: the strip follows the fingers step by step (smooth), not one jump: {seen:?}");
+    assert_eq!(h.engine.active, "MON2", "portrait: a vertical swipe no longer hops focus between monitors");
+    settle_now(&mut h);
+    assert_eq!(h.engine.active, "MON2");
+    h.stop_clean();
+}
+
+#[test]
+fn n011_cross_axis_swipe_hops_monitors_both_ways_once_per_gesture() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    // Portrait (MON2, left of MON0): sideways fingers are across its strip, so they hop to MON0 on the
+    // right; they used to scroll the portrait strip and never let the focus go back right.
+    focus(&mut h, 301);
+    assert_eq!(h.engine.active, "MON2");
+    // Natural direction: fingers moving left = content left = focus moves right.
+    swipe(&mut h, 3, (400., 200.), (100., 200.), 12);
+    settle_now(&mut h);
+    assert_eq!(h.engine.active, "MON0", "portrait: a sideways swipe hops right to MON0");
+    // Landscape MON0: vertical fingers are across its strip; with no monitor above or below nothing hops
+    // and nothing scrolls.
+    let before = h.engine.strips[&(1, "MON0".to_string())].offset;
+    swipe(&mut h, 3, (200., 400.), (200., 100.), 12);
+    settle_now(&mut h);
+    assert_eq!(h.engine.active, "MON0");
+    assert_eq!(h.engine.strips[&(1, "MON0".to_string())].offset, before, "vertical fingers never scroll a landscape strip");
+    // A long sideways swipe from the portrait hops once; it does not run on into MON0's strip.
+    focus(&mut h, 301);
+    assert_eq!(h.engine.active, "MON2");
+    let land_before = h.engine.strips[&(1, "MON0".to_string())].offset;
+    swipe(&mut h, 3, (900., 200.), (0., 200.), 40);
+    assert_eq!(h.engine.active, "MON0", "hopped right");
+    assert_eq!(h.engine.strips[&(1, "MON0".to_string())].offset, land_before, "the rest of the gesture was ignored");
+    h.stop_clean();
+}
+
+#[test]
+fn n023_win_wheel_scrolls_the_strip_under_the_cursor_on_both_orientations() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let (land, port) = ((1, "MON0".to_string()), (1, "MON2".to_string()));
+    let wheel = |h: &mut SimHarness, delta: i32, tilt: bool, shift: bool, x: i32, y: i32| {
+        h.engine.event(Event::Wheel { delta, tilt, shift, x, y });
+        h.settle();
+    };
+    // (Win+Shift+wheel rolls one whole member per notch, so the deck never rests half rolled.)
+    to_start(&mut h, "MON2");
+    to_start(&mut h, "MON0");
+    // Landscape: wheel down scrolls the strip on (sideways).
+    let before = h.engine.strips[&land].offset;
+    wheel(&mut h, -120, false, false, 900, 500);
+    assert!(h.engine.strips[&land].offset > before, "landscape wheel down scrolls on");
+    // Portrait: the cursor decides the monitor; wheel down scrolls the vertical strip on.
+    let before = h.engine.strips[&port].offset;
+    wheel(&mut h, -120, false, false, -700, 1200);
+    assert_eq!(h.engine.active, "MON2", "the strip under the cursor is the one that scrolls");
+    assert!(h.engine.strips[&port].offset > before, "portrait wheel down scrolls the strip down");
+    wheel(&mut h, 240, false, false, -700, 1200);
+    assert!(h.engine.strips[&port].offset <= before, "wheel up scrolls back");
+    settle_now(&mut h);
+    let s = &h.engine.strips[&port];
+    assert_eq!(h.desktop.foreground(), s.active().unwrap(), "focus settles on the window the wheel brought in");
+    // Win + Shift + wheel rolls the focused group.
+    focus(&mut h, 101);
+    h.cmd(Command::Key { name: "stack_toggle".into() });
+    h.settle();
+    let s = &h.engine.strips[&land];
+    assert!(s.columns[s.focus].members.len() >= 2);
+    let active = s.active();
+    wheel(&mut h, 120, false, true, 900, 500);
+    wheel(&mut h, 120, false, true, 900, 500);
+    settle_now(&mut h);
+    let s = &h.engine.strips[&land];
+    assert_ne!(s.active(), active, "Win+Shift+wheel rolled the group");
+    h.stop_clean();
+}
+
+/// Drag `id` with the mouse: press on it, move the cursor to `to` (the window follows), but do not release.
+fn mouse_drag(h: &mut SimHarness, id: isize, to: (i32, i32)) {
+    let r = h.rect(id);
+    h.desktop.0.lock().unwrap().cursor = (r.x + r.w / 2, r.y + 10);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, id));
+    h.settle_quiet();
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        let w = g.windows.get_mut(&id).unwrap();
+        w.rect.x = to.0 - r.w / 2;
+        w.rect.y = to.1 - 10;
+        g.cursor = to;
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+}
+fn drop_now(h: &mut SimHarness, id: isize) {
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, id));
+    h.settle();
+}
+
+#[test]
+fn n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        let key = (1, mon.to_string());
+        focus(&mut h, ids[0]);
+        let visible: Vec<isize> = ids.iter().copied().filter(|&i| h.engine.strips[&key].in_view(i)).collect();
+        assert!(visible.len() >= 2, "{mon}: need two visible windows, got {visible:?}");
+        let (a, b) = (visible[0], visible[1]);
+        let order = |h: &SimHarness| h.engine.strips[&key].columns.iter().map(|c| c.members[0]).collect::<Vec<_>>();
+        let before = order(&h);
+        // Off-centre on b (a quarter of the way in): swap. Nothing dodges while dragging.
+        let rb = h.rect(b);
+        mouse_drag(&mut h, a, (rb.x + rb.w / 4, rb.y + rb.h / 4));
+        assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Swap), "{mon}: off-centre is a swap");
+        let z = zones(&h);
+        assert!(!z.is_empty(), "{mon}: stack zones are drawn while dragging");
+        assert!(z.iter().all(|z| z.monitor == mon), "{mon}: zones only on the monitor under the cursor");
+        assert_eq!(h.rect(b), rb, "{mon}: the target does not dodge");
+        drop_now(&mut h, a);
+        let after = order(&h);
+        let (ia, ib) = (before.iter().position(|&x| x == a).unwrap(), before.iter().position(|&x| x == b).unwrap());
+        let mut want = before.clone();
+        want.swap(ia, ib);
+        assert_eq!(after, want, "{mon}: a and b exchanged places");
+        assert!(zones(&h).is_empty(), "{mon}: zones gone after the drop");
+        // Dead centre of b: stack.
+        let rb = h.rect(b);
+        mouse_drag(&mut h, a, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+        assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Stack), "{mon}: centre zone groups");
+        drop_now(&mut h, a);
+        let s = &h.engine.strips[&key];
+        let (i, _) = s.locate(a).unwrap();
+        assert!(s.columns[i].members.contains(&b), "{mon}: a joined b's group");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn n018_dropping_a_group_member_on_its_sibling_reorders_the_group_on_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        let key = (1, mon.to_string());
+        focus(&mut h, ids[1]);
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let s = &h.engine.strips[&key];
+        let col = s.columns[s.focus].members.clone();
+        assert_eq!(col.len(), 2, "{mon}: a pair formed");
+        let active = s.active().unwrap();
+        let other = *col.iter().find(|&&m| m != active).unwrap();
+        // The sibling's peek: the part of its rectangle inside the strip area.
+        let area = s.area;
+        let r = s.rects(96).into_iter().find(|x| x.0 == other).unwrap().1;
+        let (x0, y0) = (r.x.max(area.x), r.y.max(area.y));
+        let (x1, y1) = ((r.x + r.w).min(area.x + area.w), (r.y + r.h).min(area.y + area.h));
+        assert!(x1 > x0 && y1 > y0, "{mon}: sibling peek visible: {r:?}");
+        mouse_drag(&mut h, active, ((x0 + x1) / 2, (y0 + y1) / 2));
+        assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Swap), "{mon}: onto the sibling = reorder");
+        drop_now(&mut h, active);
+        let s = &h.engine.strips[&key];
+        let (i, _) = s.locate(active).unwrap();
+        let now = s.columns[i].members.clone();
+        assert_eq!(now.len(), 2, "{mon}: still one pair (it used to pull the window out)");
+        assert_eq!(now, col.iter().rev().copied().collect::<Vec<_>>(), "{mon}: order swapped");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn n012_drop_across_monitors_goes_beside_and_the_zones_follow_the_cursor() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    to_start(&mut h, "MON2");
+    to_start(&mut h, "MON0");
+    assert!(h.engine.strips[&(1, "MON0".to_string())].in_view(101));
+    let port = (1, "MON2".to_string());
+    let target = h.engine.strips[&port].columns[0].members[0];
+    let rt = h.rect(target);
+    mouse_drag(&mut h, 101, (rt.x + rt.w / 5, rt.y + rt.h / 5));
+    let z = zones(&h);
+    assert!(!z.is_empty() && z.iter().all(|z| z.monitor == "MON2"), "highlights moved to the portrait monitor: {z:?}");
+    assert_eq!(h.engine.drag.as_ref().map(|d| d.mode), Some(planor::Drag::Before), "from another monitor: beside, no swap");
+    drop_now(&mut h, 101);
+    assert_eq!(h.engine.strips[&port].locate(101), Some((0, 0)), "101 went in before the target on the portrait monitor");
+    assert!(h.engine.strips[&port].locate(target).is_some(), "the target stays on the portrait monitor");
+    assert!(h.engine.strips[&(1, "MON0".to_string())].locate(101).is_none());
+    h.stop_clean();
+}
+
+#[test]
+fn n020_a_new_window_that_moves_itself_is_put_back() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let id = 150;
+    h.desktop.0.lock().unwrap().add_window(SimWindow::new(id, Rect { x: 300, y: 300, w: 500, h: 400 }));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, id));
+    h.settle();
+    let slot = h.rect(id);
+    // The app restores its own saved bounds a moment after showing.
+    h.desktop.0.lock().unwrap().windows.get_mut(&id).unwrap().rect = Rect { x: 40, y: 60, w: 700, h: 500 };
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, id));
+    h.settle();
+    assert_eq!(h.rect(id), slot, "the newborn window is back in its slot");
+    h.stop_clean();
 }
