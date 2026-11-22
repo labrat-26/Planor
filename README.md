@@ -16,10 +16,10 @@
 
 Planor tidies your windows for you, and does it in a way that never squeezes them.
 
-Most window managers cram every window onto one screen, so the more you open the smaller they all get. **Planor puts your windows on one long strip that extends past the edge of your screen.** Each window keeps a comfortable size. You slide the strip left and right (or up and down on a portrait monitor) to bring the window you want into view.
+Most window managers cram every window onto one screen, so the more you open the smaller they all get. **Planor puts your windows on one long strip that extends past the edge of your screen.** Each window keeps a comfortable size. You slide the strip left and right (or up and down on a portrait monitor) to bring the window you want into view. Some windows belong together? **Stack** them in one slot, then **swipe up or down** to flip through the stack.
 
 <p align="center">
-  <img src="docs/img/hero.svg" alt="Animation: windows sit on an endless strip that scrolls past the screen" width="800">
+  <img src="docs/img/hero.svg" alt="Animation: windows sit on an endless strip that scrolls sideways, and swiping up or down flips through a stack of grouped windows" width="800">
 </p>
 
 If you have used a phone's home screen, you already know the idea: swipe to see more.
@@ -30,6 +30,10 @@ If you have used a phone's home screen, you already know the idea: swipe to see 
 - 👆 **Built for touchpads.** Three fingers scroll the strip. Four fingers carry a window.
 - 🖱️ **Works with keyboard and mouse too.** Every action has a shortcut.
 - 🖥️ **Multi-monitor friendly.** Each monitor has its own strip, and you can throw windows between them.
+- 🎯 **Focus your way.** Keyboard, mouse or touchpad moves focus. Optionally let focus follow the mouse, or have the cursor jump to the focused window.
+- 🎨 **Borders and gaps you control.** Pick the outline colours, thickness, corner roundness and the space between windows.
+- ⌨️ **Your own shortcuts.** Every keyboard shortcut can be changed.
+- 🔓 **No admin rights needed.** One file, no installer. It runs as you and keeps its settings in your own profile.
 - 🧰 **Invisible when idle.** Planor has no window of its own. It runs quietly in the background and draws only coloured outlines.
 - 🛟 **Always an escape hatch.** One shortcut puts every window back exactly where it was.
 
@@ -51,6 +55,8 @@ If you have used a phone's home screen, you already know the idea: swipe to see 
 
 4. **Try it.** Press <kbd>Alt</kbd>+<kbd>→</kbd> to move focus to the next window. Open a new app and watch it join the strip.
 
+> 🔓 **No administrator rights needed.** Planor is a single file that runs as your normal user. There is no installer and no "Run as administrator" prompt. It keeps its settings in `%APPDATA%\planor`, and `autostart` uses your own per-user startup entry, so nothing system-wide is changed.
+
 That is all. The next sections explain what you can do now.
 
 ### Start Planor automatically when you sign in
@@ -71,16 +77,12 @@ That is all. The next sections explain what you can do now.
 
 ### 1. Scroll the strip
 
-Slide **three fingers sideways** on your touchpad. The strip follows your fingers, and the window nearest the middle becomes the focused one. A fast swipe keeps gliding for a moment after you lift, like a phone list.
+**On a touchpad,** slide **three fingers sideways**. The strip follows your fingers, and the window nearest the middle becomes the focused one. A fast swipe keeps gliding for a moment after you lift, like a phone list.
+
+**With a mouse,** hold <kbd>Win</kbd> and turn the **mouse wheel**. Every notch moves the strip one fixed step. Watch the animation: the touchpad turns into a mouse halfway through to show the second way.
 
 <p align="center">
-  <img src="docs/img/gesture-scroll.svg" alt="Animation: three fingers swipe on the touchpad and the strip scrolls" width="800">
-</p>
-
-**Prefer a mouse?** Hold <kbd>Win</kbd> and turn the **mouse wheel**. Every notch moves the strip one fixed step.
-
-<p align="center">
-  <img src="docs/img/mouse-scroll.svg" alt="Animation: holding the Win key and turning the mouse wheel scrolls the strip" width="800">
+  <img src="docs/img/gesture-scroll.svg" alt="Animation: three fingers swipe the touchpad and the strip scrolls; the touchpad turns into a mouse and the wheel scrolls the strip too" width="800">
 </p>
 
 Keyboard only? <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> moves focus along the strip, and the strip scrolls to follow.
@@ -101,7 +103,7 @@ Pick a window up with **four fingers** (or drag it with the mouse), then drop it
 
 Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window.
 
-**Switching inside a stack.** Once windows are stacked, the slot shows them as a **vertical list**. The purple box marks the one you are looking at. Press <kbd>Alt</kbd>+<kbd>↓</kbd> or <kbd>Alt</kbd>+<kbd>↑</kbd> to move the selection, and the window in the slot changes with it. With a mouse, hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the wheel.
+**Switching inside a stack.** Once windows are stacked, the slot shows them as a **vertical list**. The purple box marks the one you are looking at. **Swipe three fingers up or down**, or press <kbd>Alt</kbd>+<kbd>↓</kbd> / <kbd>Alt</kbd>+<kbd>↑</kbd>, to move the selection, and the window in the slot changes with it. With a mouse, hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the wheel.
 
 <p align="center">
   <img src="docs/img/stack-switch.svg" alt="Animation: a stack lists its windows vertically and the selection steps down through them" width="800">
@@ -111,15 +113,21 @@ Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window.
 
 Planor reads each monitor's orientation. On a **landscape** monitor the strip runs sideways. On a **portrait** monitor it runs **up and down**, so you scroll the other way. Stacking, pinning and flinging work the same way.
 
+The animation shows a portrait monitor on the left and a landscape one on the right:
+
+1. The landscape strip scrolls sideways.
+2. A window is **thrown onto the portrait monitor**.
+3. You **browse the portrait strip** up and down.
+
 <p align="center">
-  <img src="docs/img/portrait.svg" alt="Animation: on a landscape monitor the strip scrolls sideways, on a portrait monitor it scrolls vertically" width="800">
+  <img src="docs/img/portrait.svg" alt="Animation: the landscape strip scrolls, a window is thrown onto the portrait monitor on the left, then the portrait strip is browsed up and down" width="800">
 </p>
 
 Hold <kbd>Win</kbd> and turn the mouse wheel to scroll a portrait strip up and down. <kbd>Alt</kbd>+<kbd>↑</kbd> / <kbd>↓</kbd> steps focus along it.
 
 ### 4. New windows tile themselves
 
-You never have to arrange anything. Planor decides the layout as windows open:
+You never have to arrange anything. Planor decides the layout as windows open, on landscape and portrait monitors alike. Below, both monitors get the same three apps at the same moments (on the portrait one, the split is top and bottom):
 
 1. **Nothing open:** an empty screen, and nothing to do.
 2. **First window:** it fills the screen.
@@ -127,17 +135,17 @@ You never have to arrange anything. Planor decides the layout as windows open:
 4. **Third window and beyond:** each new window joins the strip at the same comfortable size. The strip scrolls to bring it into view, and the older windows wait just off-screen.
 
 <p align="center">
-  <img src="docs/img/auto-tile.svg" alt="Animation: an empty screen, then one window fills it, a second splits it, a third starts the scrolling strip" width="800">
+  <img src="docs/img/auto-tile.svg" alt="Animation: on a portrait and a landscape monitor, an empty screen gets a first window that fills it, a second that splits it and a third that opens and starts the scrolling strip" width="800">
 </p>
 
 Close a window and the others close the gap. Want a different split or size? Change `default_tile_share` and `first_pair_split` in the [settings](#-making-it-yours).
 
 ### 5. Throw a window to another monitor
 
-Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor.
+Carry a window with four fingers and **flick** it sideways as you lift. It flies to the neighbouring monitor. In the animation, the portrait monitor sits on the left: the window is flicked onto it, then flicked back to the landscape monitor.
 
 <p align="center">
-  <img src="docs/img/fling.svg" alt="Animation: a flicked window flies to the next monitor" width="800">
+  <img src="docs/img/fling.svg" alt="Animation: a window is flicked left onto the portrait monitor and back to the landscape monitor" width="800">
 </p>
 
 You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <kbd>Alt</kbd>+<kbd>[</kbd> to jump focus between monitors.
@@ -236,6 +244,50 @@ duration_ms = 120           # snappier
 focus_left  = "Win+Left"
 focus_right = "Win+Right"
 ```
+
+### Focus: how Planor follows you
+
+Focus is the window that receives your typing. You can move it with <kbd>Alt</kbd> + arrows, with touchpad gestures, or by clicking. Three more options in the `[layout]` section change how it behaves:
+
+```toml
+[layout]
+focus_follows_mouse = true        # the window under the pointer takes focus
+warp_cursor_to_focused = true     # the pointer jumps to a window when you focus it by keyboard
+spawn_on_cursor_monitor = true    # new windows open on the monitor the pointer is on
+```
+
+All three are optional. Turn on only the ones you like.
+
+### Borders and gaps
+
+The coloured outlines and the space between windows are yours to tune:
+
+```toml
+[layout]
+gap_px = 6                  # space between windows, in pixels
+
+[borders]
+enabled = true
+width_px = 2                # line thickness
+corner_radius_px = 8        # 0 = square corners
+focused_color = "#3B82F6"   # also: stacked_color, pinned_color, drop_target_color
+```
+
+Prefer no outlines at all? Set `enabled = false`.
+
+### Your own keyboard shortcuts
+
+Every shortcut in the [cheat sheet](#-the-cheat-sheet) can be changed in the `[hotkeys]` section, or in `planor.exe config`. Write a shortcut as modifiers and a key joined by `+`:
+
+```toml
+[hotkeys]
+focus_left   = "Ctrl+Alt+Left"
+focus_right  = "Ctrl+Alt+Right"
+stack_toggle = "Alt+G"
+toggle_pin   = "Alt+P"
+```
+
+The names you can set are `focus_left`, `focus_right`, `focus_up`, `focus_down`, `move_left`, `move_right`, `stack_toggle`, `toggle_pin`, `focus_monitor_next`, `focus_monitor_prev` and `panic_exit`. Changes apply as soon as you save, or run `planor.exe reload`. A shortcut another app already uses will not register, so pick a different one.
 
 ### Windows Planor should leave alone
 

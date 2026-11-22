@@ -1,24 +1,42 @@
-﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300" role="img" aria-label="Animation: three fingers swipe sideways on the touchpad and the window strip scrolls with them">
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 300" width="800" height="300" role="img" aria-label="Animation: three fingers swipe on the touchpad and the strip scrolls; the touchpad then turns into a mouse and the wheel scrolls it too">
 <defs>
   <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#141a33"/></linearGradient>
   <filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000" flood-opacity=".45"/></filter>
 </defs>
+<clipPath id="wheel"><rect x="192" y="96" width="16" height="34" rx="8"/></clipPath>
+<clipPath id="s2"><rect x="365" y="60" width="405" height="180" rx="10"/></clipPath>
 <rect width="800" height="300" rx="18" fill="url(#bg)"/>
-<rect x="30" y="50" width="270" height="190" rx="18" fill="#10162e" stroke="#3a4a8c" stroke-width="2.5"/>
-<text x="165" y="266" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#aeb9e6">3 fingers, swipe sideways</text>
+<!-- the device: a touchpad that becomes a mouse -->
+<rect x="30" y="50" width="270" height="190" rx="18" fill="#10162e" stroke="#3a4a8c" stroke-width="2.5">
+  <animate attributeName="x" values="30;30;150;150;30;30" keyTimes="0;.42;.5;.88;.98;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+  <animate attributeName="y" values="50;50;80;80;50;50" keyTimes="0;.42;.5;.88;.98;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+  <animate attributeName="width" values="270;270;100;100;270;270" keyTimes="0;.42;.5;.88;.98;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+  <animate attributeName="height" values="190;190;160;160;190;190" keyTimes="0;.42;.5;.88;.98;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+  <animate attributeName="rx" values="18;18;48;48;18;18" keyTimes="0;.42;.5;.88;.98;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
+</rect>
 <g>
-  <animateTransform attributeName="transform" type="translate" values="0 0;0 0;110 0;110 0;0 0" keyTimes="0;.1;.55;.8;1" dur="5s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1"/>
-  <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.08;.6;.72;1" dur="5s" repeatCount="indefinite"/>
+  <animateTransform attributeName="transform" type="translate" values="0 0;0 0;110 0;110 0" keyTimes="0;.06;.30;1" dur="13s" repeatCount="indefinite"/>
+  <animate attributeName="opacity" values="0;1;1;0;0" keyTimes="0;.04;.36;.42;1" dur="13s" repeatCount="indefinite" />
   <circle cx="95" cy="140" r="15" fill="#60a5fa" opacity=".85"/><circle cx="145" cy="125" r="15" fill="#60a5fa" opacity=".85"/><circle cx="195" cy="140" r="15" fill="#60a5fa" opacity=".85"/>
 </g>
-<path d="M312 145 h28" stroke="#60a5fa" stroke-width="3" stroke-linecap="round" marker-end="url(#arr)"/>
-<polygon points="340,138 352,145 340,152" fill="#60a5fa"/>
-<clipPath id="s2"><rect x="365" y="60" width="405" height="180" rx="10"/></clipPath>
+<g opacity="0">
+  <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.46;.52;.88;.94;1" dur="13s" repeatCount="indefinite" />
+  <line x1="200" y1="80" x2="200" y2="140" stroke="#3a4a8c" stroke-width="2"/>
+  <rect x="192" y="96" width="16" height="34" rx="8" fill="#1b2340" stroke="#60a5fa" stroke-width="2"/>
+  <g clip-path="url(#wheel)"><g>
+    <animateTransform attributeName="transform" type="translate" values="0 0;0 0;0 40;0 40" keyTimes="0;.55;.78;1" dur="13s" repeatCount="indefinite"/>
+    <rect x="192" y="76" width="16" height="3" fill="#60a5fa"/><rect x="192" y="86" width="16" height="3" fill="#60a5fa"/><rect x="192" y="96" width="16" height="3" fill="#60a5fa"/><rect x="192" y="106" width="16" height="3" fill="#60a5fa"/><rect x="192" y="116" width="16" height="3" fill="#60a5fa"/><rect x="192" y="126" width="16" height="3" fill="#60a5fa"/>
+  </g></g>
+  <rect x="108" y="40" width="54" height="26" rx="6" fill="#222c52" stroke="#4a5aa6" stroke-width="1.5"/><text x="135" y="58" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#dbe3ff">Win</text>
+  <text x="178" y="58" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="20" fill="#aeb9e6">+</text>
+</g>
+<text x="165" y="266" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#aeb9e6"><animate attributeName="opacity" values="1;1;0;0;1;1" keyTimes="0;.4;.46;.9;.96;1" dur="13s" repeatCount="indefinite" />3 fingers, swipe sideways</text>
+<text x="165" y="266" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#aeb9e6" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.46;.52;.88;.94;1" dur="13s" repeatCount="indefinite" />or hold Win and turn the mouse wheel</text>
+<polygon points="312,138 326,145 312,152" fill="#60a5fa"/>
 <rect x="360" y="55" width="415" height="190" rx="12" fill="#0a0f24" stroke="#33407a" stroke-width="2"/>
 <g clip-path="url(#s2)">
-  <g>
-    <animateTransform attributeName="transform" type="translate" values="0 0;0 0;-148 0;-148 0;0 0" keyTimes="0;.1;.55;.8;1" dur="5s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1"/>
+  <g><animateTransform attributeName="transform" type="translate" values="0 0;0 0;-148 0;-148 0;-148 0;-296 0;-296 0;0 0" keyTimes="0;.06;.30;.45;.55;.78;.9;1" dur="13s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1"/>
     <g transform="translate(350 80)" filter="url(#shadow)">
   <rect width="136" height="140" rx="10" fill="#1b2340" stroke="#2c3868" stroke-width="1.5"/>
   <rect width="136" height="26" rx="10" fill="#0ea5e9" opacity=".9"/><rect y="14" width="136" height="12" fill="#0ea5e9" opacity=".9"/>
@@ -68,5 +86,5 @@
   </g>
   <rect x="498" y="80" width="136" height="140" rx="10" fill="none" stroke="#3B82F6" stroke-width="3.5" filter="url(#glow)"/>
 </g>
-<text x="567" y="266" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#aeb9e6">the strip follows your fingers (and keeps gliding after you lift)</text>
+<text x="567" y="266" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="14" fill="#aeb9e6">the strip glides with your fingers or the wheel</text>
 </svg>

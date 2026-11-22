@@ -1,29 +1,21 @@
-﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" width="800" height="340" role="img" aria-label="Animation: windows sit on an endless horizontal strip that scrolls past the screen">
+﻿<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 340" width="800" height="340" role="img" aria-label="Animation: windows sit on an endless strip that scrolls sideways; swiping up or down flips through a stack of grouped windows">
 <defs>
   <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#0b1020"/><stop offset="1" stop-color="#141a33"/></linearGradient>
   <filter id="glow" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
   <filter id="shadow" x="-20%" y="-20%" width="140%" height="150%"><feDropShadow dx="0" dy="4" stdDeviation="5" flood-color="#000" flood-opacity=".45"/></filter>
 </defs>
+<clipPath id="screen"><rect x="40" y="50" width="720" height="212" rx="6"/></clipPath>
+<clipPath id="slot1"><rect x="272" y="62" width="220" height="196"/></clipPath>
 <rect width="800" height="340" rx="18" fill="url(#bg)"/>
 <rect x="28" y="38" width="744" height="236" rx="12" fill="#0a0f24" stroke="#33407a" stroke-width="2"/>
-<clipPath id="screen"><rect x="40" y="50" width="720" height="212" rx="6"/></clipPath>
 <g clip-path="url(#screen)">
   <g>
-    <animateTransform attributeName="transform" type="translate" values="0 0;0 0;-232 0;-232 0;-464 0;-464 0;-232 0;-232 0;0 0" keyTimes="0;.12;.25;.37;.5;.62;.75;.87;1" dur="11s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.45 0 .2 1;0 0 1 1;.45 0 .2 1;0 0 1 1;.45 0 .2 1;0 0 1 1;.45 0 .2 1"/>
+    <animateTransform attributeName="transform" type="translate" values="0 0;0 0;-232 0;-232 0;-464 0;-464 0;0 0;0 0" keyTimes="0;.06;.15;.2;.29;.34;.46;1" dur="14s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/>
     <g transform="translate(40 62)" filter="url(#shadow)">
   <rect width="220" height="196" rx="10" fill="#1b2340" stroke="#2c3868" stroke-width="1.5"/>
   <rect width="220" height="26" rx="10" fill="#0ea5e9" opacity=".9"/><rect y="14" width="220" height="12" fill="#0ea5e9" opacity=".9"/>
   <circle cx="14" cy="13" r="3.5" fill="#fff" opacity=".85"/><circle cx="26" cy="13" r="3.5" fill="#fff" opacity=".55"/>
   <text x="208" y="17" text-anchor="end" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#fff">Terminal</text>
-  <rect x="18" y="46" width="184" height="8" rx="4" fill="#3a4676"/>
-  <rect x="18" y="64" width="128.8" height="8" rx="4" fill="#2f3963"/>
-  <rect x="18" y="82" width="156.4" height="8" rx="4" fill="#2f3963"/>
-  <rect x="18" y="108" width="184" height="66" rx="6" fill="#222c52"/>
-</g><g transform="translate(272 62)" filter="url(#shadow)">
-  <rect width="220" height="196" rx="10" fill="#1b2340" stroke="#2c3868" stroke-width="1.5"/>
-  <rect width="220" height="26" rx="10" fill="#6366f1" opacity=".9"/><rect y="14" width="220" height="12" fill="#6366f1" opacity=".9"/>
-  <circle cx="14" cy="13" r="3.5" fill="#fff" opacity=".85"/><circle cx="26" cy="13" r="3.5" fill="#fff" opacity=".55"/>
-  <text x="208" y="17" text-anchor="end" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#fff">Browser</text>
   <rect x="18" y="46" width="184" height="8" rx="4" fill="#3a4676"/>
   <rect x="18" y="64" width="128.8" height="8" rx="4" fill="#2f3963"/>
   <rect x="18" y="82" width="156.4" height="8" rx="4" fill="#2f3963"/>
@@ -65,9 +57,39 @@
   <rect x="18" y="82" width="156.4" height="8" rx="4" fill="#2f3963"/>
   <rect x="18" y="108" width="184" height="66" rx="6" fill="#222c52"/>
 </g>
+    <g clip-path="url(#slot1)">
+      <g><animateTransform attributeName="transform" type="translate" values="0 0;0 0;0 -210;0 -210;0 0;0 0" keyTimes="0;.55;.63;.8;.88;1" dur="14s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/><g transform="translate(272 62)" filter="url(#shadow)">
+  <rect width="220" height="196" rx="10" fill="#1b2340" stroke="#2c3868" stroke-width="1.5"/>
+  <rect width="220" height="26" rx="10" fill="#6366f1" opacity=".9"/><rect y="14" width="220" height="12" fill="#6366f1" opacity=".9"/>
+  <circle cx="14" cy="13" r="3.5" fill="#fff" opacity=".85"/><circle cx="26" cy="13" r="3.5" fill="#fff" opacity=".55"/>
+  <text x="208" y="17" text-anchor="end" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#fff">Browser</text>
+  <rect x="18" y="46" width="184" height="8" rx="4" fill="#3a4676"/>
+  <rect x="18" y="64" width="128.8" height="8" rx="4" fill="#2f3963"/>
+  <rect x="18" y="82" width="156.4" height="8" rx="4" fill="#2f3963"/>
+  <rect x="18" y="108" width="184" height="66" rx="6" fill="#222c52"/>
+</g></g>
+      <g><animateTransform attributeName="transform" type="translate" values="0 210;0 210;0 0;0 0;0 210;0 210" keyTimes="0;.55;.63;.8;.88;1" dur="14s" repeatCount="indefinite" calcMode="spline" keySplines="0 0 1 1;.4 0 .2 1;0 0 1 1;.4 0 .2 1;0 0 1 1"/><g transform="translate(272 62)" filter="url(#shadow)">
+  <rect width="220" height="196" rx="10" fill="#1b2340" stroke="#2c3868" stroke-width="1.5"/>
+  <rect width="220" height="26" rx="10" fill="#ec4899" opacity=".9"/><rect y="14" width="220" height="12" fill="#ec4899" opacity=".9"/>
+  <circle cx="14" cy="13" r="3.5" fill="#fff" opacity=".85"/><circle cx="26" cy="13" r="3.5" fill="#fff" opacity=".55"/>
+  <text x="208" y="17" text-anchor="end" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="11" font-weight="600" fill="#fff">Notes</text>
+  <rect x="18" y="46" width="184" height="8" rx="4" fill="#3a4676"/>
+  <rect x="18" y="64" width="128.8" height="8" rx="4" fill="#2f3963"/>
+  <rect x="18" y="82" width="156.4" height="8" rx="4" fill="#2f3963"/>
+  <rect x="18" y="108" width="184" height="66" rx="6" fill="#222c52"/>
+</g></g>
+    </g>
+    <!-- stack markers: two dots, and up/down chevrons while swiping -->
+    <circle cx="478" cy="132" r="5" fill="#A855F7"><animate attributeName="opacity" values="1;1;.3;.3;1;1" keyTimes="0;.55;.63;.8;.88;1" dur="14s" repeatCount="indefinite" /></circle>
+    <circle cx="478" cy="150" r="5" fill="#A855F7"><animate attributeName="opacity" values=".3;.3;1;1;.3;.3" keyTimes="0;.55;.63;.8;.88;1" dur="14s" repeatCount="indefinite" /></circle>
+    <g opacity="0">
+      <animate attributeName="opacity" values="0;0;1;0;0;1;0;0" keyTimes="0;.52;.56;.64;.77;.81;.89;1" dur="14s" repeatCount="indefinite" />
+      <polygon points="450,150 460,138 470,150" fill="#fff" opacity=".9"/><polygon points="450,164 460,176 470,164" fill="#fff" opacity=".9"/>
+    </g>
   </g>
   <rect x="272" y="62" width="220" height="196" rx="10" fill="none" stroke="#3B82F6" stroke-width="3.5" filter="url(#glow)"/>
 </g>
 <rect x="350" y="276" width="100" height="8" rx="4" fill="#33407a"/>
-<text x="400" y="313" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="15" fill="#aeb9e6">Your windows live on one endless strip. Scroll sideways to bring them in.</text>
+<text x="400" y="313" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="15" fill="#aeb9e6" opacity="1"><animate attributeName="opacity" values="1;1;0;0;1;1" keyTimes="0;.5;.54;.9;.94;1" dur="14s" repeatCount="indefinite" />Your windows live on one endless strip. Scroll sideways to bring them in.</text>
+<text x="400" y="313" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="15" fill="#aeb9e6" opacity="0"><animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;.5;.54;.9;.94;1" dur="14s" repeatCount="indefinite" />Stacked windows? Swipe up or down to flip through the stack.</text>
 </svg>
