@@ -51,6 +51,13 @@ pub struct Scene {
     pub holes: Vec<Rect>,
     /// Filled boxes drawn under the borders: the stack drop zones while a window is carried.
     pub zones: Vec<Zone>,
+    /// What caused this scene (scroll, drag_reflow, open_close, stack_switch, resize, ...): animation frame
+    /// timings are reported per action.
+    pub action: &'static str,
+    /// Driven by the fingers (or the momentum after them): windows that move are drawn as DWM thumbnails
+    /// and their real windows parked, so no app has to move or repaint 60+ times a second. A scene that is
+    /// not live puts the real windows back.
+    pub live: bool,
 }
 #[derive(Clone, Debug)]
 pub struct Zone {
@@ -209,6 +216,12 @@ fn shared_devices() -> Result<(ID3D11Device, IDCompositionDevice, ID2D1Device)> 
         Ok(d)
     })
 }
+/// D3D11 devices are free-threaded; the capture worker only uses this one to create its capture source.
+struct SendDevice(ID3D11Device);
+unsafe impl Send for SendDevice {}
+/// A capture source made on the worker (its frame pool is free-threaded, its session agile); handed over once.
+struct SendSource(Source);
+unsafe impl Send for SendSource {}
 struct Surface {
     gpu: ID3D11Device,
     dev: IDCompositionDevice,
@@ -530,9 +543,35 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         // Cooldown cache so WGC Source::new failures (e.g. elevated/protected windows or
         // non-input desktops) do not block every subsequent warm scene for ~45 ms/window.
         let mut failed_sources = HashMap::<(isize, usize, String), Instant>::new();
+        let mut pending_sources = std::collections::HashSet::<(isize, usize, String)>::new();
+        let mut live_ids = std::collections::HashSet::<isize>::new();
+        let mut last_live_present: Option<Instant> = None;
+        // The final on-screen move of an open/close animation is asynchronous: newly started apps can take
+        // tens of milliseconds to answer SetWindowPos. Keep their stand-ins visible until the move lands.
+        let mut open_landing: Option<(u64, Instant, Vec<(isize, Rect)>)> = None;
+        let mut open_landed: Option<u64> = None;
+        let mut open_timed_out = false;
+        let mut anim_done = false;
+        type SourceKey = (isize, usize, String);
+        let (source_tx, source_jobs) = crossbeam_channel::unbounded::<(SourceKey, isize, SendDevice)>();
+        let (source_done_tx, source_done) = crossbeam_channel::unbounded::<(SourceKey, std::result::Result<SendSource, String>, u128)>();
+        std::thread::Builder::new()
+            .name("Planor.Capture".into())
+            .spawn(move || {
+                let _ = windows::Win32::System::Com::CoInitializeEx(None, windows::Win32::System::Com::COINIT_MULTITHREADED);
+                for (key, id, device) in source_jobs {
+                    let t = Instant::now();
+                    let made = Source::new(id, &device.0).map(SendSource).map_err(|e| e.to_string());
+                    if source_done_tx.send((key, made, t.elapsed().as_millis())).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok();
         let mut scene: Option<Scene> = None;
         let mut begin = Instant::now();
         let mut last = begin;
+        let mut frame_of_scene = 0u32;
         let mut settled = 0;
         let mut gesture_recorded = false;
         let mut parked_checked_epoch = 0u64;
@@ -569,14 +608,48 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         .iter()
                         .any(|&(id, want)| win32::frame(id).is_some_and(|got| got != want))
                     {
-                        let _ = win32::place(&items);
+                        win32::place_async(&items);
                         verify = Some((Instant::now() + Duration::from_millis(150), items, left - 1))
+                    }
+                }
+            }
+            let async_landed = open_landing.as_ref().and_then(|(epoch, started, items)| {
+                let current = *epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
+                // Position is the handoff signal. A minimum-size application may legitimately be wider or
+                // taller than requested; the normal rejection path handles that after the handoff.
+                let arrived = items.iter().all(|(id, want)| {
+                    win32::frame(*id).is_none_or(|got| {
+                        (got.x - want.x).abs() <= 2 && (got.y - want.y).abs() <= 2
+                    })
+                });
+                let timed_out = started.elapsed() >= Duration::from_millis(350);
+                (current && (arrived || timed_out)).then_some((*epoch, !arrived))
+            });
+            if let Some((epoch, timed_out)) = async_landed {
+                open_landed = Some(epoch);
+                open_timed_out = timed_out;
+                open_landing = None;
+            }
+            while let Ok((key, made, ms)) = source_done.try_recv() {
+                pending_sources.remove(&key);
+                if ms >= 100 {
+                    diag::trace(format!("capture source for {} took {ms} ms (worker thread, render not blocked)", key.0));
+                }
+                match made {
+                    Ok(src) => {
+                        failed_sources.remove(&key);
+                        pictures.insert(key, src.0);
+                    }
+                    Err(e) => {
+                        if failed_sources.insert(key.clone(), Instant::now()).is_none() {
+                            diag::trace(format!("WGC source creation failed for {}: {e}", key.0));
+                        }
                     }
                 }
             }
             match rx.recv_timeout(if scene.is_some() {
                 Duration::ZERO
-            } else if !pictures.is_empty() || verify.is_some() {
+            } else if !pictures.is_empty() || verify.is_some() || !pending_sources.is_empty() {
                 Duration::from_millis(33)
             } else {
                 Duration::from_millis(50)
@@ -607,11 +680,65 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     current.clear();
                     pictures.clear();
                     failed_sources.clear();
+                    open_landing = None;
+                    open_landed = None;
+                    open_timed_out = false;
+                    anim_done = false;
                     win32::set_peeks(Vec::new());
                     let _ = ack.send(());
                     continue;
                 }
-                Ok(Message::Scene(s)) => {
+                Ok(Message::Scene(mut s)) => {
+                    // Drain any newer queued scenes so a burst of input/events skips stale frames
+                    // instead of paying setup work for a scene that has already been superseded.
+                    let mut stop = false;
+                    let mut cleared = false;
+                    while let Ok(next_msg) = rx.try_recv() {
+                        match next_msg {
+                            Message::Scene(newer) => s = newer,
+                            Message::Warm(monitors) => {
+                                for (n, b) in monitors {
+                                    if hosts.get(&n).is_some_and(|h| h.b != b) {
+                                        hosts.remove(&n);
+                                    }
+                                    if !hosts.contains_key(&n) {
+                                        if let Ok(h) = Host::new(b) {
+                                            hosts.insert(n, h);
+                                        }
+                                    }
+                                }
+                            }
+                            Message::Clear(ack) => {
+                                verify = None;
+                                hosts.clear();
+                                scene = None;
+                                current.clear();
+                                pictures.clear();
+                                failed_sources.clear();
+                                open_landing = None;
+                                open_landed = None;
+                                open_timed_out = false;
+                                anim_done = false;
+                                win32::set_peeks(Vec::new());
+                                let _ = ack.send(());
+                                cleared = true;
+                                break;
+                            }
+                            Message::Stop(ack) => {
+                                win32::set_peeks(Vec::new());
+                                hosts.clear();
+                                let _ = ack.send(());
+                                stop = true;
+                                break;
+                            }
+                        }
+                    }
+                    if stop {
+                        break;
+                    }
+                    if cleared {
+                        continue;
+                    }
                     let _scene_span = crate::perf::SpanGuard::with_arg(
                         crate::perf::SpanKind::RenderScene,
                         s.epoch,
@@ -685,25 +812,12 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             {
                                 continue;
                             }
-                            if let Some(surface) =
-                                hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref())
-                            {
-                                let t = Instant::now();
-                                match Source::new(tile.id, &surface.gpu) {
-                                    Ok(source) => {
-                                        failed_sources.remove(&key);
-                                        pictures.insert(key, source);
-                                    }
-                                    Err(e) => {
-                                        let first = failed_sources.insert(key, Instant::now()).is_none();
-                                        if first {
-                                            diag::trace(format!("WGC source creation failed for {}: {e}", tile.id));
-                                            eprintln!("source creation: {e}");
-                                        }
-                                    }
-                                }
-                                if t.elapsed().as_millis() >= 100 {
-                                    diag::trace(format!("SLOW render Source::new: {} ms", t.elapsed().as_millis()))
+                            // Capture sources take 100-150 ms to create (6 render freezes in the first feel
+                            // run): a worker makes them; until one is ready the DWM thumbnail stands in.
+                            if !pending_sources.contains(&key) {
+                                if let Some(surface) = hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref()) {
+                                    pending_sources.insert(key.clone());
+                                    let _ = source_tx.send((key, tile.id, SendDevice(surface.gpu.clone())));
                                 }
                             }
                         }
@@ -717,17 +831,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                                     .and_then(|r| intersect(r, host.b))
                                     .is_some()
                                 {
+                                    // One attempt, no waiting (it used to sleep up to 70 ms per source for a
+                                    // first frame); without a bitmap the DWM thumbnail stands in.
                                     if let Some(surface) = &host.surface {
-                                        let deadline = Instant::now() + Duration::from_millis(70);
-                                        loop {
-                                            if source.bitmap.is_some()
-                                                || source.update(surface, 0).is_err()
-                                                || source.bitmap.is_some()
-                                                || Instant::now() >= deadline
-                                            {
-                                                break;
-                                            }
-                                            std::thread::sleep(Duration::from_millis(2))
+                                        if source.bitmap.is_none() {
+                                            let _ = source.update(surface, 0);
                                         }
                                     }
                                 }
@@ -741,8 +849,17 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             handle_start.elapsed().as_millis() - sources_ms
                         ))
                     }
+                    if !s.live {
+                        live_ids.clear();
+                        last_live_present = None;
+                    }
+                    open_landing = None;
+                    open_landed = None;
+                    open_timed_out = false;
+                    anim_done = false;
                     begin = Instant::now();
                     last = begin;
+                    frame_of_scene = 0;
                     scene = Some(s)
                 }
                 Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
@@ -776,6 +893,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             let mut placements = vec![];
             let mut settled_tiles = vec![];
             let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+            let open_handoff = s.action == "open_close"
+                && t >= 1.
+                && open_landed != Some(s.epoch);
             let mut hits = vec![];
             let mut next = HashMap::new();
             for (name, host) in &mut hosts {
@@ -799,10 +919,18 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     let bound = intersect(tile.bound, host.b).unwrap_or(host.b);
                     let clip = if tile.hidden { None } else { intersect(rs, bound) };
                     let moving = t < 1. && origins[&tile.id] != tile.rect;
+                    let live_proxy = s.live && !tile.pinned && (live_ids.contains(&tile.id) || origins[&tile.id] != tile.rect);
+                    if live_proxy {
+                        live_ids.insert(tile.id);
+                    }
                     if !moving && tile.fullscreen && tile.rect == host.b {
                         full = true
                     }
-                    let proxy = !tile.pinned && (moving || clip != Some(rs) || tile.preview || tile.hidden);
+                    let park_window = !tile.pinned && (moving || live_proxy || clip != Some(rs) || tile.preview || tile.hidden);
+                    // Once an open/close animation reaches its last frame, hold the stand-in on screen
+                    // while the real window's final asynchronous move catches up. The OS target below is
+                    // still the visible tile rectangle (not the park column).
+                    let proxy = park_window || (!tile.pinned && open_handoff);
                     if let Some(c) = clip {
                         if proxy {
                             if let (Some(source), Some(surface)) = (
@@ -859,7 +987,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             ))
                         }
                     }
-                    let target = if proxy {
+                    let target = if park_window {
                         Rect {
                             x: park,
                             ..tile.rect
@@ -869,7 +997,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     };
                     if !tile.pinned {
                         placements.push((tile.id, target));
-                        if t >= 1. {
+                        if t >= 1. && !s.live {
                             settled_tiles.push(planor::SettledTile {
                                 id: tile.id,
                                 rect: tile.rect,
@@ -963,12 +1091,35 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                 }
                 let placed_at = Instant::now();
-                let result = win32::place(&placements);
+                // Parking never waits for the app. The last on-screen move of an open/close animation is
+                // asynchronous too: its thumbnail remains above it until `open_landed` confirms arrival.
+                let (parking, landing): (Vec<(isize, Rect)>, Vec<(isize, Rect)>) =
+                    placements.iter().copied().partition(|p| p.1.x == park);
+                let animated_open_landing = s.action == "open_close"
+                    && t >= 1.
+                    && !landing.is_empty();
+                if animated_open_landing
+                    && open_landed != Some(s.epoch)
+                    && open_landing.as_ref().is_none_or(|(epoch, _, _)| *epoch != s.epoch)
+                {
+                    win32::place_async(&landing);
+                    open_landing = Some((s.epoch, Instant::now(), landing.clone()));
+                }
+                if retries == 0 {
+                    win32::place_async(&parking);
+                }
+                let result = if landing.is_empty() || (animated_open_landing && retries == 0) {
+                    Ok(())
+                } else {
+                    // Constraint/rejection handling remains synchronous, as does final placement for
+                    // every non-open/close action. The existing delayed verify corrects a timed-out handoff.
+                    win32::place(&landing)
+                };
                 if placed_at.elapsed().as_millis() >= 100 {
                     diag::trace(format!("SLOW render place: {} ms", placed_at.elapsed().as_millis()))
                 }
                 rejected.clear();
-                if t >= 1. && result.is_ok() {
+                if t >= 1. && !open_handoff && !open_timed_out && result.is_ok() {
                     for &(id, want) in &placements {
                         if want.x != park {
                             if let Some(got) = win32::frame(id) {
@@ -1010,7 +1161,16 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     );
                 }
             }
-            if place_ok && t >= 1. && rejected.is_empty() && parked_checked_epoch != s.epoch && !settled_tiles.is_empty() {
+            let waiting_open_landing = open_landing
+                .as_ref()
+                .is_some_and(|(epoch, _, _)| *epoch == s.epoch);
+            if place_ok
+                && t >= 1.
+                && !waiting_open_landing
+                && rejected.is_empty()
+                && parked_checked_epoch != s.epoch
+                && !settled_tiles.is_empty()
+            {
                 parked_checked_epoch = s.epoch;
                 let actuals: Vec<(isize, Rect)> = settled_tiles
                     .iter()
@@ -1050,8 +1210,24 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     retries,
                 }));
             }
-            last = Instant::now();
+            // Animation smoothness: the interval between two presented frames of the same animated scene. A
+            // frame later than 1.5 refresh periods is a visible hitch.
+            if s.duration > 0 && frame_of_scene > 0 && !anim_done {
+                crate::perf::record_frame(s.action, last.elapsed().as_micros() as u64);
+            }
             if t >= 1. {
+                anim_done = true;
+            }
+            if s.live && frame_of_scene == 0 {
+                // Under the fingers every scene is one frame: the gap between their presents is the smoothness.
+                if let Some(prev) = last_live_present.filter(|p| p.elapsed() < Duration::from_millis(120)) {
+                    crate::perf::record_frame("live", prev.elapsed().as_micros() as u64);
+                }
+                last_live_present = Some(Instant::now());
+            }
+            frame_of_scene += 1;
+            last = Instant::now();
+            if t >= 1. && !waiting_open_landing {
                 settled = timestamp() + 330_000;
                 let current_epoch = s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
                 scene = None;

@@ -27,9 +27,9 @@ enum Command {
         /// `all` or a monitor index (see meta.json after a run).
         #[arg(long, default_value = "all")]
         monitors: String,
-        /// Frames per second on the constant timeline.
-        #[arg(long, default_value_t = 60)]
-        fps: u32,
+        /// Frames per second on the constant timeline (default: the highest refresh rate of any monitor).
+        #[arg(long)]
+        fps: Option<u32>,
         /// Planor trace to copy into the recording instead of %LOCALAPPDATA%\planor\trace.log
         /// (an isolated test daemon writes its trace elsewhere).
         #[arg(long)]
@@ -117,14 +117,14 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Run a continuous low-cost rolling video/event ring buffer (default 10 s @ 30 fps).
+    /// Run a continuous rolling video/event ring buffer (default 10 s at the highest monitor refresh rate).
     Ring {
         /// Rolling window duration in seconds (2..120).
         #[arg(long, default_value_t = 10)]
         seconds: u32,
-        /// Capture frame rate on the ring timeline.
-        #[arg(long, default_value_t = 30)]
-        fps: u32,
+        /// Capture frame rate on the ring timeline (default: the highest refresh rate of any monitor).
+        #[arg(long)]
+        fps: Option<u32>,
         /// `all` or a monitor index.
         #[arg(long, default_value = "all")]
         monitors: String,
@@ -180,6 +180,29 @@ fn unreachable_recorder(pipe_name: &Option<String>, e: std::io::Error) -> Box<dy
     ))
 }
 
+/// The highest current refresh rate of any connected monitor (owner rule: always record at that rate), 60 if
+/// none can be read.
+fn max_refresh_hz() -> u32 {
+    use windows_sys::Win32::Graphics::Gdi::*;
+    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut windows_sys::Win32::Foundation::RECT, data: isize) -> i32 {
+        unsafe {
+            let best = &mut *(data as *mut u32);
+            let mut info: MONITORINFOEXW = std::mem::zeroed();
+            info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+            if GetMonitorInfoW(m, &mut info.monitorInfo) != 0 {
+                let mut mode: DEVMODEW = std::mem::zeroed();
+                mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
+                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0 && mode.dmDisplayFrequency > 1 {
+                    *best = (*best).max(mode.dmDisplayFrequency);
+                }
+            }
+            1
+        }
+    }
+    let mut best = 0u32;
+    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut best as *mut u32 as isize) };
+    if best == 0 { 60 } else { best.clamp(24, 360) }
+}
 fn main() {
     capture::dpi_aware();
     let result = match Cli::parse().command {
@@ -202,7 +225,7 @@ fn main() {
             mic,
             mic_device,
             monitors,
-            fps,
+            fps: fps.unwrap_or_else(max_refresh_hz),
             trace,
             mark,
             pipe,
@@ -264,7 +287,7 @@ fn main() {
             synthetic_monitors,
         } => ring::run(ring::RingArgs {
             seconds,
-            fps,
+            fps: fps.unwrap_or_else(max_refresh_hz),
             monitors,
             preset,
             encoder_threads,

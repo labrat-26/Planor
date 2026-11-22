@@ -61,9 +61,10 @@ impl Journal {
             return Ok(());
         }
         let tmp = self.path.with_extension("tmp");
-        let mut f = File::create(&tmp)?;
-        serde_json::to_writer(&mut f, &self.entries)?;
-        f.sync_all()?;
+        let f = File::create(&tmp)?;
+        serde_json::to_writer(&f, &self.entries)?;
+        // Atomic write+rename protects against daemon crash/kill; window HWNDs do not survive OS
+        // reboot, so per-save FlushFileBuffers (10-21 ms) only stalls window-open events.
         drop(f);
         fs::rename(tmp, &self.path)?;
         Ok(())
@@ -418,6 +419,36 @@ impl<B: WindowBackend> Engine<B> {
                     None => "not recording".into(),
                 });
             }
+            Command::Gestures { action: crate::GestureAction::Replay { file, step, gap_ms } } => {
+                use planor::replay::{fits, identify, parse_events_jsonl, segments};
+                let text = std::fs::read_to_string(&file)?;
+                let segs: Vec<_> = segments(&parse_events_jsonl(&text))
+                    .into_iter()
+                    .filter(|s| step.as_ref().is_none_or(|w| s.label.to_lowercase().contains(&w.to_lowercase())))
+                    .filter(|s| {
+                        let g = identify(s);
+                        s.label.is_empty() || fits(&s.label, &g) || (!s.previous.is_empty() && fits(&s.previous, &g))
+                    })
+                    .collect();
+                let n = segs.len();
+                // On its own thread, through the same event bus as the real touchpad, at the recorded pace.
+                std::thread::spawn(move || {
+                    for s in segs {
+                        let t0 = s.frames.first().map(|f| f.0).unwrap_or(0);
+                        let start = Instant::now();
+                        for (t, p) in s.frames {
+                            let due = start + Duration::from_micros((t - t0).max(0) as u64);
+                            if let Some(wait) = due.checked_duration_since(Instant::now()) {
+                                std::thread::sleep(wait);
+                            }
+                            crate::win32::emit(Event::Contacts(if p.len() >= 3 { p } else { vec![] }));
+                        }
+                        crate::win32::emit(Event::Contacts(vec![]));
+                        std::thread::sleep(Duration::from_millis(gap_ms));
+                    }
+                });
+                return Ok(format!("replaying {n} gestures"));
+            }
             Command::Gestures { action: crate::GestureAction::Stop } => {
                 let n = self.gesture_rec.as_ref().map(|r| r.events.len());
                 self.write_gesture_recording();
@@ -531,6 +562,10 @@ impl<B: WindowBackend> Engine<B> {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
                 self.keypress(&name);
+                if !self.dirty {
+                    self.input = None;
+                    self.input_qpc_us = None;
+                }
             }
             Command::State { json } => return self.state_snapshot(json),
             Command::Perf {
@@ -1096,7 +1131,13 @@ impl<B: WindowBackend> Engine<B> {
         // Test daemons share the desktop with the developer's own windows, which they treat as unmanaged;
         // carving those out would hide every border they draw, so isolated instances skip it unless a test
         // asks for it with PLANOR_HOLES.
-        let holes = self.holes();
+        let live = self.pad_scrolling || self.inertia.is_some();
+        let holes = if live && self.holes_checked.elapsed() < Duration::from_millis(150) {
+            self.last_holes.clone()
+        } else {
+            self.holes_checked = Instant::now();
+            self.holes()
+        };
         self.last_holes = holes.clone();
         let color = |k: &str| {
             if self.cfg["borders"]["enabled"].as_bool() == Some(true) {
@@ -1213,19 +1254,29 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        if self.diag.enabled {
-            let animate_ms = if self.cfg["animation"]["enabled"].as_bool() == Some(true)
-                && self.cfg["animation"][self.action].as_bool() == Some(true)
-            {
-                self.cfg["animation"]["duration_ms"]
-                    .as_integer()
-                    .unwrap_or(180) as u64
+        // The real animation time of this scene (0 when placed at once: under the fingers, a monitor
+        // crossing, a fullscreen switch). The EXPECT lines carry the same value, so the recorder's lag check
+        // waits for what is actually on screen.
+        let duration = if !std::mem::take(&mut self.instant)
+            && self.cfg["animation"]["enabled"].as_bool() == Some(true)
+            && self.cfg["animation"][self.action].as_bool() == Some(true)
+        {
+            // Live touchpad scrolling re-targets every few milliseconds; a short ease per update
+            // smooths it without the strip trailing the fingers.
+            if std::mem::take(&mut self.quick) {
+                70
             } else {
-                0
-            };
+                self.cfg["animation"]["duration_ms"].as_integer().unwrap() as u64
+            }
+        } else {
+            self.quick = false;
+            0
+        };
+        if self.diag.enabled {
+            let animate_ms = duration;
             for t in &tiles {
                 diag::trace(format!(
-                    "EXPECT id={} rect={},{},{},{} monitor={} kind={} hidden={} animate_ms={}",
+                    "EXPECT id={} rect={},{},{},{} monitor={} kind={} hidden={} animate_ms={}{}",
                     t.id,
                     t.rect.x,
                     t.rect.y,
@@ -1242,7 +1293,8 @@ impl<B: WindowBackend> Engine<B> {
                         "tile"
                     },
                     if t.hidden { 1 } else { 0 },
-                    animate_ms
+                    animate_ms,
+                    if live { " live=1" } else { "" }
                 ));
             }
         }
@@ -1258,21 +1310,8 @@ impl<B: WindowBackend> Engine<B> {
             diagnostics: self.diag.enabled,
             tiles,
             monitors: self.displays.clone(),
-            duration: if !std::mem::take(&mut self.instant)
-                && self.cfg["animation"]["enabled"].as_bool() == Some(true)
-                && self.cfg["animation"][self.action].as_bool() == Some(true)
-            {
-                // Live touchpad scrolling re-targets every few milliseconds; a short ease per update
-                // smooths it without the strip trailing the fingers.
-                if std::mem::take(&mut self.quick) {
-                    70
-                } else {
-                    self.cfg["animation"]["duration_ms"].as_integer().unwrap() as u64
-                }
-            } else {
-                self.quick = false;
-                0
-            },
+            duration,
+
             spring: self.cfg["animation"]["curve"].as_str() == Some("spring"),
             width: self.cfg["borders"]["width_px"].as_integer().unwrap() as f32,
             radius: self.cfg["borders"]["corner_radius_px"]
@@ -1280,11 +1319,81 @@ impl<B: WindowBackend> Engine<B> {
                 .unwrap() as f32,
             holes: holes.clone(),
             zones,
+            action: self.action,
+            live,
         }))?;
         if self.diag.enabled {
             diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, holes.len()));
         }
         Ok(())
+    }
+    fn contacts(&mut self, p: Vec<(f64, f64)>) {
+        if let Some(rec) = self.gesture_rec.as_mut() {
+            let pts: Vec<[f64; 2]> = p.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
+            rec.push(serde_json::json!({ "kind": "contacts", "pts": pts }));
+            if rec.passive {
+                self.gesture = Default::default();
+                return;
+            }
+        }
+        // 1 or 2 fingers only arrive while recording; to the gestures they are a lift. Five or more are
+        // passed on: they veto the gesture.
+        let p = if p.len() >= 3 { p } else { vec![] };
+        if self.diag.enabled
+            && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
+        {
+            let pts = if p.is_empty() {
+                "-".to_string()
+            } else {
+                p.iter()
+                    .map(|(x, y)| format!("{x:.2},{y:.2}"))
+                    .collect::<Vec<_>>()
+                    .join(";")
+            };
+            diag::trace(format!("PAD contacts n={} pts={pts}", p.len()));
+        }
+        let swipe = self.gesture.sample(
+            &p,
+            self.cfg["touchpad"]["axis_lock_deadzone"]
+                .as_integer()
+                .unwrap() as f64,
+            self.cfg["touchpad"]["swipe_step_px"].as_integer().unwrap() as f64,
+        );
+        // Three fingers move the focus, four fingers move the focused window. With the
+        // natural direction the content follows the fingers (swipe right = focus left).
+        // Gesture trace (diagnostics): what was recognised and when, for lining up with a note.
+        if self.diag.enabled && !matches!(swipe, Swipe::None | Swipe::DragMove(..) | Swipe::Scroll(_) | Swipe::ScrollV(_)) {
+            diag::trace(format!("PAD {swipe:?}"));
+        }
+        match swipe {
+            Swipe::DragStart => {
+                diag::trace(format!("PAD drag start, window {:?}", self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active())));
+                self.pad_begin();
+            }
+            Swipe::DragMove(dx, dy) => self.pad_move(dx, dy),
+            Swipe::DragEnd => self.pad_end(),
+            Swipe::DragCancel => self.pad_cancel(),
+            Swipe::Scroll(d) => self.pad_scroll(d, false),
+            Swipe::ScrollV(d) => self.pad_scroll(d, true),
+            Swipe::ScrollEnd => self.pad_scroll_end(),
+            Swipe::Step { fingers, horizontal, direction } => {
+                let natural = self.cfg["touchpad"]["swipe_natural_direction"].as_bool() == Some(true);
+                let forward = (direction > 0) != natural;
+                let key = match (fingers, horizontal, forward) {
+                    (3, true, false) => "focus_left",
+                    (3, true, true) => "focus_right",
+                    (3, false, false) => "focus_up",
+                    (3, false, true) => "focus_down",
+                    (4, true, false) => "move_left",
+                    (4, true, true) => "move_right",
+                    _ => return,
+                };
+                diag::trace(format!("PAD step fingers={fingers} horizontal={horizontal} direction={direction} key={key}"));
+                self.quick = true;
+                self.keypress(key);
+            }
+            Swipe::None => (),
+        }
     }
     fn clear(&self) -> Result<()> {
         let (tx, rx) = crossbeam_channel::bounded(1);
@@ -2105,7 +2214,11 @@ impl<B: WindowBackend> Engine<B> {
             Event::Key(k) => {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
-                self.keypress(&k)
+                self.keypress(&k);
+                if !self.dirty {
+                    self.input = None;
+                    self.input_qpc_us = None;
+                }
             }
             Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.dirty=true;},
             Event::Window(e, id) if !self.blocked() => match e {
@@ -2199,71 +2312,12 @@ impl<B: WindowBackend> Engine<B> {
             {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
-                if let Some(rec) = self.gesture_rec.as_mut() {
-                    let pts: Vec<[f64; 2]> = p.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
-                    rec.push(serde_json::json!({ "kind": "contacts", "pts": pts }));
-                    if rec.passive {
-                        self.gesture = Default::default();
-                        return;
-                    }
-                }
-                // 1 or 2 fingers only arrive while recording; to the gestures they are a lift. Five or more are
-                // passed on: they veto the gesture.
-                let p = if p.len() >= 3 { p } else { vec![] };
-                if self.diag.enabled
-                    && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
-                {
-                    let pts = if p.is_empty() {
-                        "-".to_string()
-                    } else {
-                        p.iter()
-                            .map(|(x, y)| format!("{x:.2},{y:.2}"))
-                            .collect::<Vec<_>>()
-                            .join(";")
-                    };
-                    diag::trace(format!("PAD contacts n={} pts={pts}", p.len()));
-                }
-                let swipe = self.gesture.sample(
-                    &p,
-                    self.cfg["touchpad"]["axis_lock_deadzone"]
-                        .as_integer()
-                        .unwrap() as f64,
-                    self.cfg["touchpad"]["swipe_step_px"].as_integer().unwrap() as f64,
-                );
-                // Three fingers move the focus, four fingers move the focused window. With the
-                // natural direction the content follows the fingers (swipe right = focus left).
-                // Gesture trace (diagnostics): what was recognised and when, for lining up with a note.
-                if self.diag.enabled && !matches!(swipe, Swipe::None | Swipe::DragMove(..) | Swipe::Scroll(_) | Swipe::ScrollV(_)) {
-                    diag::trace(format!("PAD {swipe:?}"));
-                }
-                match swipe {
-                    Swipe::DragStart => {
-                        diag::trace(format!("PAD drag start, window {:?}", self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active())));
-                        return self.pad_begin();
-                    }
-                    Swipe::DragMove(dx, dy) => return self.pad_move(dx, dy),
-                    Swipe::DragEnd => return self.pad_end(),
-                    Swipe::DragCancel => return self.pad_cancel(),
-                    Swipe::Scroll(d) => return self.pad_scroll(d, false),
-                    Swipe::ScrollV(d) => return self.pad_scroll(d, true),
-                    Swipe::ScrollEnd => return self.pad_scroll_end(),
-                    _ => (),
-                }
-                if let Swipe::Step { fingers, horizontal, direction } = swipe {
-                    let natural = self.cfg["touchpad"]["swipe_natural_direction"].as_bool() == Some(true);
-                    let forward = (direction > 0) != natural;
-                    let key = match (fingers, horizontal, forward) {
-                        (3, true, false) => "focus_left",
-                        (3, true, true) => "focus_right",
-                        (3, false, false) => "focus_up",
-                        (3, false, true) => "focus_down",
-                        (4, true, false) => "move_left",
-                        (4, true, true) => "move_right",
-                        _ => return,
-                    };
-                    diag::trace(format!("PAD step fingers={fingers} horizontal={horizontal} direction={direction} key={key}"));
-                    self.quick = true;
-                    self.keypress(key)
+                self.contacts(p);
+                // Only keep input timestamps that actually produced a layout scene; otherwise a
+                // deadzone/no-op move would bill its stale age to an unrelated scene tens of ms later.
+                if !self.dirty {
+                    self.input = None;
+                    self.input_qpc_us = None;
                 }
             }
             _ => (),

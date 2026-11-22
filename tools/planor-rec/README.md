@@ -26,7 +26,7 @@ recorder's dropout handling is tested with a fake duplicator, clock and encoder 
 ## Usage
 
 ```text
-planor-rec record --out <dir> [--mic] [--mic-device <name>] [--monitors all|N] [--fps 60]
+planor-rec record --out <dir> [--mic] [--mic-device <name>] [--monitors all|N] [--fps N]
                   [--max-size-mb N] [--max-minutes M] [--preset ultrafast] [--encoder-threads 3]
                   [--trace <planor trace.log>] [--mark <text>] [--pipe <name>] [--no-hotkeys]
 planor-rec stop   [--pipe <name>]
@@ -61,7 +61,7 @@ Each selected monitor produces:
 
 | file | contents |
 | --- | --- |
-| `video-<monitor>.mp4` | H.264 CRF 16, constant `--fps` timeline (default 60), `--preset` default `ultrafast` |
+| `video-<monitor>.mp4` | H.264 CRF 16, constant `--fps` timeline (default: the highest current refresh rate of any monitor, owner rule; 60 if unreadable), `--preset` default `ultrafast` |
 | `frames-<monitor>.csv` | `index,present_qpc_us,changed,state` — one row per encoded frame; `changed=0`: the previous picture was repeated because the screen did not change; `state` = `ok`, `lost` (no live capture, last picture repeated) or `reopened` (first fresh picture after a loss) |
 | `ffmpeg-<monitor>.log` | FFmpeg stderr |
 

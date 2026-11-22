@@ -1240,3 +1240,94 @@ fn win_wheel_is_for_the_mouse_and_capped_per_event() {
     assert!(more > 0 && more <= 2 * step, "a fast spin (10 notches in one event) scrolls at most two: {more}");
     h.stop_clean();
 }
+
+#[test]
+fn non_dirtying_contacts_do_not_leave_stale_input_timestamp_on_both_orientations() {
+    for (mon, id) in [("MON0", 101), ("MON2", 301)] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        focus(&mut h, id);
+        assert!(h.engine.input_qpc_us.is_none());
+
+        // Sub-deadzone 3-finger movement produces Swipe::None without dirtying layout.
+        h.engine.event(Event::Contacts(vec![(200., 200.); 3]));
+        h.engine.event(Event::Contacts(vec![(200.5, 200.1); 3]));
+        assert!(!h.engine.dirty, "{mon}: sub-deadzone contact does not dirty layout");
+        assert!(h.engine.input_qpc_us.is_none(), "{mon}: non-dirtying 3-finger contact must not leave stale input_qpc_us");
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle_quiet();
+
+        // Start a 4-finger pad drag, wait past the 8 ms move gate, then nudge without changing target/mode.
+        h.engine.event(Event::Contacts(vec![(200., 200.); 4]));
+        h.engine.event(Event::Contacts(vec![(216., 200.); 4]));
+        h.settle_quiet();
+        assert!(h.engine.pad.is_some(), "{mon}: 4-finger drag started");
+        thread::sleep(Duration::from_millis(12));
+        h.engine.event(Event::Contacts(vec![(216.2, 200.); 4]));
+        if !h.engine.dirty {
+            assert!(h.engine.input_qpc_us.is_none(), "{mon}: pad_move without scene must not leave stale input_qpc_us");
+        }
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle_quiet();
+        settle_now(&mut h);
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn live_scroll_caches_holes_during_continuous_motion_on_both_orientations() {
+    for (mon, id, hole_id, hole_rect, p0, p1, p2) in [
+        (
+            "MON0",
+            101,
+            901,
+            Rect { x: 200, y: 200, w: 300, h: 300 },
+            (400., 200.),
+            (360., 200.),
+            (320., 200.),
+        ),
+        (
+            "MON2",
+            301,
+            902,
+            Rect { x: -1200, y: 200, w: 300, h: 300 },
+            (200., 400.),
+            (200., 360.),
+            (200., 320.),
+        ),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            three_per_monitor(sim);
+            let mut ext = SimWindow::new(hole_id, hole_rect);
+            ext.elevated = true;
+            sim.add_window(ext);
+        });
+        focus(&mut h, id);
+        let initial_holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+        assert!(initial_holes.contains(&hole_rect), "{mon}: initial scene includes hole {hole_rect:?}");
+
+        // Enter live scroll along the monitor's strip axis.
+        h.engine.event(Event::Contacts(vec![p0; 3]));
+        h.settle_quiet();
+        h.engine.event(Event::Contacts(vec![p1; 3]));
+        h.settle_quiet();
+        assert!(h.engine.pad_scrolling, "{mon}: should be live scrolling");
+
+        // Move the unmanaged window right after holes were checked: live frames reuse cached holes.
+        let mut moved = hole_rect;
+        moved.w = 360;
+        h.desktop.0.lock().unwrap().windows.get_mut(&hole_id).unwrap().rect = moved;
+        h.engine.holes_checked = Instant::now();
+        h.engine.event(Event::Contacts(vec![p2; 3]));
+        h.settle_quiet();
+        let cached = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+        assert!(cached.contains(&hole_rect), "{mon}: live scroll should reuse cached holes within 150 ms: {cached:?}");
+
+        // Settling (live = false) refreshes holes immediately to the moved rect.
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle_quiet();
+        settle_now(&mut h);
+        let refreshed = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+        assert!(refreshed.contains(&moved), "{mon}: settled scene must refresh holes to {moved:?}: {refreshed:?}");
+        h.stop_clean();
+    }
+}

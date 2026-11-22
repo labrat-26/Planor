@@ -795,6 +795,8 @@ pub struct PerfReport {
     pub frame_telemetry: Option<serde_json::Value>,
     pub counters: Vec<CounterSample>,
     pub budgets: PerfBudgets,
+    /// Presented-frame intervals of animations, per action (late = over 1.5 refresh periods).
+    pub animation: Vec<AnimationStats>,
 }
 
 fn percentile(sorted: &[u64], num: usize, den: usize) -> u64 {
@@ -1003,6 +1005,7 @@ pub fn build_report(frame_telemetry: Option<serde_json::Value>) -> PerfReport {
         frame_telemetry,
         counters,
         budgets,
+        animation: animation_stats(),
     }
 }
 
@@ -1051,6 +1054,20 @@ pub fn format_summary(report: &PerfReport) -> String {
             s.slow_count
         ));
     }
+    for a in &report.animation {
+        out.push(format!(
+            "animation {:<14} frames {:>5}  late {:>4} ({:.1}%)  dropped {:>3}  p50 {:.1} ms  p95 {:.1} ms  worst {:.1} ms (refresh {:.1} ms)",
+            a.action,
+            a.frames,
+            a.late,
+            a.late as f64 * 100. / a.frames.max(1) as f64,
+            a.dropped,
+            a.p50_ms,
+            a.p95_ms,
+            a.worst_ms,
+            a.refresh_ms
+        ));
+    }
     out.push(format!(
         "Budgets: startup={} (<600ms) scene_warm={} (<16ms) gesture={} (<16ms) hooks={} (<5ms) -> {}",
         if report.budgets.startup_ok { "PASS" } else { "FAIL" },
@@ -1063,6 +1080,7 @@ pub fn format_summary(report: &PerfReport) -> String {
 }
 
 pub fn reset() {
+    reset_frames();
     let s = store();
     while s.queue.pop().is_some() {}
     while s.markers_queue.pop().is_some() {}
@@ -1213,5 +1231,77 @@ mod tests {
         let report = build_report(None);
         assert!(report.spans.iter().any(|s| s.name == "daemon.tick"));
         reset();
+    }
+}
+
+// ---- Animation smoothness: presented-frame intervals per action ----
+
+#[derive(Clone, Default, Serialize)]
+pub struct AnimationStats {
+    pub action: String,
+    /// Frame intervals measured (frames after the first of each animated scene).
+    pub frames: u64,
+    /// Intervals longer than 1.5 refresh periods: a visible hitch.
+    pub late: u64,
+    /// Intervals longer than 2.5 refresh periods: at least two frames lost.
+    pub dropped: u64,
+    pub p50_ms: f64,
+    pub p95_ms: f64,
+    pub worst_ms: f64,
+    pub refresh_ms: f64,
+}
+
+static FRAMES: Mutex<Vec<(&'static str, u64)>> = Mutex::new(Vec::new());
+
+/// One presented frame of an animated scene, `interval_us` after the previous one.
+pub fn record_frame(action: &'static str, interval_us: u64) {
+    if !PERF_ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Ok(mut f) = FRAMES.lock() {
+        if f.len() >= 20_000 {
+            f.drain(..5_000);
+        }
+        f.push((action, interval_us));
+    }
+    let refresh = refresh_us();
+    if interval_us as f64 > refresh * 1.5 {
+        record_instant("JANK", "render", format!("action={action} interval_ms={:.1} refresh_ms={:.1}", interval_us as f64 / 1000., refresh / 1000.));
+    }
+}
+
+fn refresh_us() -> f64 {
+    crate::gpu::latest().dwm_refresh_hz.filter(|h| *h > 20.).map(|h| 1e6 / h).unwrap_or(16_667.)
+}
+
+pub fn animation_stats() -> Vec<AnimationStats> {
+    let frames = FRAMES.lock().map(|f| f.clone()).unwrap_or_default();
+    let refresh = refresh_us();
+    let mut by: std::collections::BTreeMap<&'static str, Vec<u64>> = Default::default();
+    for (a, us) in frames {
+        by.entry(a).or_default().push(us);
+        by.entry("all").or_default().push(us);
+    }
+    by.into_iter()
+        .map(|(action, mut v)| {
+            v.sort_unstable();
+            let pick = |q: f64| v[((v.len() - 1) as f64 * q) as usize] as f64 / 1000.;
+            AnimationStats {
+                action: action.to_string(),
+                frames: v.len() as u64,
+                late: v.iter().filter(|&&x| x as f64 > refresh * 1.5).count() as u64,
+                dropped: v.iter().filter(|&&x| x as f64 > refresh * 2.5).count() as u64,
+                p50_ms: pick(0.5),
+                p95_ms: pick(0.95),
+                worst_ms: *v.last().unwrap() as f64 / 1000.,
+                refresh_ms: refresh / 1000.,
+            }
+        })
+        .collect()
+}
+
+pub fn reset_frames() {
+    if let Ok(mut f) = FRAMES.lock() {
+        f.clear();
     }
 }

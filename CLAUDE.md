@@ -37,6 +37,13 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 - **Every test run first rebuilds and restarts the binary** (owner rule): `scripts\verify.ps1` runs `scripts\rebuild-daemon.ps1` before
   any tier and aborts if the daemon does not come back. Use `-NoRestart` only when the owner asks. When running a test outside
   `verify.ps1`, run `scripts\rebuild-daemon.ps1` first.
+- **Journal every batch of steps**: Log what you are working on at each batch of steps using
+  `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\ai-journal.ps1 -Step "..." -Status working|done|blocked|handoff -Agent <name> -Details "..." -Next "..." -Verified "..."`
+  (before/after edits, test runs, and before stopping or handing off). When resuming a session or picking up dirty work,
+  run `scripts\ai-journal.ps1 -Show` first. Entries are stored under `build\ai-journal\` (`journal.jsonl` + `CURRENT.md`).
+- **Delegate heavy logs & images to the cheapest subagent**: Run builds/tests/feel runs, filter raw logs/traces, and
+  inspect screenshots/images through the smallest/cheapest subagent model (`flash_lite` / Haiku) so only filtered
+  relevant lines, metrics, and findings enter the main context.
 - Never weaken or delete a test to make it pass. Change an assertion only when it is provably stale versus the intended
   behaviour, and say which one and why.
 - Report only what you ran. "Not verified" is a valid and required answer. Give exact counts and failure messages.
@@ -74,7 +81,7 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 
 ## Read data through the digest, not raw logs
 
-Raw traces, recorder reports and cargo logs are huge. Shrink them first (scripts run with
+Raw traces, recorder reports and cargo logs are huge. Shrink them first (or have a small/cheapest subagent model like `flash_lite` / Haiku run the script, inspect screenshots, and filter down to relevant lines/metrics — scripts run with
 `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\<name>.ps1`, since script execution is disabled by default):
 
 ```powershell

@@ -310,6 +310,8 @@ struct Exp {
     clamped: bool,
     /// First scene after a daemon start (see `trace::Expectation::startup`).
     startup: bool,
+    /// Finger-driven scene (`trace::Expectation::live`): never lag-tracked.
+    live: bool,
 }
 
 fn monitor_index_of(monitors: &[MonitorInfo], rect: Rect) -> Option<usize> {
@@ -379,6 +381,7 @@ fn merge_expectations(
             end_us,
             clamped: false,
             startup: e.startup,
+            live: e.live,
         });
         last.insert(e.hwnd, out.len() - 1);
     }
@@ -472,6 +475,7 @@ fn synth_expectations_from_os(
                 end_us,
                 clamped: false,
                 startup: false,
+                live: false,
             });
             last.insert(w.hwnd, out.len() - 1);
         }
@@ -2054,6 +2058,11 @@ fn build_jobs(
             *until_us < e.t_us || r.max_side_diff(e.rect) > cfg.position_tolerance_px
         });
         last.insert(e.hwnd, (e.rect, e.end_us));
+        // Under the fingers the target moves every few milliseconds with no animation: there is nothing to
+        // arrive at. The scene that ends the gesture (not live) is tracked against the last live rectangle.
+        if e.live {
+            continue;
+        }
         if !changed || e.rect.overlap_area(monitor_rect) == 0 {
             continue;
         }
@@ -3104,6 +3113,7 @@ mod tests {
             hidden: false,
             animate_ms: 180,
             startup: false,
+            live: false,
             scene: 0,
         };
         let exps = merge_expectations(
@@ -3140,6 +3150,7 @@ mod tests {
             hidden: false,
             animate_ms: 180,
             startup: false,
+            live: false,
             scene,
         }
     }
@@ -3221,6 +3232,7 @@ mod tests {
             hidden: false,
             animate_ms: 180,
             startup: false,
+            live: false,
             scene: 0,
         };
         // Trace history from before the recording; only the layout live at the start survives.
@@ -3328,6 +3340,7 @@ mod tests {
             end_us: 10_000_000,
             clamped: false,
             startup: false,
+            live: false,
         };
         let exps = vec![e(1_260_000), e(500)];
         assert!(!all_settled(&exps, 1_200_000));
@@ -3349,6 +3362,7 @@ mod tests {
             end_us: 20_000_000,
             clamped: false,
             startup,
+            live: false,
         }
     }
 

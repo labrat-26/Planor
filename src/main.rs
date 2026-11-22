@@ -218,6 +218,16 @@ enum GestureAction {
     /// Name every gesture in a recording (fingers, tap/swipe/drag/scroll/pinch/circle, direction, pace) and,
     /// for a guided one, check each against its step's instruction.
     Analyze { file: PathBuf },
+    /// Play a recording's gestures into the running daemon at their recorded speed, as if the touchpad sent
+    /// them (only gestures done as instructed; --step keeps the guided steps whose label contains it).
+    Replay {
+        file: PathBuf,
+        #[arg(long)]
+        step: Option<String>,
+        /// Pause between gestures, ms.
+        #[arg(long, default_value_t = 600)]
+        gap_ms: u64,
+    },
     /// Add a step label to the running recording.
     Mark { text: String },
     /// Finish the running recording now and write it.

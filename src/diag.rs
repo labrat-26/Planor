@@ -117,6 +117,12 @@ pub fn stamp() -> String {
     format!("{:02}:{:02}:{:02}.{:03}", s / 3600, s / 60 % 60, s % 60, d.subsec_millis())
 }
 pub fn trace(line: impl AsRef<str>) {
+    // Unit and simulated tests run the engine in-process: they must never touch the owner's trace (the first
+    // line used to rename the running daemon's trace.log away and interleave test lines into recordings).
+    if cfg!(test) {
+        let _ = line;
+        return;
+    }
     use std::io::Write;
     let slot = TRACE.get_or_init(|| {
         let file = std::env::var("LOCALAPPDATA").ok().and_then(|dir| {

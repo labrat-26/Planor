@@ -725,10 +725,11 @@ pub fn activate(id: isize) {
         }
     }
 }
-pub fn place(items: &[(isize, Rect)]) -> Result<()> {
-    let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::Win32Place);
+/// Move windows without waiting for their apps. Parking happens behind a stand-in, and the open/close
+/// animation's last frame is held until the asynchronous move reaches its target (or a bounded handoff
+/// timeout), then verified again after settling. A synchronous move waited up to 68 ms for apps still starting.
+pub fn place_async(items: &[(isize, Rect)]) {
     unsafe {
-        let mut batch = BeginDeferWindowPos(items.len() as _);
         for &(id, r) in items {
             let mut outer = RECT::default();
             if GetWindowRect(id as _, &mut outer) == 0 {
@@ -739,14 +740,55 @@ pub fn place(items: &[(isize, Rect)]) -> Result<()> {
             if r == vis {
                 continue;
             }
-            batch = DeferWindowPos(
-                batch,
+            SetWindowPos(
                 id as _,
                 null_mut(),
                 r.x + full.x - vis.x,
                 r.y + full.y - vis.y,
                 r.w + full.w - vis.w,
                 r.h + full.h - vis.h,
+                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+            );
+        }
+    }
+}
+pub fn place(items: &[(isize, Rect)]) -> Result<()> {
+    unsafe {
+        let mut moves = Vec::new();
+        for &(id, r) in items {
+            let mut outer = RECT::default();
+            if GetWindowRect(id as _, &mut outer) == 0 {
+                continue;
+            }
+            let full = rect(outer);
+            let vis = frame(id).unwrap_or(full);
+            if r == vis {
+                continue;
+            }
+            moves.push((
+                id,
+                Rect {
+                    x: r.x + full.x - vis.x,
+                    y: r.y + full.y - vis.y,
+                    w: r.w + full.w - vis.w,
+                    h: r.h + full.h - vis.h,
+                },
+            ));
+        }
+        if moves.is_empty() {
+            return Ok(());
+        }
+        let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::Win32Place);
+        let mut batch = BeginDeferWindowPos(moves.len() as _);
+        for (id, mr) in moves {
+            batch = DeferWindowPos(
+                batch,
+                id as _,
+                null_mut(),
+                mr.x,
+                mr.y,
+                mr.w,
+                mr.h,
                 SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER,
             );
             if batch.is_null() {

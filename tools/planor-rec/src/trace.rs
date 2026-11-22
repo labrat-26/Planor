@@ -24,6 +24,9 @@ pub struct Expectation {
     /// lists every tile Planor shows; a window missing from a later scene (it is being dragged, or was closed)
     /// is no longer expected anywhere.
     pub scene: u64,
+    /// `live=1`: a scene driven by the fingers (no animation, replaced every few ms); its rectangles are not
+    /// lag-tracked, the scene that ends the gesture is.
+    pub live: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -123,6 +126,7 @@ pub fn parse(text: &str, qpc_start_us: i64, utc_start_unix_ms: i64) -> Trace {
                     .find_map(|t| t.strip_prefix("hidden="))
                     .map(|v| v == "1" || v == "true")
                     .unwrap_or(false);
+                let live = body.split_whitespace().any(|t| t == "live=1");
                 let animate_ms = body
                     .split_whitespace()
                     .find_map(|t| t.strip_prefix("animate_ms="))
@@ -146,6 +150,7 @@ pub fn parse(text: &str, qpc_start_us: i64, utc_start_unix_ms: i64) -> Trace {
                         animate_ms,
                         startup: false,
                         scene: 0,
+                        live,
                     });
                     pending.push(trace.expectations.len() - 1);
                 }
@@ -189,6 +194,7 @@ pub fn parse(text: &str, qpc_start_us: i64, utc_start_unix_ms: i64) -> Trace {
                         animate_ms: 0,
                         startup: false,
                         scene: 0,
+                        live: false,
                     });
                 }
             }

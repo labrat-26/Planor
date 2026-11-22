@@ -48,6 +48,7 @@ if ($Perf) {
     $r = { param($v, $d) if ($null -eq $v) { "n/a" } else { [Math]::Round([double]$v, $d) } }
     Add-Line ("gpu: engine={0}% vram_local={1}MB shared={2}MB dwm={3}fpsHz late={5} dropped={6} missed={7} {8}" -f (& $r $g.engine_pct 1), (& $r $g.local_mb 1), (& $r $g.shared_mb 1), (& $r $g.dwm_compose_fps 0), (& $r $g.dwm_refresh_hz 0), $g.dwm_frames_late, $g.dwm_frames_dropped, $g.dwm_frames_missed, $gdText)
   }
+  foreach ($a in @($p.animation)) { if ($a) { Add-Line ("anim {0,-12} frames={1,5} late={2,4} ({3:N1}%) dropped={4,3} p95={5:N1}ms worst={6:N1}ms" -f $a.action, $a.frames, $a.late, (100.0 * $a.late / [Math]::Max(1, $a.frames)), $a.dropped, $a.p95_ms, $a.worst_ms) } }
   $b = $p.budgets
   Add-Line ("budgets all_pass=$($b.all_pass): startup=$($b.startup_first_place_ms)/$($b.startup_budget_ms)ms(ok=$($b.startup_ok)) render_p99=$($b.render_scene_warm_p99_ms)/$($b.render_scene_budget_ms)ms(ok=$($b.render_scene_ok)) gesture_p99=$($b.gesture_to_place_p99_ms)/$($b.gesture_budget_ms)ms(ok=$($b.gesture_ok)) hook_max=$($b.hook_callbacks_max_ms)/$($b.hook_budget_ms)ms(ok=$($b.hook_ok))")
   foreach ($s in ($p.spans | Sort-Object p99_us -Descending | Select-Object -First 8)) {
