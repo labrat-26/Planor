@@ -39,6 +39,7 @@ pub struct Tile {
 pub struct Scene {
     pub epoch: u64,
     pub input: Option<Instant>,
+    pub input_qpc_us: Option<i64>,
     pub diagnostics: bool,
     pub monitors: Vec<(String, Rect, Rect)>,
     pub tiles: Vec<Tile>,
@@ -449,6 +450,7 @@ pub static EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::n
 pub fn start() -> crossbeam_channel::Sender<Message> {
     let (tx, rx) = crossbeam_channel::unbounded();
     std::thread::spawn(move || unsafe {
+        crate::perf::register_thread("render");
         let _ = windows::Win32::System::Com::CoInitializeEx(
             None,
             windows::Win32::System::Com::COINIT_APARTMENTTHREADED,
@@ -462,6 +464,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         let mut begin = Instant::now();
         let mut last = begin;
         let mut settled = 0;
+        let mut gesture_recorded = false;
+        let mut parked_checked_epoch = 0u64;
         // Windows that were just uncloaked (desktop switch) can report a transiently inset frame,
         // which skews the border delta used for placement. After settling, re-check the frames
         // and re-place anything that is not exactly on target.
@@ -480,6 +484,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         };
         let tag = wide("Planor.Recovery.Identity");
         loop {
+            crate::perf::heartbeat_render();
             let mut msg = MSG::default();
             while PeekMessageW(&mut msg, null_mut(), 0, 0, PM_REMOVE) != 0 {
                 TranslateMessage(&msg);
@@ -488,13 +493,15 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             if let Some((at, items, left)) = verify.take() {
                 if Instant::now() < at {
                     verify = Some((at, items, left))
-                } else if left > 0
-                    && items
+                } else if left > 0 {
+                    let _vspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderVerify);
+                    if items
                         .iter()
                         .any(|&(id, want)| win32::frame(id).is_some_and(|got| got != want))
-                {
-                    let _ = win32::place(&items);
-                    verify = Some((Instant::now() + Duration::from_millis(150), items, left - 1))
+                    {
+                        let _ = win32::place(&items);
+                        verify = Some((Instant::now() + Duration::from_millis(150), items, left - 1))
+                    }
                 }
             }
             match rx.recv_timeout(if scene.is_some() {
@@ -532,6 +539,16 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     continue;
                 }
                 Ok(Message::Scene(s)) => {
+                    let _scene_span = crate::perf::SpanGuard::with_arg(
+                        crate::perf::SpanKind::RenderScene,
+                        s.epoch,
+                    );
+                    gesture_recorded = false;
+                    crate::perf::record_instant(
+                        "SCENE",
+                        "render",
+                        format!("seq={} tiles={}", s.epoch, s.tiles.len()),
+                    );
                     let handle_start = Instant::now();
                     verify = None;
                     origins = current.clone();
@@ -555,53 +572,62 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                             .iter()
                             .any(|t| t.id == *id && t.cookie == *c && &t.monitor == name)
                     });
-                    hosts.retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
-                    applied.retain(|k, _| hosts.contains_key(k));
-                    for (n, _, b) in &s.monitors {
-                        if !hosts.contains_key(n) {
-                            if let Ok(h) = Host::new(*b) {
-                                hosts.insert(n.clone(), h);
+                    {
+                        let _hspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderHosts);
+                        hosts.retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
+                        applied.retain(|k, _| hosts.contains_key(k));
+                        for (n, _, b) in &s.monitors {
+                            if !hosts.contains_key(n) {
+                                if let Ok(h) = Host::new(*b) {
+                                    hosts.insert(n.clone(), h);
+                                }
                             }
                         }
                     }
                     let hosts_ms = handle_start.elapsed().as_millis();
-                    for tile in &s.tiles {
-                        let key = (tile.id, tile.cookie, tile.monitor.clone());
-                        if !tile.pinned && !pictures.contains_key(&key) {
-                            if let Some(surface) =
-                                hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref())
-                            {
-                                let t = Instant::now();
-                                match Source::new(tile.id, &surface.gpu) {
-                                    Ok(source) => {
-                                        pictures.insert(key, source);
+                    {
+                        let _sspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderSources);
+                        for tile in &s.tiles {
+                            let key = (tile.id, tile.cookie, tile.monitor.clone());
+                            if !tile.pinned && !pictures.contains_key(&key) {
+                                if let Some(surface) =
+                                    hosts.get(&tile.monitor).and_then(|h| h.surface.as_ref())
+                                {
+                                    let t = Instant::now();
+                                    match Source::new(tile.id, &surface.gpu) {
+                                        Ok(source) => {
+                                            pictures.insert(key, source);
+                                        }
+                                        Err(e) => eprintln!("source creation: {e}"),
                                     }
-                                    Err(e) => eprintln!("source creation: {e}"),
-                                }
-                                if t.elapsed().as_millis() >= 100 {
-                                    diag::trace(format!("SLOW render Source::new: {} ms", t.elapsed().as_millis()))
+                                    if t.elapsed().as_millis() >= 100 {
+                                        diag::trace(format!("SLOW render Source::new: {} ms", t.elapsed().as_millis()))
+                                    }
                                 }
                             }
                         }
                     }
                     let sources_ms = handle_start.elapsed().as_millis();
-                    for ((id, _, name), source) in &mut pictures {
-                        if let Some(host) = hosts.get(name) {
-                            if win32::frame(*id)
-                                .and_then(|r| intersect(r, host.b))
-                                .is_some()
-                            {
-                                if let Some(surface) = &host.surface {
-                                    let deadline = Instant::now() + Duration::from_millis(70);
-                                    loop {
-                                        if source.bitmap.is_some()
-                                            || source.update(surface, 0).is_err()
-                                            || source.bitmap.is_some()
-                                            || Instant::now() >= deadline
-                                        {
-                                            break;
+                    {
+                        let _fspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderFrames);
+                        for ((id, _, name), source) in &mut pictures {
+                            if let Some(host) = hosts.get(name) {
+                                if win32::frame(*id)
+                                    .and_then(|r| intersect(r, host.b))
+                                    .is_some()
+                                {
+                                    if let Some(surface) = &host.surface {
+                                        let deadline = Instant::now() + Duration::from_millis(70);
+                                        loop {
+                                            if source.bitmap.is_some()
+                                                || source.update(surface, 0).is_err()
+                                                || source.bitmap.is_some()
+                                                || Instant::now() >= deadline
+                                            {
+                                                break;
+                                            }
+                                            std::thread::sleep(Duration::from_millis(2))
                                         }
-                                        std::thread::sleep(Duration::from_millis(2))
                                     }
                                 }
                             }
@@ -647,6 +673,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 )
             };
             let mut placements = vec![];
+            let mut settled_tiles = vec![];
             let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
             let mut hits = vec![];
             let mut next = HashMap::new();
@@ -737,6 +764,15 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     };
                     if !tile.pinned {
                         placements.push((tile.id, target));
+                        if t >= 1. {
+                            settled_tiles.push(planor::SettledTile {
+                                id: tile.id,
+                                rect: tile.rect,
+                                bound,
+                                expect_on_screen: !proxy,
+                                focused: !proxy && tile.color.is_some(),
+                            });
+                        }
                     }
                 }
                 host.thumbs.retain(|id, h| {
@@ -761,6 +797,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         .filter_map(|h| intersect(*h, host.b))
                         .collect();
                     if applied.get(name) != Some(&mine) {
+                        let _rgn_span = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderRgnHoles);
                         if mine.is_empty() {
                             windows_sys::Win32::Graphics::Gdi::SetWindowRgn(host.h, null_mut(), 1);
                         } else {
@@ -782,7 +819,10 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     if let Some(surface) = &host.surface {
                         let dpi = GetDpiForWindow(host.h) as f32 / 96.;
                         let t = Instant::now();
-                        let drawn = surface.draw(&backing, &lines, s.width * dpi, s.radius * dpi);
+                        let drawn = {
+                            let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
+                            surface.draw(&backing, &lines, s.width * dpi, s.radius * dpi)
+                        };
                         if t.elapsed().as_millis() >= 100 {
                             diag::trace(format!("SLOW render draw: {} ms", t.elapsed().as_millis()))
                         }
@@ -796,6 +836,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             win32::set_peeks(hits);
             let start = Instant::now();
             let mut retries = 0;
+            let mut place_ok = false;
             let mut rejected = Vec::new();
             while s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire) {
                 if s.diagnostics && retries == 0 {
@@ -825,6 +866,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     }
                 }
                 if result.is_ok() && rejected.is_empty() {
+                    place_ok = true;
                     break;
                 }
                 let e = result
@@ -839,11 +881,51 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 retries += 1
             }
             if !rejected.is_empty() {
-                win32::emit(win32::Event::Rejected(s.epoch, rejected));
+                win32::emit(win32::Event::Rejected(s.epoch, rejected.clone()));
+            }
+            if place_ok && (!placements.is_empty() || t >= 1.) {
+                crate::perf::mark_first_place_done();
+            }
+            if place_ok && !gesture_recorded {
+                if let Some(in_qpc) = s.input_qpc_us {
+                    gesture_recorded = true;
+                    crate::perf::record_duration_from(
+                        crate::perf::SpanKind::GestureToPlace,
+                        in_qpc,
+                        s.epoch,
+                    );
+                }
+            }
+            if place_ok && t >= 1. && rejected.is_empty() && parked_checked_epoch != s.epoch && !settled_tiles.is_empty() {
+                parked_checked_epoch = s.epoch;
+                let actuals: Vec<(isize, Rect)> = settled_tiles
+                    .iter()
+                    .filter(|st| {
+                        s.tiles.iter().any(|t| {
+                            t.id == st.id
+                                && GetPropW(t.id as _, tag.as_ptr()) as usize == t.cookie
+                                && IsIconic(t.id as _) == 0
+                        })
+                    })
+                    .filter_map(|st| win32::frame(st.id).map(|r| (st.id, r)))
+                    .collect();
+                let violations = planor::check_settled_parked(&settled_tiles, &actuals, park);
+                for v in violations {
+                    crate::perf::record_instant("INVARIANT", "invariant", v.trace_line());
+                    if s.diagnostics {
+                        diag::trace(v.trace_line());
+                    }
+                    if std::env::var_os("PLANOR_NO_INVARIANT_PANIC").is_none() {
+                        debug_assert!(false, "{}", v.trace_line());
+                    }
+                }
             }
             let placement_us = start.elapsed().as_micros() as u64;
             current = next;
-            DwmFlush();
+            {
+                let _fspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDwmFlush);
+                DwmFlush();
+            }
             if s.diagnostics {
                 win32::emit(win32::Event::Frame(diag::Frame {
                     input_to_present_us: s.input.map(|v| v.elapsed().as_micros() as u64),

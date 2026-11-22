@@ -53,6 +53,7 @@ fn cursor_dpi() -> f64 {
 }
 thread_local!{static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
 pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
+    let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::InputContacts);
     let mut frames = vec![];
     unsafe {
         let hdr = size_of::<RAWINPUTHEADER>() as u32;

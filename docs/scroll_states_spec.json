@@ -40,14 +40,15 @@
       "status": "active",
       "orientation": "landscape",
       "windows": 3,
-      "columns": 3,
       "focus": 1,
       "reveal_peek": 54,
       "expected_tiles": [
-        { "id": 1, "w_pct": 0.5, "h_pct": 1.0, "on_screen": false },
+        { "id": 1, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true },
         { "id": 2, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true },
         { "id": 3, "w_pct": 0.5, "h_pct": 1.0, "on_screen": false }
-      ]
+      ],
+      "columns": 3,
+      "note": "Tiles 1 and 2 fit side-by-side at offset=0; focusing tile 2 keeps offset=0 without sliding."
     },
     {
       "id": "landscape_4_windows_focus_end",
@@ -120,7 +121,7 @@
       "focus": 1,
       "reveal_peek": 54,
       "expected_tiles": [
-        { "id": 1, "w_pct": 1.0, "h_pct": 0.5, "on_screen": false },
+        { "id": 1, "w_pct": 1.0, "h_pct": 0.5, "on_screen": true },
         { "id": 2, "w_pct": 1.0, "h_pct": 0.5, "on_screen": true },
         { "id": 3, "w_pct": 1.0, "h_pct": 0.5, "on_screen": false }
       ]

@@ -51,6 +51,7 @@ pub fn set_peeks(peeks: Vec<(Rect, isize)>) {
 /// The overlay is click-through, so a click on a peek never reaches it. This hook sees every left
 /// click first; one that lands on a peek is consumed and turned into a Peek event.
 unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
+    let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::HookMouse);
     use std::sync::atomic::Ordering::*;
     if code >= 0 {
         if w == WM_LBUTTONDOWN as usize {
@@ -74,6 +75,7 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
 /// Win+W (diagnostics builds only): open the note box instead of the Widgets panel. Runs in a low-level
 /// hook, so it only spawns a thread and returns.
 unsafe extern "system" fn keyboard(code: i32, w: usize, l: isize) -> isize {
+    let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::HookKeyboard);
     if code >= 0 && (w == WM_KEYDOWN as usize || w == WM_SYSKEYDOWN as usize) {
         let k = unsafe { &*(l as *const KBDLLHOOKSTRUCT) };
         let win = unsafe {
@@ -153,6 +155,7 @@ pub fn events(
     let note_hotkey = cfg["diagnostics"]["enabled"].as_bool() == Some(true);
     let test_mode = crate::test_mode();
     std::thread::spawn(move || unsafe {
+        crate::perf::register_thread("events");
         SetConsoleCtrlHandler(Some(ctrl), 1);
         let name = wide("Planor.Events");
         let inst = GetModuleHandleW(null());
@@ -225,6 +228,7 @@ pub fn events(
             // milliseconds or all system input lags, so it must never share a thread with anything that
             // can block (touchpad parsing, window events).
             std::thread::spawn(move || {
+                crate::perf::register_thread("hooks");
                 let install = || {
                     let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
                     let keys = if note_hotkey {
@@ -664,6 +668,7 @@ pub fn activate(id: isize) {
     }
 }
 pub fn place(items: &[(isize, Rect)]) -> Result<()> {
+    let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::Win32Place);
     unsafe {
         let mut batch = BeginDeferWindowPos(items.len() as _);
         for &(id, r) in items {

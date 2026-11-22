@@ -2,7 +2,9 @@ mod daemon;
 mod diag;
 mod input;
 mod note;
+mod perf;
 mod render;
+mod watchdog;
 mod win32;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
@@ -124,6 +126,24 @@ enum Command {
     /// Trigger a hotkey action over IPC (for isolated test mode without global hotkeys).
     Key {
         name: String,
+    },
+    /// Dump current monitors, strips, tiles, parked/pinned/orphan windows.
+    State {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect timing spans, process/thread telemetry, and budgets, or export a QPC Chrome trace.
+    Perf {
+        #[arg(long)]
+        reset: bool,
+        #[arg(long)]
+        trace: Option<PathBuf>,
+        #[arg(long)]
+        seconds: Option<u64>,
+        #[arg(long)]
+        json: bool,
+        #[arg(long)]
+        bundle: Option<PathBuf>,
     },
     Autostart {
         mode: Switch,
@@ -412,6 +432,86 @@ fn main() -> Result<()> {
             println!("{}", client(&pipe_name(), &cmd)?);
             std::thread::sleep(std::time::Duration::from_secs(1))
         },
+        Command::Perf {
+            bundle: Some(ref dir),
+            seconds,
+            ..
+        } => {
+            fs::create_dir_all(dir)?;
+            let state_json = client(&pipe_name(), &Command::State { json: true })?;
+            let perf_json = client(
+                &pipe_name(),
+                &Command::Perf {
+                    reset: false,
+                    trace: None,
+                    seconds,
+                    json: true,
+                    bundle: None,
+                },
+            )?;
+            let trace_json = client(
+                &pipe_name(),
+                &Command::Perf {
+                    reset: false,
+                    trace: Some(PathBuf::from("-")),
+                    seconds,
+                    json: false,
+                    bundle: None,
+                },
+            )?;
+            fs::write(dir.join("state.json"), state_json)?;
+            fs::write(dir.join("perf.json"), perf_json)?;
+            fs::write(dir.join("perf.trace.json"), trace_json)?;
+            if let Ok(local) = folder("LOCALAPPDATA") {
+                let trace_log = local.join("trace.log");
+                if let Ok(raw) = fs::read_to_string(&trace_log) {
+                    let lines: Vec<&str> = raw.lines().collect();
+                    let start = lines.len().saturating_sub(400);
+                    fs::write(dir.join("trace.tail.log"), lines[start..].join("\n"))?;
+                }
+            }
+            if let Ok(exe) = std::env::current_exe() {
+                let candidates = [
+                    exe.parent().map(|d| d.join("planor-rec.exe")),
+                    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/planor-rec-bin/planor-rec.exe")),
+                ];
+                if let Some(rec) = candidates.into_iter().flatten().find(|p| p.is_file()) {
+                    let _ = std::process::Command::new(rec)
+                        .args(["dump", "--out"])
+                        .arg(dir.join("video"))
+                        .args(["--reason", "perf-bundle", "--pipe", "ring"])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status();
+                }
+            }
+            println!("{}", dir.display());
+            Ok(())
+        }
+        Command::Perf {
+            trace: Some(ref path),
+            seconds,
+            ..
+        } => {
+            let payload = client(
+                &pipe_name(),
+                &Command::Perf {
+                    reset: false,
+                    trace: Some(path.clone()),
+                    seconds,
+                    json: false,
+                    bundle: None,
+                },
+            )?;
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    fs::create_dir_all(parent)?;
+                }
+            }
+            fs::write(path, payload)?;
+            println!("{}", path.display());
+            Ok(())
+        }
         Command::Stop => match client(&pipe_name(), &cmd) {
             Ok(reply) => {
                 println!("{reply}");

@@ -334,3 +334,129 @@ use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
 unsafe{NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART,h,0,0);}thread::sleep(Duration::from_millis(120));unsafe{SetCursorPos((area.left+area.right)/2,(area.top+area.bottom)/2);SetWindowPos(h,null_mut(),area.left+25,area.top+25,0,0,SWP_NOZORDER|SWP_NOSIZE|SWP_NOACTIVATE);}thread::sleep(Duration::from_millis(150));unsafe{NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND,h,0,0);}
 wait(||{let [x,y,r,b]=dialog.rect();x>=area.left&&y>=area.top&&r<=area.right&&b<=area.bottom});d.stop();assert_eq!(dialog.rect(),before);assert_eq!(owner.rect(),original)}
 
+#[test]
+#[ignore]
+fn state_json_matches_real_windows() {
+    aware();
+    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
+    let mut d = Daemon::new("state-json");
+    d.start();
+    wait(|| ws.iter().zip(&before).all(|(w, b)| w.rect() != *b));
+    thread::sleep(Duration::from_millis(250));
+
+    let out = d.call_output(&["state", "--json"]);
+    assert!(
+        out.status.success(),
+        "planor state --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("valid state JSON");
+    assert_eq!(v["schema_version"].as_u64(), Some(1));
+    assert_eq!(v["config_version"].as_u64(), Some(1));
+    assert_eq!(v["test_mode"].as_bool(), Some(true));
+    assert!(!v["monitors"].as_array().unwrap().is_empty());
+    assert!(!v["strips"].as_array().unwrap().is_empty());
+    let tiles = v["tiles"].as_array().expect("tiles array");
+    assert_eq!(tiles.len(), ws.len(), "expected 3 tiled sentinels in state");
+    let park_x = v["park_x"].as_i64().expect("park_x") as i32;
+
+    for (i, w) in ws.iter().enumerate() {
+        let tile = tiles
+            .iter()
+            .find(|t| t["id"].as_i64() == Some(w.hwnd as i64))
+            .unwrap_or_else(|| panic!("sentinel {i} missing from state tiles"));
+        let parked = tile["parked"].as_bool().unwrap();
+        let vis = w.visible();
+        if parked {
+            assert!(
+                vis.left >= park_x - 2,
+                "parked sentinel {i} expected at park_x >= {park_x}, observed left {}",
+                vis.left
+            );
+        } else {
+            let er = &tile["expected_rect"];
+            let (ex, ey, ew, eh) = (
+                er["x"].as_i64().unwrap() as i32,
+                er["y"].as_i64().unwrap() as i32,
+                er["w"].as_i64().unwrap() as i32,
+                er["h"].as_i64().unwrap() as i32,
+            );
+            let (ow, oh) = (vis.right - vis.left, vis.bottom - vis.top);
+            assert!(
+                (vis.left - ex).abs() <= 2
+                    && (vis.top - ey).abs() <= 2
+                    && (ow - ew).abs() <= 2
+                    && (oh - eh).abs() <= 2,
+                "sentinel {i} visible rect ({},{},{ow},{oh}) != expected ({ex},{ey},{ew},{eh})",
+                vis.left,
+                vis.top
+            );
+        }
+    }
+
+    assert!(d.call("reload"));
+    let out2 = d.call_output(&["state", "--json"]);
+    assert!(out2.status.success());
+    let v2: serde_json::Value = serde_json::from_slice(&out2.stdout).unwrap();
+    assert_eq!(v2["config_version"].as_u64(), Some(2));
+    d.stop();
+}
+
+#[test]
+#[ignore]
+fn perf_spans_and_budgets() {
+    aware();
+    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let before: Vec<[i32; 4]> = ws.iter().map(|w| w.rect()).collect();
+    let mut d = Daemon::new("perf-check");
+    d.start();
+    wait(|| ws.iter().zip(&before).all(|(w, b)| w.rect() != *b));
+    thread::sleep(Duration::from_millis(250));
+
+    // Exercise warm scene + gesture-to-place path via IPC keys.
+    press(&[ALT], LEFT);
+    press(&[ALT], LEFT);
+    press(&[ALT], RIGHT);
+    thread::sleep(Duration::from_millis(200));
+
+    let out = d.call_output(&["perf", "--json"]);
+    assert!(
+        out.status.success(),
+        "planor perf --json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+    let v: serde_json::Value = serde_json::from_str(&raw).expect("valid perf JSON");
+    println!("PERF_JSON {}", serde_json::to_string(&v).unwrap());
+
+    assert_eq!(v["schema_version"].as_u64(), Some(1));
+    assert!(v["process"]["working_set_mb"].as_f64().unwrap_or(0.0) > 0.0);
+    assert!(v["process"]["os_handles"].as_u64().unwrap_or(0) > 0);
+    let spans = v["spans"].as_array().expect("spans array");
+    for required in ["daemon.tick", "daemon.layout", "render.scene", "win32.place"] {
+        assert!(
+            spans.iter().any(|s| s["name"].as_str() == Some(required)),
+            "missing expected span {required} in perf report"
+        );
+    }
+    assert_eq!(
+        v["budgets"]["all_pass"].as_bool(),
+        Some(true),
+        "perf budget breached: {}",
+        v["budgets"]
+    );
+
+    let trace_path = d.dir.join("perf.trace.json");
+    let tr_out = d.call_output(&["perf", "--trace", trace_path.to_str().unwrap(), "--seconds", "60"]);
+    assert!(tr_out.status.success());
+    let tr: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&trace_path).unwrap()).unwrap();
+    assert_eq!(tr["clock"].as_str(), Some("qpc_us"));
+    assert!(!tr["traceEvents"].as_array().unwrap().is_empty());
+
+    assert!(d.call_args(&["perf", "--reset"]));
+    d.stop();
+}
+

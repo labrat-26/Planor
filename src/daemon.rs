@@ -27,6 +27,7 @@ impl Journal {
         Ok(Self { path, entries })
     }
     fn save(&self) -> Result<()> {
+        let _span = perf::SpanGuard::new(perf::SpanKind::DaemonJournal);
         if self.entries.is_empty() {
             if self.path.exists() {
                 fs::remove_file(&self.path)?
@@ -225,6 +226,9 @@ struct Engine {
     gesture: Gesture,
     seq: u64,
     input: Option<Instant>,
+    input_qpc_us: Option<i64>,
+    started: Instant,
+    config_version: u64,
     zoomed: HashSet<isize>,
     drag: Option<DragSession>,
     last_scan: Instant,
@@ -323,6 +327,8 @@ impl Engine {
             }
             Command::Reload => {
                 self.cfg = config()?;
+                self.config_version += 1;
+                perf::set_diag_enabled(self.cfg["diagnostics"]["enabled"].as_bool() == Some(true));
                 reload.send(self.cfg.clone())?;
                 for s in self.strips.values_mut() {
                     s.gap = self.cfg["layout"]["gap_px"].as_integer().unwrap() as _
@@ -389,7 +395,37 @@ impl Engine {
                     return Err(format!("unknown key action: {name}").into());
                 }
                 self.input = Some(Instant::now());
+                self.input_qpc_us = Some(perf::qpc_us());
                 self.keypress(&name);
+            }
+            Command::State { json } => return self.state_snapshot(json),
+            Command::Perf {
+                reset,
+                trace,
+                seconds,
+                json,
+                ..
+            } => {
+                if reset {
+                    perf::reset();
+                    return Ok("ok".into());
+                }
+                if trace.is_some() {
+                    return Ok(serde_json::to_string_pretty(&perf::export_chrome_trace(
+                        seconds,
+                    ))?);
+                }
+                let frame_telemetry = self
+                    .diag
+                    .command(Diagnostic::Live)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                let report = perf::build_report(frame_telemetry);
+                return if json {
+                    Ok(serde_json::to_string_pretty(&report)?)
+                } else {
+                    Ok(perf::format_summary(&report))
+                };
             }
             Command::Diag { action } => return self.diag.command(action),
             _ => return Err("command unavailable".into()),
@@ -399,7 +435,233 @@ impl Engine {
     /// Rectangles of unmanaged app windows on a monitor. Test daemons share the desktop with the developer's
     /// own windows, which they treat as unmanaged; carving those out would hide every border they draw, so an
     /// isolated instance carves out only windows of the class named in PLANOR_HOLES (none if unset).
+    fn state_snapshot(&self, json: bool) -> Result<String> {
+        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
+        let monitors: Vec<serde_json::Value> = self
+            .displays
+            .iter()
+            .map(|(name, work, bounds)| {
+                serde_json::json!({
+                    "name": name,
+                    "work": work,
+                    "bounds": bounds,
+                    "horizontal": bounds.horizontal(),
+                })
+            })
+            .collect();
+
+        let mut strips_json = Vec::new();
+        let mut tiles_json = Vec::new();
+        let mut parked_json = Vec::new();
+
+        for ((desk, name), strip) in &self.strips {
+            if Some(*desk) != self.desktop {
+                continue;
+            }
+            let cols: Vec<serde_json::Value> = strip
+                .columns
+                .iter()
+                .enumerate()
+                .map(|(idx, col)| {
+                    serde_json::json!({
+                        "index": idx,
+                        "members": col.members,
+                        "active_index": col.active,
+                        "active_id": col.members.get(col.active).copied().unwrap_or(0),
+                        "length": col.length,
+                        "minimum": col.minimum(),
+                        "frac": col.frac,
+                    })
+                })
+                .collect();
+            strips_json.push(serde_json::json!({
+                "desktop": format!("{desk:032x}"),
+                "monitor": name,
+                "area": strip.area,
+                "gap": strip.gap,
+                "share": strip.share,
+                "split": strip.split,
+                "focus": strip.focus,
+                "offset": strip.offset,
+                "fullscreen_id": strip.fullscreen_id(),
+                "columns": cols,
+            }));
+
+            let mon_bounds = self
+                .displays
+                .iter()
+                .find(|m| &m.0 == name)
+                .map(|m| m.2)
+                .unwrap_or(strip.area);
+            for (id, mut rect) in strip.rects(stack_peek) {
+                let Some((ci, member_idx)) = strip.locate(id) else {
+                    continue;
+                };
+                let fullscreen = strip.fullscreen_id() == Some(id);
+                if fullscreen {
+                    if strip.area.horizontal() {
+                        rect.y = mon_bounds.y;
+                        rect.h = mon_bounds.h;
+                    } else {
+                        rect.x = mon_bounds.x;
+                        rect.w = mon_bounds.w;
+                    }
+                }
+                let bound = if fullscreen { mon_bounds } else { strip.area };
+                let preview = strip.columns[ci].members[strip.columns[ci].active] != id;
+                let hidden = !strip.columns[ci].shown(member_idx);
+                let clipped = rect.x < bound.x
+                    || rect.y < bound.y
+                    || rect.x + rect.w > bound.x + bound.w
+                    || rect.y + rect.h > bound.y + bound.h;
+                let parked = hidden || preview || clipped;
+                let os_rect = win32::frame(id);
+                let color = if fullscreen {
+                    None
+                } else if strip.columns[ci].members.len() > 1 && !preview {
+                    self.cfg["borders"]["stacked_color"].as_str()
+                } else if name == &self.active && strip.active() == Some(id) {
+                    self.cfg["borders"]["focused_color"].as_str()
+                } else {
+                    None
+                };
+                tiles_json.push(serde_json::json!({
+                    "id": id,
+                    "monitor": name,
+                    "column_index": ci,
+                    "expected_rect": rect,
+                    "bound": bound,
+                    "os_rect": os_rect,
+                    "color": color,
+                    "fullscreen": fullscreen,
+                    "preview": preview,
+                    "hidden": hidden,
+                    "pinned": false,
+                    "parked": parked,
+                }));
+                if parked {
+                    let reason = if hidden {
+                        "hidden"
+                    } else if preview {
+                        "preview"
+                    } else {
+                        "clipped"
+                    };
+                    parked_json.push(serde_json::json!({
+                        "id": id,
+                        "monitor": name,
+                        "expected_rect": rect,
+                        "os_rect": os_rect,
+                        "reason": reason,
+                    }));
+                }
+            }
+        }
+
+        for &id in &self.pinned {
+            let os_rect = win32::frame(id);
+            let monitor = os_rect
+                .and_then(|r| {
+                    self.displays
+                        .iter()
+                        .find(|(_, _, b)| {
+                            r.x >= b.x && r.x < b.x + b.w && r.y >= b.y && r.y < b.y + b.h
+                        })
+                        .map(|m| m.0.clone())
+                })
+                .unwrap_or_default();
+            let rect = os_rect.unwrap_or_default();
+            tiles_json.push(serde_json::json!({
+                "id": id,
+                "monitor": monitor,
+                "column_index": serde_json::Value::Null,
+                "expected_rect": rect,
+                "bound": rect,
+                "os_rect": os_rect,
+                "color": self.cfg["borders"]["pinned_color"].as_str(),
+                "fullscreen": false,
+                "preview": false,
+                "hidden": false,
+                "pinned": true,
+                "parked": false,
+            }));
+        }
+
+        let mut pinned: Vec<isize> = self.pinned.iter().copied().collect();
+        pinned.sort_unstable();
+        let mut orphans: Vec<isize> = self.orphans.iter().copied().collect();
+        orphans.sort_unstable();
+        let homes: BTreeMap<String, String> = self
+            .homes
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+
+        if !json {
+            let mut lines = Vec::new();
+            lines.push(format!(
+                "Planor state: uptime={}ms cfg_v={} seq={} paused={} locked={} test_mode={} active={} park_x={}",
+                self.started.elapsed().as_millis(),
+                self.config_version,
+                self.seq,
+                self.paused,
+                self.locked,
+                crate::test_mode(),
+                self.active,
+                park_x
+            ));
+            lines.push(format!(
+                "monitors={} strips={} tiles={} parked={} pinned={} orphans={}",
+                monitors.len(),
+                strips_json.len(),
+                tiles_json.len(),
+                parked_json.len(),
+                pinned.len(),
+                orphans.len()
+            ));
+            for ((desk, name), s) in &self.strips {
+                if Some(*desk) != self.desktop {
+                    continue;
+                }
+                lines.push(format!(
+                    "  strip {} cols={} focus={} offset={} area={:?}",
+                    name,
+                    s.columns.len(),
+                    s.focus,
+                    s.offset,
+                    s.area
+                ));
+            }
+            return Ok(lines.join("\n"));
+        }
+
+        let payload = serde_json::json!({
+            "schema_version": 1,
+            "uptime_ms": self.started.elapsed().as_millis() as u64,
+            "config_version": self.config_version,
+            "pid": std::process::id(),
+            "instance": crate::instance(),
+            "test_mode": crate::test_mode(),
+            "paused": self.paused,
+            "locked": self.locked,
+            "seq": self.seq,
+            "active_desktop": self.desktop.map(|d| format!("{d:032x}")),
+            "active_monitor": self.active,
+            "park_x": park_x,
+            "stalls": perf::stall_count(),
+            "monitors": monitors,
+            "strips": strips_json,
+            "tiles": tiles_json,
+            "parked": parked_json,
+            "pinned": pinned,
+            "orphans": orphans,
+            "homes": homes,
+        });
+        Ok(serde_json::to_string_pretty(&payload)?)
+    }
     fn holes(&self) -> Vec<Rect> {
+        let _span = perf::SpanGuard::new(perf::SpanKind::DaemonHoles);
         let only = if instance().is_empty() {
             None
         } else {
@@ -491,6 +753,7 @@ impl Engine {
         }
     }
     fn scan(&mut self) {
+        let _span = perf::SpanGuard::new(perf::SpanKind::DaemonScan);
         let mut ids = win32::windows();
         ids.sort_by_key(|&id| {
             win32::frame(id).map(|r| {
@@ -519,6 +782,7 @@ impl Engine {
         }
     }
     fn topology(&mut self) {
+        let _span = perf::SpanGuard::new(perf::SpanKind::DaemonTopology);
         let old = std::mem::replace(&mut self.displays, win32::monitors());
         for ((_, name), s) in &mut self.strips {
             if let Some((_, area, _)) = self.displays.iter().find(|m| &m.0 == name) {
@@ -605,6 +869,29 @@ impl Engine {
         self.seq += 1;
         for s in self.strips.values_mut() {
             s.fill_gaps()
+        }
+        let settled_state = !self.blocked()
+            && self.drag.is_none()
+            && !self.pad_scrolling
+            && self.pad.is_none()
+            && self.settle.is_none()
+            && self.inertia.is_none();
+        if settled_state {
+            let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
+            for ((desk, _), strip) in &self.strips {
+                if Some(*desk) != self.desktop {
+                    continue;
+                }
+                for v in planor::check_strip_invariants(strip, stack_peek) {
+                    perf::record_instant("INVARIANT", "invariant", v.trace_line());
+                    if self.diag.enabled {
+                        diag::trace(v.trace_line());
+                    }
+                    if std::env::var_os("PLANOR_NO_INVARIANT_PANIC").is_none() {
+                        debug_assert!(false, "{}", v.trace_line());
+                    }
+                }
+            }
         }
         let mut tiles = Vec::new();
         let foreground = unsafe { GetForegroundWindow() } as isize;
@@ -763,6 +1050,7 @@ impl Engine {
         self.renderer.send(render::Message::Scene(render::Scene {
             epoch: self.seq,
             input: self.input.take(),
+            input_qpc_us: self.input_qpc_us.take(),
             diagnostics: self.diag.enabled,
             tiles,
             monitors: self.displays.clone(),
@@ -1034,6 +1322,15 @@ impl Engine {
         } else {
             self.quick = true;
         }
+        if self.diag.enabled {
+            let frac = s.columns.get(s.focus).map(|c| c.frac).unwrap_or(0.0);
+            diag::trace(format!(
+                "PAD scroll live={live} axis={} d={d:.2} offset={} focus={} frac={frac:.4}",
+                if vertical { 'v' } else { 'h' },
+                s.offset,
+                s.focus
+            ));
+        }
         self.action = "scroll";
         self.dirty = true
     }
@@ -1175,6 +1472,7 @@ impl Engine {
             // made the window trail the fingers by a growing amount.
             if now.duration_since(p.moved) >= Duration::from_millis(8) {
                 p.moved = now;
+                let _gspan = perf::SpanGuard::new(perf::SpanKind::GestureToPlace);
                 SetWindowPos(
                     p.id as _,
                     null_mut(),
@@ -1546,6 +1844,7 @@ impl Engine {
             }
             Event::Key(k) => {
                 self.input = Some(Instant::now());
+                self.input_qpc_us = Some(perf::qpc_us());
                 self.keypress(&k)
             }
             Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.dirty=true;},
@@ -1634,6 +1933,20 @@ impl Engine {
                     && self.cfg["touchpad"]["three_finger_enabled"].as_bool() == Some(true) =>
             {
                 self.input = Some(Instant::now());
+                self.input_qpc_us = Some(perf::qpc_us());
+                if self.diag.enabled
+                    && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
+                {
+                    let pts = if p.is_empty() {
+                        "-".to_string()
+                    } else {
+                        p.iter()
+                            .map(|(x, y)| format!("{x:.2},{y:.2}"))
+                            .collect::<Vec<_>>()
+                            .join(";")
+                    };
+                    diag::trace(format!("PAD contacts n={} pts={pts}", p.len()));
+                }
                 let swipe = self.gesture.sample(
                     &p,
                     self.cfg["touchpad"]["axis_lock_deadzone"]
@@ -1706,6 +2019,9 @@ pub fn run() -> Result<()> {
     win32::tweak_system(&folder("LOCALAPPDATA")?.join("system-settings.json"));
     let cfg = config()?;
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
+    perf::init(diag.enabled);
+    perf::register_thread("daemon");
+    let _watchdog = watchdog::Watchdog::start(diag.enabled, crate::test_mode());
     if diag.enabled && !crate::test_mode() {
         record_input();
     }
@@ -1746,6 +2062,9 @@ pub fn run() -> Result<()> {
         gesture: Default::default(),
         seq: 0,
         input: None,
+        input_qpc_us: None,
+        started: Instant::now(),
+        config_version: 1,
         zoomed: Default::default(),
         drag: None,
         last_scan: Instant::now(),
@@ -1760,10 +2079,18 @@ pub fn run() -> Result<()> {
     let tick = crossbeam_channel::tick(Duration::from_millis(32));
     let result = (|| -> Result<()> {
         loop {
+            perf::heartbeat_daemon();
             let t = Instant::now();
-            engine.layout()?;
+            {
+                let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
+                engine.layout()?;
+            }
             slow("layout", t);
-            if server.poll(|cmd| engine.command(cmd, &reload))? {
+            let ipc_done = {
+                let _span = perf::SpanGuard::new(perf::SpanKind::DaemonIpc);
+                server.poll(|cmd| engine.command(cmd, &reload))?
+            };
+            if ipc_done {
                 break;
             }
             if server.has_pending_write() {
@@ -1774,7 +2101,10 @@ pub fn run() -> Result<()> {
                         e if !server.closing => {
                             let t = Instant::now();
                             let name = e.name();
-                            engine.event(e);
+                            {
+                                let _span = perf::SpanGuard::new(perf::SpanKind::DaemonEvent);
+                                engine.event(e);
+                            }
                             slow(name, t);
                         }
                         _ => (),
@@ -1783,7 +2113,7 @@ pub fn run() -> Result<()> {
                 std::thread::sleep(Duration::from_millis(1));
                 continue;
             }
-            crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();engine.tick()?;slow("tick",t)}}}
+            crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}let _span=perf::SpanGuard::new(perf::SpanKind::DaemonEvent);engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();let _span=perf::SpanGuard::new(perf::SpanKind::DaemonTick);engine.tick()?;slow("tick",t)}}}
         }
         Ok(())
     })();

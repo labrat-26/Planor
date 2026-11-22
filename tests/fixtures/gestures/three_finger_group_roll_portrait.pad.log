@@ -1,0 +1,10 @@
+# Three-finger vertical group roll fixture (1440x2512 portrait work area, 3 grouped windows)
+12:01:00.000 PAD contacts n=3 pts=300.00,300.00;320.00,300.00;340.00,300.00
+12:01:00.016 PAD contacts n=3 pts=300.00,295.00;320.00,295.00;340.00,295.00
+12:01:00.032 PAD contacts n=3 pts=300.00,275.00;320.00,275.00;340.00,275.00
+12:01:00.048 PAD contacts n=3 pts=300.00,245.00;320.00,245.00;340.00,245.00
+12:01:00.064 PAD contacts n=3 pts=300.00,210.00;320.00,210.00;340.00,210.00
+12:01:00.080 PAD contacts n=3 pts=300.00,190.00;320.00,190.00;340.00,190.00
+12:01:00.200 PAD contacts n=3 pts=300.00,190.00;320.00,190.00;340.00,190.00
+12:01:00.220 PAD contacts n=0 pts=-
+12:01:00.220 PAD scroll live=false axis=v d=0.00 offset=0 focus=0 frac=0.0000

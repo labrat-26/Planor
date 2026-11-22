@@ -1,5 +1,7 @@
+pub mod replay;
+
 pub type WindowId = isize;
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     pub x: i32,
     pub y: i32,
@@ -62,6 +64,11 @@ pub struct Column {
     /// Fractional scroll through the members while a touchpad roll is in progress, in (-1, 1): the deck
     /// is drawn at position `active + frac`. Zero when settled.
     pub frac: f64,
+}
+impl Column {
+    pub fn minimum(&self) -> i32 {
+        self.minimum
+    }
 }
 #[derive(Debug, Clone)]
 pub struct Strip {
@@ -253,8 +260,8 @@ impl Strip {
             // The strip flows from the left, so a longer column would push its RIGHT edge out. Dragging the
             // leading edge must move only that edge: scroll by the change so the trailing edge stays put.
             self.offset = self.offset.saturating_add(new - old);
-            self.scroll(0);
         }
+        self.scroll(0);
     }
     /// Touchpad scrolling: focus follows the column nearest the middle of the monitor, except at the
     /// ends of the strip, where the first and last column are always reachable.
@@ -286,6 +293,7 @@ impl Strip {
                 self.area.length().max(c.minimum)
             })
         }
+        self.scroll(0);
     }
     pub fn fullscreen(&mut self, enter: bool, bounds: Rect) {
         if enter && self.fullscreen.is_none() {
@@ -307,9 +315,10 @@ impl Strip {
                     let mut c = self.columns.remove(j);
                     c.length = length;
                     self.focus = i.min(self.columns.len());
-                    self.columns.insert(self.focus, c)
+                    self.columns.insert(self.focus, c);
                 }
             }
+            self.scroll(0);
         }
     }
     pub fn fullscreen_id(&self) -> Option<WindowId> {
@@ -358,6 +367,7 @@ impl Strip {
         start >= self.offset && start + self.columns[i].length <= self.offset + self.area.length()
     }
     pub fn reveal(&mut self, peek: i32) {
+        self.scroll(0);
         if let Some(c) = self.columns.get(self.focus) {
             let start = self.start(self.focus);
             let end = start + c.length;
@@ -650,6 +660,249 @@ impl Strip {
             let last = self.columns.len() - 1;
             self.columns[last].length += span - end;
             self.offset = 0;
+        } else {
+            self.scroll(0);
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvariantViolation {
+    pub name: &'static str,
+    pub details: String,
+}
+
+impl InvariantViolation {
+    pub fn trace_line(&self) -> String {
+        format!("INVARIANT {} {}", self.name, self.details)
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SettledTile {
+    pub id: WindowId,
+    pub rect: Rect,
+    pub bound: Rect,
+    pub expect_on_screen: bool,
+    pub focused: bool,
+}
+
+fn rect_overlap(a: Rect, b: Rect) -> i64 {
+    let w = (a.x + a.w).min(b.x + b.w) - a.x.max(b.x);
+    let h = (a.y + a.h).min(b.y + b.h) - a.y.max(b.y);
+    (w.max(0) as i64) * (h.max(0) as i64)
+}
+
+/// Pure invariant check over a settled `Strip` (section 3.2):
+/// 1. `one_active_per_group` — every column has >=1 member, a single valid `active` index, valid `focus`, no duplicates.
+/// 2. `no_gap` — non-empty non-fullscreen strip fills to the viewport end, positive lengths, exact `gap`, valid `offset`.
+/// 3. `no_overlap` — active tiles across columns have zero overlap.
+/// 4. `inside_monitor` — cross-axis spans stay inside `strip.area`, and any column that fits in the viewport and is in view stays inside `strip.area`.
+pub fn check_strip_invariants(strip: &Strip, stack_peek: i32) -> Vec<InvariantViolation> {
+    let mut out = Vec::new();
+    if strip.columns.is_empty() {
+        return out;
+    }
+
+    // 1. one_active_per_group
+    if strip.focus >= strip.columns.len() {
+        out.push(InvariantViolation {
+            name: "one_active_per_group",
+            details: format!("focus {} out of range for {} columns", strip.focus, strip.columns.len()),
+        });
+    }
+    let mut seen_ids = std::collections::HashSet::new();
+    for (ci, col) in strip.columns.iter().enumerate() {
+        if col.members.is_empty() {
+            out.push(InvariantViolation {
+                name: "one_active_per_group",
+                details: format!("column {ci} has no members"),
+            });
+            continue;
+        }
+        if col.active >= col.members.len() {
+            out.push(InvariantViolation {
+                name: "one_active_per_group",
+                details: format!(
+                    "column {ci} active index {} >= {} members",
+                    col.active,
+                    col.members.len()
+                ),
+            });
+        }
+        if !col.frac.is_finite() || col.frac.abs() >= 1.0 {
+            out.push(InvariantViolation {
+                name: "one_active_per_group",
+                details: format!("column {ci} has invalid roll frac {}", col.frac),
+            });
+        }
+        for &id in &col.members {
+            if !seen_ids.insert(id) {
+                out.push(InvariantViolation {
+                    name: "one_active_per_group",
+                    details: format!("duplicate window id {id} across strip columns"),
+                });
+            }
+        }
+    }
+
+    // 2. no_gap
+    let span = strip.area.length();
+    let total_end = strip.start(strip.columns.len()) - strip.gap;
+    let max_off = (total_end - span).max(0);
+    if strip.offset < 0 || strip.offset > max_off {
+        out.push(InvariantViolation {
+            name: "no_gap",
+            details: format!("offset {} outside [0, {}]", strip.offset, max_off),
+        });
+    }
+    for (ci, col) in strip.columns.iter().enumerate() {
+        if col.length <= 0 {
+            out.push(InvariantViolation {
+                name: "no_gap",
+                details: format!("column {ci} has non-positive length {}", col.length),
+            });
+        }
+    }
+    if strip.fullscreen.is_none() && total_end < span {
+        out.push(InvariantViolation {
+            name: "no_gap",
+            details: format!(
+                "strip ends at {total_end} leaving {} px empty before monitor end {span}",
+                span - total_end
+            ),
+        });
+    }
+
+    // Active rects for overlap & monitor bounds checks.
+    let all_rects = strip.rects(stack_peek);
+    let mut active_rects: Vec<(usize, WindowId, Rect)> = Vec::new();
+    for (ci, col) in strip.columns.iter().enumerate() {
+        if let Some(&id) = col.members.get(col.active) {
+            if let Some((_, r)) = all_rects.iter().find(|(wid, _)| *wid == id) {
+                active_rects.push((ci, id, *r));
+            }
+        }
+    }
+
+    // Check exact gap between consecutive active columns when not fullscreen.
+    if strip.fullscreen.is_none() {
+        for pair in active_rects.windows(2) {
+            let (ci0, _, r0) = pair[0];
+            let (ci1, _, r1) = pair[1];
+            let observed = if strip.area.horizontal() {
+                r1.x - (r0.x + r0.w)
+            } else {
+                r1.y - (r0.y + r0.h)
+            };
+            if observed != strip.gap {
+                out.push(InvariantViolation {
+                    name: "no_gap",
+                    details: format!(
+                        "gap between column {ci0} and {ci1} is {observed} px, expected {}",
+                        strip.gap
+                    ),
+                });
+            }
+        }
+    }
+
+    // 3. no_overlap
+    for a in 0..active_rects.len() {
+        for b in (a + 1)..active_rects.len() {
+            let area = rect_overlap(active_rects[a].2, active_rects[b].2);
+            if area > 0 {
+                out.push(InvariantViolation {
+                    name: "no_overlap",
+                    details: format!(
+                        "columns {} (id={}) and {} (id={}) overlap by {area} px^2 ({:?} vs {:?})",
+                        active_rects[a].0,
+                        active_rects[a].1,
+                        active_rects[b].0,
+                        active_rects[b].1,
+                        active_rects[a].2,
+                        active_rects[b].2
+                    ),
+                });
+            }
+        }
+    }
+
+    // 4. inside_monitor
+    if strip.fullscreen.is_none() {
+        let mon = strip.area;
+        for (ci, id, r) in &active_rects {
+            if r.w <= 0 || r.h <= 0 {
+                out.push(InvariantViolation {
+                    name: "inside_monitor",
+                    details: format!("column {ci} (id={id}) has non-positive size {r:?}"),
+                });
+                continue;
+            }
+            if mon.horizontal() {
+                if r.y < mon.y || r.y + r.h > mon.y + mon.h {
+                    out.push(InvariantViolation {
+                        name: "inside_monitor",
+                        details: format!(
+                            "column {ci} (id={id}) cross-axis y={}..{} exceeds monitor work y={}..{}",
+                            r.y,
+                            r.y + r.h,
+                            mon.y,
+                            mon.y + mon.h
+                        ),
+                    });
+                }
+            } else if r.x < mon.x || r.x + r.w > mon.x + mon.w {
+                out.push(InvariantViolation {
+                    name: "inside_monitor",
+                    details: format!(
+                        "column {ci} (id={id}) cross-axis x={}..{} exceeds portrait work x={}..{}",
+                        r.x,
+                        r.x + r.w,
+                        mon.x,
+                        mon.x + mon.w
+                    ),
+                });
+            }
+            if strip.in_view(*id)
+                && (r.x < mon.x
+                    || r.y < mon.y
+                    || r.x + r.w > mon.x + mon.w
+                    || r.y + r.h > mon.y + mon.h)
+            {
+                out.push(InvariantViolation {
+                    name: "inside_monitor",
+                    details: format!(
+                        "in-view tile {id} rect {r:?} lies outside monitor work area {mon:?}"
+                    ),
+                });
+            }
+        }
+    }
+
+    out
+}
+
+/// Check that no window expected on screen (or holding focus) remains at the off-screen park position after settle.
+pub fn check_settled_parked(
+    tiles: &[SettledTile],
+    actuals: &[(WindowId, Rect)],
+    park_x: i32,
+) -> Vec<InvariantViolation> {
+    let mut out = Vec::new();
+    for t in tiles {
+        let Some((_, actual)) = actuals.iter().find(|(id, _)| *id == t.id) else {
+            continue;
+        };
+        if (t.expect_on_screen || t.focused) && actual.x >= park_x - 2 {
+            out.push(InvariantViolation {
+                name: "no_window_left_parked",
+                details: format!(
+                    "window {} left parked at x={} (park_x={park_x}) expected={:?} focused={}",
+                    t.id, actual.x, t.rect, t.focused
+                ),
+            });
+        }
+    }
+    out
 }
