@@ -1533,6 +1533,9 @@ impl<B: WindowBackend> Engine<B> {
     /// Shift (or on a portrait monitor, the tilt wheel) it rolls the focused group instead. Focus follows
     /// the window nearest the centre and settles shortly after the wheel stops, like a touchpad scroll.
     fn wheel(&mut self, delta: i32, tilt: bool, shift: bool, at: (i32, i32)) {
+        if let Some(rec) = self.gesture_rec.as_mut() {
+            rec.push(serde_json::json!({ "kind": "wheel", "delta": delta, "tilt": tilt, "shift": shift, "x": at.0, "y": at.1 }));
+        }
         if self.blocked() || self.drag.is_some() || self.pad.is_some() {
             return;
         }
@@ -1871,6 +1874,14 @@ impl<B: WindowBackend> Engine<B> {
     fn drag_end(&mut self, id: isize) {
         let flung = std::mem::take(&mut self.flung);
         self.drag_update();let Some(mut d) = self.drag.take() else { return };
+        if let Some(rec) = self.gesture_rec.as_mut() {
+            // What the drop was about to do, so a recording shows Planor's answer to each gesture.
+            rec.push(serde_json::json!({
+                "kind": "drop", "window": d.id, "mode": format!("{:?}", if flung { planor::Drag::None } else { d.mode }),
+                "target": if flung { None } else { d.target }, "flung": flung,
+                "to_other_monitor": d.destination.as_ref().is_some_and(|k| k != &d.key),
+            }));
+        }
         self.dirty = true;
         if flung {
             // A fling only changes monitor; it never reorders or stacks onto what is under the cursor.

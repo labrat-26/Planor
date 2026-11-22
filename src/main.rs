@@ -210,6 +210,10 @@ enum GestureAction {
         /// Let Planor act on the gestures while recording (default: record only).
         #[arg(long)]
         live: bool,
+        /// Which steps: "full" (every gesture, record only) or "topup" (what the first session missed,
+        /// Planor live).
+        #[arg(long, default_value = "full")]
+        set: String,
     },
     /// Name every gesture in a recording (fingers, tap/swipe/drag/scroll/pinch/circle, direction, pace) and,
     /// for a guided one, check each against its step's instruction.
@@ -600,8 +604,8 @@ fn main() -> Result<()> {
             action: GestureAction::Record { name, seconds, out, passive },
         } => record_gestures(name, seconds, out, passive),
         Command::Gestures {
-            action: GestureAction::Guide { name, step_seconds, live },
-        } => guide::run(name, step_seconds, live),
+            action: GestureAction::Guide { name, step_seconds, live, set },
+        } => guide::run(name, step_seconds, live, set),
         Command::Gestures { action: GestureAction::Analyze { file } } => analyze_gestures(&file),
         _ => {
             println!("{}", client(&pipe_name(), &cmd)?);

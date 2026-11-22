@@ -40,6 +40,20 @@ pub const STEPS: &[(&str, &str)] = &[
     ("FIVE fingers: tap and swipe", "Anything with the whole hand."),
 ];
 
+/// `--set topup`: what the first full session was missing. Planor acts (drops only mean something live).
+pub const TOPUP: &[(&str, &str)] = &[
+    ("ONE finger: TAP 3 times (tap to click)", "One finger only, on this window."),
+    ("THREE fingers: swipe LEFT very SLOWLY, once", "Fingers moving to the LEFT, take the whole time."),
+    ("FOUR fingers: drag a window onto the CENTRE of another, lift", "Lift inside the filled box in the middle of the other window."),
+    ("FOUR fingers: drag a window onto the EDGE of another, lift", "Lift on the other window but away from the filled box."),
+    ("FOUR fingers: FLICK a window fast towards another screen", "A quick throw, then lift."),
+    ("FOUR fingers: drag, then lift ONE finger at a time", "Twice: drag, then raise your fingers one by one."),
+    ("THREE fingers: swipe UP and DOWN on the group you made", "Fingers across the strip roll the group."),
+    ("Hold WIN + TWO-finger scroll, cursor on the TOP screen", "Keep the Windows key down while scrolling with two fingers."),
+    ("Hold WIN + TWO-finger scroll, cursor on the PORTRAIT screen", "Move the cursor to the tall screen first."),
+    ("Hold WIN + TWO-finger scroll, cursor on the LAPTOP screen", "Move the cursor to the laptop screen first."),
+];
+
 const READY: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
@@ -53,6 +67,7 @@ struct State {
     phase: Phase,
     step: Duration,
     out: PathBuf,
+    steps: &'static [(&'static str, &'static str)],
     finished_at: Option<Instant>,
 }
 
@@ -69,12 +84,12 @@ fn tick() -> bool {
     let now = Instant::now();
     match s.phase.clone() {
         Phase::Ready(i, at) if now.duration_since(at) >= READY => {
-            let _ = ipc(GestureAction::Mark { text: format!("step {}: {}", i + 1, STEPS[i].0) });
+            let _ = ipc(GestureAction::Mark { text: format!("step {}: {}", i + 1, s.steps[i].0) });
             s.phase = Phase::Go(i, now);
         }
         Phase::Go(i, at) if now.duration_since(at) >= s.step => {
             let _ = ipc(GestureAction::Mark { text: format!("end step {}", i + 1) });
-            if i + 1 < STEPS.len() {
+            if i + 1 < s.steps.len() {
                 s.phase = Phase::Ready(i + 1, now);
             } else {
                 let reply = ipc(GestureAction::Stop).unwrap_or_else(|e| format!("stop failed: {e}"));
@@ -93,13 +108,14 @@ fn screen() -> (String, String, String, u32) {
     let g = STATE.lock().unwrap();
     let Some(s) = g.as_ref() else { return Default::default() };
     let now = Instant::now();
-    let n = STEPS.len();
+    let n = s.steps.len();
+    let steps = s.steps;
     match &s.phase {
         Phase::Ready(i, at) => {
             let left = READY.saturating_sub(now.duration_since(*at)).as_secs_f32().ceil();
             (
-                format!("Next ({}/{n}): {}", i + 1, STEPS[*i].0),
-                STEPS[*i].1.to_string(),
+                format!("Next ({}/{n}): {}", i + 1, steps[*i].0),
+                steps[*i].1.to_string(),
                 format!("Get ready... starts in {left:.0}"),
                 0x0040_6080, // amber-ish dark
             )
@@ -107,8 +123,8 @@ fn screen() -> (String, String, String, u32) {
         Phase::Go(i, at) => {
             let left = s.step.saturating_sub(now.duration_since(*at)).as_secs_f32().ceil();
             (
-                format!("{}/{n}: {}", i + 1, STEPS[*i].0),
-                STEPS[*i].1.to_string(),
+                format!("{}/{n}: {}", i + 1, steps[*i].0),
+                steps[*i].1.to_string(),
                 format!("GO  -  {left:.0} s"),
                 0x0030_7020, // green
             )
@@ -168,7 +184,11 @@ unsafe extern "system" fn proc(h: HWND, m: u32, w: usize, l: isize) -> isize {
     }
 }
 
-pub fn run(name: String, step_seconds: u64, live: bool) -> Result<()> {
+pub fn run(name: String, step_seconds: u64, live: bool, set: String) -> Result<()> {
+    let (steps, live, step_seconds): (&'static [(&'static str, &'static str)], bool, u64) = match set.as_str() {
+        "topup" => (TOPUP, true, step_seconds.max(8)),
+        _ => (STEPS, live, step_seconds),
+    };
     let slug: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
@@ -177,12 +197,12 @@ pub fn run(name: String, step_seconds: u64, live: bool) -> Result<()> {
     let out = folder("LOCALAPPDATA")?.join("gestures").join(format!("{stamp}-{slug}.jsonl"));
     fs::create_dir_all(out.parent().unwrap())?;
     let step = Duration::from_secs(step_seconds.max(2));
-    let total = STEPS.len() as u64 * (step.as_secs() + READY.as_secs()) + 30;
+    let total = steps.len() as u64 * (step.as_secs() + READY.as_secs()) + 30;
     let reply = ipc(GestureAction::Record { name: slug, seconds: total, out: Some(out.clone()), passive: !live })
         .map_err(|e| format!("cannot reach the Planor daemon (is planor.exe running?): {e}"))?;
     println!("{reply}");
-    println!("{} steps, about {} s. Follow the window on top.", STEPS.len(), STEPS.len() as u64 * (step.as_secs() + 2));
-    *STATE.lock().unwrap() = Some(State { phase: Phase::Ready(0, Instant::now()), step, out: out.clone(), finished_at: None });
+    println!("{} steps, about {} s, Planor {}. Follow the window on top.", steps.len(), steps.len() as u64 * (step.as_secs() + 2), if live { "live" } else { "recording only" });
+    *STATE.lock().unwrap() = Some(State { phase: Phase::Ready(0, Instant::now()), step, out: out.clone(), steps, finished_at: None });
     unsafe {
         let inst = GetModuleHandleW(std::ptr::null());
         let class = wide("Planor.GestureGuide");
@@ -242,7 +262,7 @@ pub fn run(name: String, step_seconds: u64, live: bool) -> Result<()> {
             let marks = text.lines().filter(|l| l.contains("\"kind\":\"mark\"") && l.contains("step ") && !l.contains("end step")).count();
             let frames = text.lines().filter(|l| l.contains("\"kind\":\"contacts\"")).count();
             let clicks = text.lines().filter(|l| l.contains("\"kind\":\"button\"") && l.contains("\"down\":true")).count();
-            println!("{frames} touch frames, {clicks} clicks, {marks}/{} steps -> {}", STEPS.len(), out.display());
+            println!("{frames} touch frames, {clicks} clicks, {marks}/{} steps -> {}", steps.len(), out.display());
             println!("Give this path to Claude to add it under tests/fixtures/gestures/recorded/.");
         }
         Err(e) => println!("no recording at {}: {e}", out.display()),
