@@ -99,3 +99,25 @@ about 7 minutes. These are targets, not measurements.
 - A failed test always leaves a trace, a digest and (when recorded) frames, and `digest.ps1` explains it in under 20 lines.
 - `planor state --json` and `planor perf` exist and are used by at least one test each.
 - Every state in the mockup canvas has a core test, and the pass/fail list is committed.
+
+## 9. Further improvements (added after the first plan)
+
+Priority: A = cheap and immediate, B = valuable, needs design, C = large, needs the owner's go-ahead.
+
+| # | Item | Pri | Acceptance |
+|---|---|---|---|
+| 9.1 | `docs/ARCHITECTURE.md` for agents: threads (OS events, daemon 32 ms tick, render), tile rect versus OS rect, parked windows at the rightmost monitor edge + 1024 px, DWM stand-ins, overlay holes (SetWindowRgn, 200 ms poll), hook reinstall every 4 s, gesture pipeline, config merge (embedded example + `%APPDATA%\planor\planor.toml`), trace line glossary, how recovery works. | A | A new agent can answer five questions about the design from the doc alone; every claim is checked against the code. |
+| 9.2 | Freeze watchdog: a thread that notices when the daemon tick or the renderer makes no progress for 300 ms and writes a `STALL <thread> <ms>` trace line with the last span and lock/wait it was in. | A | A test that blocks the tick on purpose produces the line; no line in a normal run. Overhead measured. |
+| 9.3 | Randomised layout tests over `src/core.rs`: random sequences of open, close, move, resize, scroll, group, pull-out and monitor changes (landscape and portrait), invariants from 3.2 checked after every step, failing sequences shrunk and printed as a replayable list. | A | Runs in the unit tier in seconds; a deliberately broken layout rule is caught within 1000 sequences. |
+| 9.4 | Brief template for delegated tasks (files, acceptance test, exact run command, escalation rule, "report what you did not verify"). Stored in `docs/` and referenced from `CLAUDE.md`. | A | Template exists; the next delegated task uses it. |
+| 9.5 | Win+W attaches context: with each saved note, write the last N seconds of trace, a `planor state --json` dump and a screenshot into a folder next to the note. | B | A note produces the bundle; the digest script can print a bundle in under 20 lines. Needs 3.1. |
+| 9.6 | Notes become tracked items: ID, status, linked test; a fixed note without a test is not done. `docs/NOTES_OPEN.md` is generated from that list. GitLab issues only if the owner adds a remote (global rule: use `glab`). | B | Every open note has an ID; each closed note names its test. |
+| 9.7 | Golden gestures: the owner records a few real touchpad gestures; the streams are kept and replayed as tests (uses 3.4). | B | Replays reproduce the recorded scroll and move results within the stated tolerance. |
+| 9.8 | Mockups as the spec: export the state-atlas coordinates to a data file read by the core tests (percent based, not pixels). | B | A mockup state and its core test cannot disagree silently; a mismatch fails a test. |
+| 9.9 | Nightly full `verify.ps1` run on a schedule with the results table kept per night; pre-commit hook runs the unit tier. | B | A table appears each morning; a failing unit test blocks a commit. |
+| 9.10 | Release hygiene: versions and tags per milestone, changelog (global rule: versioned milestones). | B | First tag and changelog exist. |
+| 9.11 | Fake window backend: put window operations (list, move, focus, monitors, z-order) behind an interface; tests plug in a simulated desktop so the daemon logic (cross-monitor moves, unplug, orientation change, groups) runs fast and without the real desktop. | C | The `scn_display` scenarios and the three-monitor rig states run against the simulation in seconds; the live tests remain as a thin end-to-end layer. Owner must approve the refactor first. |
+| 9.12 | Ring-buffer screen capture that always keeps the last 10 s, saved on Win+W or on a stall. | C | Cost (CPU, memory, disk) measured and acceptable before it is on by default; owner decides. |
+
+Order: 9.1, 9.4, 9.2, 9.3 go to Sonnet agent A with section 1; 9.5 to 9.10 after section 3; 9.11 and 9.12 only after the
+owner approves them. The same verification rule applies: the lead re-runs and reads the diff before an item is marked done.
