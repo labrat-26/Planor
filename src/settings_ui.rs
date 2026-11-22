@@ -149,12 +149,18 @@ pub fn button_states(v: &InstallView) -> ButtonStates {
     }
 }
 
-/// Write the file unless it is currently invalid.
+/// Write the file unless it is currently invalid. When the write cannot happen the unsaved edit is dropped (the
+/// caller shows why), so a later save starts from what is really on disk instead of overwriting hand edits.
 pub fn save_guarded(model: &mut Model) -> std::result::Result<(), String> {
-    if Model::load_error(&model.path).is_some() {
-        return Err(SYNTAX_ERROR.into());
+    let saved = if Model::load_error(&model.path).is_some() { Err(SYNTAX_ERROR.to_string()) } else { model.save().map_err(|e| e.to_string()) };
+    if saved.is_err() {
+        model.dirty = false;
     }
-    model.save().map_err(|e| e.to_string())
+    saved
+}
+/// The window may not close while an install or uninstall is running: that work lives in this process.
+pub fn close_allowed(job_running: bool) -> bool {
+    !job_running
 }
 
 // ---- Win32 window ----------------------------------------------------------------------------------------
@@ -251,13 +257,14 @@ struct State {
     install_note: String,
     install_busy: bool,
     delete_config: bool,
+    save_error: bool,
     scheduler: SaveScheduler,
     stamp: Option<(std::time::SystemTime, u64)>,
     quiet: bool,
 }
 
 static STATE: AtomicPtr<State> = AtomicPtr::new(std::ptr::null_mut());
-fn st() -> &'static mut State {
+fn state() -> &'static mut State {
     unsafe { &mut *STATE.load(Ordering::Relaxed) }
 }
 fn lo(v: usize) -> u32 {
@@ -548,8 +555,13 @@ fn clear_page(st: &mut State) {
 }
 
 fn build_page(st: &mut State) {
-    clear_page(st);
+    // Quiet first: destroying the focused edit sends EN_KILLFOCUS back into row_command.
     st.quiet = true;
+    let focus_id = unsafe {
+        let f = GetFocus();
+        if !f.is_null() && GetParent(f) == st.page { GetDlgCtrlID(f) } else { 0 }
+    };
+    clear_page(st);
     let dpi = st.dpi;
     let s = |px: i32| mul(px, dpi);
     let (margin, pad, gap) = (s(36), s(16), s(6));
@@ -639,6 +651,13 @@ fn build_page(st: &mut State) {
     st.quiet = false;
     apply_scroll(st);
     unsafe { InvalidateRect(st.page, std::ptr::null(), 1) };
+    if focus_id != 0 {
+        // keep the keyboard where it was across a rebuild (Reset, a rules change, a save error)
+        let h = unsafe { GetDlgItem(st.page, focus_id) };
+        if !h.is_null() {
+            unsafe { SetFocus(h) };
+        }
+    }
 }
 
 /// Card geometry shared by the Rules page: text on the left, controls on the right.
@@ -872,8 +891,17 @@ fn flush_save(st: &mut State) {
             std::thread::spawn(|| {
                 let _ = client(&pipe_name(), &Command::Reload);
             });
+            if st.save_error {
+                st.save_error = false;
+                if st.blocked.is_none() {
+                    set_banner(st, ""); // the earlier "could not save" no longer applies
+                }
+            }
         }
-        Err(e) => set_banner(st, &e),
+        Err(e) => {
+            st.save_error = true;
+            set_banner(st, &format!("Could not save planor.toml: {e}"));
+        }
     }
 }
 
@@ -917,7 +945,7 @@ fn change(st: &mut State, i: usize, v: toml::Value) {
 }
 
 /// Show `items` in a menu under `button` (the current one ticked) and return the index picked.
-fn popup(st: &State, button: HWND, items: &[&str], current: Option<usize>) -> Option<usize> {
+fn popup(owner: HWND, button: HWND, items: &[&str], current: Option<usize>) -> Option<usize> {
     unsafe {
         let menu = CreatePopupMenu();
         for (n, item) in items.iter().enumerate() {
@@ -928,7 +956,7 @@ fn popup(st: &State, button: HWND, items: &[&str], current: Option<usize>) -> Op
         GetClientRect(button, &mut rc);
         let mut at = POINT { x: 0, y: rc.bottom };
         ClientToScreen(button, &mut at);
-        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y + 2, 0, st.hwnd, std::ptr::null());
+        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y + 2, 0, owner, std::ptr::null());
         DestroyMenu(menu);
         (picked > 0).then(|| picked as usize - 1)
     }
@@ -938,7 +966,9 @@ fn choose(st: &mut State, i: usize, choices: &'static [&'static str]) {
     let Some(ctl) = row_of(st, i).map(|r| r.ctl) else { return };
     let current = st.model.value(i);
     let at = choices.iter().position(|c| current.as_str() == Some(c));
-    if let Some(n) = popup(st, ctl, choices, at) {
+    let picked = popup(st.hwnd, ctl, choices, at); // modal: other messages run meanwhile, so re-take the state after it
+    if let Some(n) = picked {
+        let st = state();
         change(st, i, toml::Value::String(choices[n].to_string()));
     }
 }
@@ -978,14 +1008,16 @@ fn rules_command(st: &mut State, id: usize, code: u32) {
         match id - ADD_BASE {
             0 => {
                 let cur = (st.new_matcher == crate::settings_model::RuleMatch::Class) as usize;
-                if let Some(n) = popup(st, item(id), &matcher_names(), Some(cur)) {
+                if let Some(n) = popup(st.hwnd, item(id), &matcher_names(), Some(cur)) {
+                    let st = state();
                     st.new_matcher = matcher_at(n);
                     unsafe { InvalidateRect(item(id), std::ptr::null(), 0) };
                 }
             }
             2 => {
                 let cur = RuleAction::ALL.iter().position(|a| *a == st.new_action);
-                if let Some(n) = popup(st, item(id), &action_names(), cur) {
+                if let Some(n) = popup(st.hwnd, item(id), &action_names(), cur) {
+                    let st = state();
                     st.new_action = RuleAction::ALL[n];
                     unsafe { InvalidateRect(item(id), std::ptr::null(), 0) };
                 }
@@ -1014,7 +1046,8 @@ fn rules_command(st: &mut State, id: usize, code: u32) {
             rules_change(st, rules);
         } else if slot == 0 {
             let cur = RuleAction::ALL.iter().position(|a| *a == rules[n].action);
-            if let Some(pick) = popup(st, item(id), &action_names(), cur) {
+            if let Some(pick) = popup(st.hwnd, item(id), &action_names(), cur) {
+                let st = state();
                 rules[n].action = RuleAction::ALL[pick];
                 rules_change(st, rules);
             }
@@ -1046,14 +1079,16 @@ fn install_command(st: &mut State, id: usize, code: u32) {
             run_job(st, WM_INSTALL_DONE, || crate::install::install().map(|p| p.display().to_string()).map_err(|e| e.to_string()));
         }
         1 => {
+            let owner = st.hwnd; // the confirmation is modal: re-take the state after it
             let asked = unsafe {
                 MessageBoxW(
-                    st.hwnd,
+                    owner,
                     wide("Uninstall Planor? Your windows go back to normal and Planor stops starting at sign-in.").as_ptr(),
                     wide("Uninstall Planor").as_ptr(),
                     MB_OKCANCEL | MB_ICONWARNING,
                 )
             };
+            let st = state();
             if asked == IDOK {
                 let delete = st.delete_config;
                 st.install_note = "Uninstalling...".into();
@@ -1437,20 +1472,25 @@ unsafe extern "system" fn hotkey_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
 }
 
 /// Open the system colour chooser for a colour setting and, if confirmed, write the chosen `#RRGGBB`.
-fn pick_color(st: &mut State, i: usize) {
-    let initial = st.model.value(i).as_str().and_then(theme::hex_to_colorref).unwrap_or(0);
+fn pick_color(i: usize) {
+    // No borrow of the window state is held while the chooser runs: it pumps messages (timers, activation).
+    let (owner, initial) = {
+        let st = state();
+        (st.hwnd, st.model.value(i).as_str().and_then(theme::hex_to_colorref).unwrap_or(0))
+    };
     let mut custom = [0x00FF_FFFFu32; 16];
     let chosen = unsafe {
         let mut cc: CHOOSECOLORW = std::mem::zeroed();
         cc.lStructSize = std::mem::size_of::<CHOOSECOLORW>() as u32;
-        cc.hwndOwner = st.hwnd;
+        cc.hwndOwner = owner;
         cc.rgbResult = initial;
         cc.lpCustColors = custom.as_mut_ptr();
         cc.Flags = CC_RGBINIT | CC_FULLOPEN;
         (ChooseColorW(&mut cc) != 0).then_some(cc.rgbResult)
     };
-    if let (Some(color), Some(ctl)) = (chosen, row_of(st, i).map(|r| r.ctl)) {
-        set_text(ctl, &theme::colorref_to_hex(color));
+    let ctl = row_of(state(), i).map(|r| r.ctl);
+    if let (Some(color), Some(ctl)) = (chosen, ctl) {
+        set_text(ctl, &theme::colorref_to_hex(color)); // EN_CHANGE then validates and saves it
     }
 }
 /// The colour setting whose swatch (the left part of its field) is at (`x`, `y`) on the page.
@@ -1493,7 +1533,7 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             }
             WM_LBUTTONDOWN => {
                 if let Some(i) = swatch_at(s, (lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32) {
-                    pick_color(s, i);
+                    pick_color(i);
                 }
                 0
             }
@@ -1638,6 +1678,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 s.dpi = hi(wp);
                 let r = &*(lp as *const RECT);
                 SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                let s = &mut *p; // SetWindowPos re-entered this procedure (WM_SIZE): take the state again
                 delete_fonts(&s.fonts);
                 s.fonts = make_fonts(s.dpi);
                 SendMessageW(s.banner, WM_SETFONT, s.fonts.body as usize, 1);
@@ -1653,6 +1694,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 0
             }
             WM_CLOSE => {
+                if !close_allowed(s.install_busy) {
+                    return 0; // an install or uninstall is still running in this process
+                }
                 flush_save(s);
                 DestroyWindow(hwnd);
                 0
@@ -1746,7 +1790,7 @@ pub fn run(path: &Path) -> Result<()> {
             std::ptr::null(),
         );
         let fonts = make_fonts(dpi);
-        let state = Box::new(State {
+        let boxed = Box::new(State {
             hwnd,
             nav,
             banner,
@@ -1777,12 +1821,13 @@ pub fn run(path: &Path) -> Result<()> {
             install_note: String::new(),
             install_busy: false,
             delete_config: false,
+            save_error: false,
             scheduler: SaveScheduler::new(Duration::from_millis(250)),
             stamp: stamp_of(path),
             quiet: false,
         });
-        STATE.store(Box::into_raw(state), Ordering::Relaxed);
-        let s = st();
+        STATE.store(Box::into_raw(boxed), Ordering::Relaxed);
+        let s = state();
         SendMessageW(banner, WM_SETFONT, s.fonts.body as usize, 1);
         theme::apply_window(hwnd, dark);
         theme::apply_control(viewport, dark);
@@ -1975,6 +2020,33 @@ mod tests {
         assert_eq!(running.install_label, "Installed");
         assert!(!running.install_enabled, "cannot copy the running installed exe over itself");
         assert!(label(true, false).install_enabled && label(false, false).install_enabled);
+    }
+
+    #[test]
+    fn a_failed_save_forgets_the_pending_edit_so_later_hand_edits_survive() {
+        let p = temp("failsave", "[layout]\ngap_px = 6\n");
+        let mut m = Model::load(&p).unwrap();
+        let gap = idx(&m, "layout", "gap_px");
+        apply_change(&mut m, gap, toml::Value::Integer(8)).unwrap();
+        let mut perms = std::fs::metadata(&p).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&p, perms.clone()).unwrap();
+        assert!(save_guarded(&mut m).is_err(), "the file is locked");
+        assert!(!m.dirty, "the unsaved edit is dropped, not kept to overwrite the file later");
+        perms.set_readonly(false);
+        std::fs::set_permissions(&p, perms).unwrap();
+        std::fs::write(&p, "[layout]\ngap_px = 6\n[borders]\nwidth_px = 3\n").unwrap(); // edited in Notepad meanwhile
+        let peek = idx(&m, "layout", "peek_width_px");
+        apply_change(&mut m, peek, toml::Value::Integer(50)).unwrap();
+        save_guarded(&mut m).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("width_px = 3") && text.contains("peek_width_px = 50"), "{text}");
+    }
+
+    #[test]
+    fn the_window_stays_open_while_an_install_job_runs() {
+        assert!(!close_allowed(true));
+        assert!(close_allowed(false));
     }
     #[test]
     fn invalid_value_is_rejected_and_not_saved() {

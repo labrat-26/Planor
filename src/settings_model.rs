@@ -252,28 +252,43 @@ impl Model {
         text.parse::<DocumentMut>().err().map(|e| e.to_string())
     }
 
-    /// The `[[rules]]` rows the daemon would accept.
-    pub fn rules(&self) -> Vec<Rule> {
-        let Some(rows) = self.doc.get("rules").and_then(|r| r.as_array_of_tables()) else { return vec![] };
-        rows.iter()
-            .filter_map(|t| {
-                let action = match t.get("action")?.as_str()? {
-                    "ignore" => RuleAction::Ignore,
-                    "float" => RuleAction::Float,
-                    "tile" => RuleAction::Tile,
-                    _ => return None,
-                };
-                let (matcher, value) = match (t.get("process").and_then(|v| v.as_str()), t.get("class").and_then(|v| v.as_str())) {
-                    (Some(p), _) => (RuleMatch::Process, p),
-                    (None, Some(c)) => (RuleMatch::Class, c),
-                    _ => return None,
-                };
-                Some(Rule { matcher, value: value.to_string(), action })
-            })
-            .collect()
+    fn rule_from(t: &toml_edit::Table) -> Option<Rule> {
+        let action = match t.get("action")?.as_str()? {
+            "ignore" => RuleAction::Ignore,
+            "float" => RuleAction::Float,
+            "tile" => RuleAction::Tile,
+            _ => return None,
+        };
+        let (matcher, value) = match (t.get("process").and_then(|v| v.as_str()), t.get("class").and_then(|v| v.as_str())) {
+            (Some(p), _) => (RuleMatch::Process, p),
+            (None, Some(c)) => (RuleMatch::Class, c),
+            _ => return None,
+        };
+        Some(Rule { matcher, value: value.to_string(), action })
     }
 
-    /// Replace the `[[rules]]` rows, keeping the comment block above the first one and everything else.
+    /// The rule rows in effect, each with the table it came from. A file with no `rules` key gets the example's
+    /// rules (that is what the daemon uses then); `rules = []` means none.
+    fn existing_rows(&self) -> Vec<(Rule, toml_edit::Table)> {
+        let from = |doc: &DocumentMut| -> Vec<(Rule, toml_edit::Table)> {
+            doc.get("rules")
+                .and_then(|r| r.as_array_of_tables())
+                .map(|rows| rows.iter().filter_map(|t| Self::rule_from(t).map(|r| (r, t.clone()))).collect())
+                .unwrap_or_default()
+        };
+        match self.doc.get("rules") {
+            Some(_) => from(&self.doc),
+            None => crate::EXAMPLE.parse::<DocumentMut>().map(|d| from(&d)).unwrap_or_default(),
+        }
+    }
+
+    /// The `[[rules]]` rows the daemon would accept.
+    pub fn rules(&self) -> Vec<Rule> {
+        self.existing_rows().into_iter().map(|(r, _)| r).collect()
+    }
+
+    /// Replace the rules. A row that is still there keeps its table (so a rule matching both a process and a class
+    /// keeps both, and comments and other keys survive); no rules at all is written as `rules = []`.
     pub fn set_rules(&mut self, rules: &[Rule]) -> std::result::Result<(), String> {
         if rules.iter().any(|r| r.value.trim().is_empty()) {
             return Err("a rule needs a process or class name".into());
@@ -287,17 +302,32 @@ impl Model {
             .and_then(|r| r.as_array_of_tables())
             .and_then(|a| a.iter().next())
             .and_then(|t| t.decor().prefix().cloned());
+        let mut old: Vec<Option<(Rule, toml_edit::Table)>> = self.existing_rows().into_iter().map(Some).collect();
         let mut rows = toml_edit::ArrayOfTables::new();
-        for r in rules {
-            let mut t = toml_edit::Table::new();
-            t.insert(r.matcher.key(), toml_edit::value(r.value.trim()));
-            t.insert("action", toml_edit::value(r.action.word()));
-            rows.push(t);
+        for (n, r) in rules.iter().enumerate() {
+            let reuse = old.iter().position(|o| o.as_ref().is_some_and(|(or, _)| or.matcher == r.matcher && or.value == r.value.trim()));
+            let table = match reuse.and_then(|at| old[at].take()) {
+                Some((_, mut t)) => {
+                    t["action"] = toml_edit::value(r.action.word());
+                    t
+                }
+                None => {
+                    let mut t = toml_edit::Table::new();
+                    t.insert(r.matcher.key(), toml_edit::value(r.value.trim()));
+                    t.insert("action", toml_edit::value(r.action.word()));
+                    if n == 0 && let Some(p) = &prefix {
+                        t.decor_mut().set_prefix(p.clone());
+                    }
+                    t
+                }
+            };
+            rows.push(table);
         }
-        if let (Some(prefix), Some(first)) = (prefix, rows.get_mut(0)) {
-            first.decor_mut().set_prefix(prefix);
+        if rows.is_empty() {
+            self.doc.insert("rules", toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())));
+        } else {
+            self.doc.insert("rules", toml_edit::Item::ArrayOfTables(rows));
         }
-        self.doc.insert("rules", toml_edit::Item::ArrayOfTables(rows));
         self.dirty = true;
         Ok(())
     }
@@ -429,6 +459,55 @@ mod tests {
         assert!(m.set_rules(&[Rule { matcher: RuleMatch::Process, value: "  ".into(), action: RuleAction::Tile }]).is_err());
     }
 
+
+    #[test]
+    fn rules_with_both_keys_survive_other_edits() {
+        let text = "[[rules]]\nprocess = \"Code.exe\"\nclass = \"#32770\"\naction = \"float\"\n";
+        let mut m = Model::from_text(Path::new("planor.toml"), text).unwrap();
+        let mut rules = m.rules();
+        assert_eq!(rules.len(), 1);
+        rules.push(Rule { matcher: RuleMatch::Process, value: "Calc.exe".into(), action: RuleAction::Ignore });
+        m.set_rules(&rules).unwrap();
+        let cfg = crate::parse(&m.doc.to_string()).unwrap();
+        let rows = cfg["rules"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["class"].as_str(), Some("#32770"), "the class half of the match is kept: {rows:?}");
+        assert_eq!(rows[0]["process"].as_str(), Some("Code.exe"));
+        assert_eq!(rows[1]["process"].as_str(), Some("Calc.exe"));
+    }
+
+    #[test]
+    fn changing_an_action_keeps_the_rows_other_keys_and_comments() {
+        let text = "[[rules]]\n# keep me\nprocess = \"Code.exe\"\nclass = \"#32770\"\naction = \"float\"\n";
+        let mut m = Model::from_text(Path::new("planor.toml"), text).unwrap();
+        let mut rules = m.rules();
+        rules[0].action = RuleAction::Tile;
+        m.set_rules(&rules).unwrap();
+        let out = m.doc.to_string();
+        assert!(out.contains("# keep me") && out.contains("class = \"#32770\"") && out.contains("action = \"tile\""), "{out}");
+    }
+
+    #[test]
+    fn removing_every_rule_writes_an_empty_list() {
+        let mut m = model();
+        assert_eq!(m.rules().len(), 1);
+        m.set_rules(&[]).unwrap();
+        let out = m.doc.to_string();
+        assert!(out.contains("rules = []"), "{out}");
+        assert_eq!(crate::parse(&out).unwrap()["rules"].as_array().unwrap().len(), 0, "the daemon sees no rules, not the defaults");
+        let again = Model::from_text(Path::new("planor.toml"), &out).unwrap();
+        assert!(again.rules().is_empty());
+    }
+
+    #[test]
+    fn a_file_without_rules_shows_the_default_rules_in_effect() {
+        let mut m = Model::from_text(Path::new("planor.toml"), "[layout]\ngap_px = 6\n").unwrap();
+        assert_eq!(m.rules(), vec![Rule { matcher: RuleMatch::Process, value: "Taskmgr.exe".into(), action: RuleAction::Ignore }]);
+        let mut rules = m.rules();
+        rules.push(Rule { matcher: RuleMatch::Class, value: "Foo".into(), action: RuleAction::Float });
+        m.set_rules(&rules).unwrap();
+        assert_eq!(crate::parse(&m.doc.to_string()).unwrap()["rules"].as_array().unwrap().len(), 2, "the default rule is kept, not silently dropped");
+    }
     #[test]
     fn load_error_reports_invalid_toml() {
         let bad = temp("bad", "[layout\ngap_px = ");

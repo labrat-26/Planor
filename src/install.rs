@@ -129,7 +129,10 @@ pub fn stop_daemon() -> Result<()> {
 /// A failure leaves the previous `dest` untouched.
 pub fn replace_file(src: &Path, dest: &Path, attempts: u32) -> io::Result<()> {
     let tmp = dest.with_extension("exe.tmp");
-    std::fs::copy(src, &tmp)?;
+    if let Err(e) = std::fs::copy(src, &tmp) {
+        let _ = std::fs::remove_file(&tmp); // a partial copy must not linger
+        return Err(e);
+    }
     let mut last = None;
     for _ in 0..attempts.max(1) {
         match std::fs::rename(&tmp, dest) {
@@ -147,16 +150,31 @@ fn spawn_detached(exe: &Path) -> io::Result<()> {
     std::process::Command::new(exe).arg("start").creation_flags(0x0800_0008).spawn().map(|_| ())
 }
 
+/// Which exe to bring back when an install fails after the running Planor was stopped: the previous installed
+/// copy if there was one, otherwise the copy the user started the install from.
+pub fn restart_target(installed_before: bool, installed: &Path, current: &Path) -> PathBuf {
+    if installed_before { installed.to_path_buf() } else { current.to_path_buf() }
+}
+
 /// Install: stop the running daemon, copy this exe into the install dir, start the installed copy.
 pub fn install() -> Result<PathBuf> {
     if running_is_installed() {
         return Err("already running from the install folder".into());
     }
     let dest = installed_exe()?;
+    let current = std::env::current_exe()?;
     std::fs::create_dir_all(dest.parent().ok_or("bad install path")?)?;
+    let installed_before = dest.exists();
+    let was_running = client(&pipe_name(), &Command::State { json: false }).is_ok();
     stop_daemon()?;
-    replace_file(&std::env::current_exe()?, &dest, 20)?;
-    spawn_detached(&dest)?;
+    // The old daemon needs a few seconds after its pipe closes to put windows back and let go of the exe.
+    let outcome = replace_file(&current, &dest, 60).and_then(|_| spawn_detached(&dest));
+    if let Err(e) = outcome {
+        if was_running {
+            let _ = spawn_detached(&restart_target(installed_before, &dest, &current)); // do not leave tiling off
+        }
+        return Err(e.into());
+    }
     Ok(dest)
 }
 
@@ -222,6 +240,24 @@ mod tests {
         assert!(!autostart_enabled());
     }
 
+
+    #[test]
+    fn a_failed_copy_leaves_no_temp_file_and_the_old_exe() {
+        let d = temp_dir("badcopy");
+        let dest = d.join("planor.exe");
+        std::fs::write(&dest, b"old").unwrap();
+        assert!(replace_file(&d.join("missing.exe"), &dest, 2).is_err());
+        assert_eq!(std::fs::read(&dest).unwrap(), b"old");
+        assert!(!dest.with_extension("exe.tmp").exists());
+    }
+
+    #[test]
+    fn restart_after_a_failed_install_prefers_the_previous_install() {
+        let dest = Path::new(r"C:\x\Planor\planor.exe");
+        let cur = Path::new(r"C:\repo\target\release\planor.exe");
+        assert_eq!(restart_target(true, dest, cur), dest);
+        assert_eq!(restart_target(false, dest, cur), cur);
+    }
     #[test]
     fn install_copies_via_temp_and_keeps_old_on_failure() {
         use std::os::windows::fs::OpenOptionsExt;

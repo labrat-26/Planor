@@ -90,14 +90,15 @@ pub fn accent_color() -> u32 {
     argb_to_colorref(argb)
 }
 
-/// The app icon embedded as resource 1 (see `planor.rc`), loaded at `size` x `size` pixels.
+/// The app icon embedded as resource 1 (see `planor.rc`) at `size` x `size` pixels. Shared (cached by the system), so
+/// it is never freed and repeated calls do not leak USER objects.
 #[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCE: resource id 1, not a pointer
 pub fn app_icon(size: i32) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
     use windows_sys::Win32::{
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW},
+        UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, LoadImageW},
     };
-    unsafe { LoadImageW(GetModuleHandleW(std::ptr::null()), 1usize as *const u16, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) as _ }
+    unsafe { LoadImageW(GetModuleHandleW(std::ptr::null()), 1usize as *const u16, IMAGE_ICON, size, size, LR_DEFAULTCOLOR | LR_SHARED) as _ }
 }
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
