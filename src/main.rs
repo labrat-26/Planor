@@ -1,4 +1,5 @@
 mod backend;
+mod config_tui;
 mod daemon;
 mod diag;
 mod gpu;
@@ -68,6 +69,29 @@ fn config() -> Result<toml::Value> {
     };
     parse(&fs::read_to_string(path)?)
 }
+/// Choices for the settings that take one of a few words (also offered by `planor config`).
+pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
+    match key {
+        "curve" => Some(&["ease_out_cubic", "spring"]),
+        "drag_stack_modifier" => Some(&["Shift", "Ctrl", "Alt"]),
+        _ => None,
+    }
+}
+/// Whether `v` may replace the default `old` for setting `k`: same type, sane range, a known word, a
+/// `#RRGGBB` colour. Shared by the daemon's config merge and `planor config`.
+pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
+    let typed = old.type_str() == v.type_str()
+        && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
+        && v.as_float().is_none_or(|n| n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.));
+    let known = match (choices(k), k) {
+        (Some(c), _) => v.as_str().is_some_and(|s| c.contains(&s)),
+        (None, k) if k.ends_with("_color") => v
+            .as_str()
+            .is_some_and(|v| v.len() == 7 && v.starts_with('#') && v[1..].bytes().all(|b| b.is_ascii_hexdigit())),
+        _ => true,
+    };
+    typed && known
+}
 fn parse(s: &str) -> Result<toml::Value> {
     let mut cfg = toml::from_str::<toml::Value>(EXAMPLE)?;
     let incoming = toml::from_str::<toml::Table>(s)?;
@@ -97,12 +121,7 @@ fn parse(s: &str) -> Result<toml::Value> {
         if let Some(table) = value.as_table() {
             for (k, v) in table {
                 if let Some(old) = base.get_mut(k) {
-                    let valid = old.type_str() == v.type_str()
-                        && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
-                        && v.as_float().is_none_or(|n| {
-                            n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.)
-                        });
-                    let known=match k.as_str(){"curve"=>matches!(v.as_str(),Some("ease_out_cubic"|"spring")),"drag_stack_modifier"=>matches!(v.as_str(),Some("Shift"|"Ctrl"|"Alt")),k if k.ends_with("_color")=>v.as_str().is_some_and(|v|v.len()==7&&v.starts_with('#')&&v[1..].bytes().all(|b|b.is_ascii_hexdigit())),_=>true};if valid&&known {
+                    if valid_value(k, old, v) {
                         *old = v.clone();
                         continue;
                     }
@@ -155,6 +174,26 @@ enum Command {
     Diag {
         #[command(subcommand)]
         action: Diagnostic,
+    },
+    /// Record real touchpad gestures into a fixture file the tests replay (landscape and portrait).
+    Gestures {
+        #[command(subcommand)]
+        action: GestureAction,
+    },
+    /// Edit settings (%APPDATA%\planor\planor.toml) in a terminal UI.
+    Config,
+}
+#[derive(Subcommand, Serialize, Deserialize, Debug)]
+enum GestureAction {
+    /// Capture every touchpad frame the daemon sees for `seconds`, then write `out` (events.jsonl format).
+    Record {
+        /// Short name, e.g. "scroll-right-slow"; used in the file name.
+        name: String,
+        #[arg(long, default_value_t = 15)]
+        seconds: u64,
+        /// Output file (default: %LOCALAPPDATA%\planor\gestures\<stamp>-<name>.jsonl).
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 #[derive(Subcommand, Serialize, Deserialize, Debug)]
@@ -533,11 +572,81 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
+        Command::Config => config_tui::run(&folder("APPDATA")?.join("planor.toml")),
+        Command::Gestures {
+            action: GestureAction::Record { name, seconds, out },
+        } => record_gestures(name, seconds, out),
         _ => {
             println!("{}", client(&pipe_name(), &cmd)?);
             Ok(())
         }
     }
+}
+/// `planor gestures record <name>`: the daemon captures every touchpad frame it sees for `seconds` and
+/// writes them (events.jsonl, plus a meta line) to the output file; this side waits and summarises.
+fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>) -> Result<()> {
+    let slug: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let out = match out {
+        Some(p) => std::path::absolute(p)?,
+        None => {
+            let stamp = diag::stamp().replace([':', '.'], "");
+            folder("LOCALAPPDATA")?.join("gestures").join(format!("{stamp}-{slug}.jsonl"))
+        }
+    };
+    if let Some(dir) = out.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let _ = fs::remove_file(&out);
+    let reply = client(
+        &pipe_name(),
+        &Command::Gestures { action: GestureAction::Record { name: slug, seconds, out: Some(out.clone()) } },
+    )?;
+    println!("{reply}");
+    println!("Recording for {seconds} s: do the gesture(s) now on the touchpad (each one, then lift all fingers).");
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        let left = until.saturating_duration_since(std::time::Instant::now()).as_secs();
+        print!("\r  {left:>3} s left ");
+        let _ = io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    // The daemon writes the file on its next tick.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !out.is_file() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    println!();
+    let text = fs::read_to_string(&out).map_err(|e| format!("no recording written to {}: {e}", out.display()))?;
+    let events = planor::replay::parse_events_jsonl(&text);
+    let mut gestures = vec![];
+    let mut fingers = 0;
+    for e in &events {
+        if let planor::replay::ReplayKind::Contacts(p) = &e.kind {
+            if p.is_empty() {
+                if fingers > 0 {
+                    gestures.push(fingers)
+                }
+                fingers = 0;
+            } else {
+                fingers = fingers.max(p.len());
+            }
+        }
+    }
+    if fingers > 0 {
+        gestures.push(fingers)
+    }
+    println!(
+        "{} frames, {} gesture(s) ({}) -> {}",
+        events.len(),
+        gestures.len(),
+        gestures.iter().map(|f| format!("{f} fingers")).collect::<Vec<_>>().join(", "),
+        out.display()
+    );
+    println!("Give this path to Claude to add it under tests/fixtures/gestures/recorded/.");
+    Ok(())
 }
 #[cfg(test)]
 mod tests {

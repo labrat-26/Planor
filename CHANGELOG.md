@@ -2,6 +2,15 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.5.0] - 2026-11-22
+
+### Added
+- **`planor config`** (`src/config_tui.rs`, ratatui): terminal settings editor for `%APPDATA%planorplanor.toml`. Sections and settings with current values (changed ones highlighted, colour swatches), help text taken from `planor.example.toml`, the daemon's own validation (`valid_value`, `choices`, now shared), comment-preserving saves (`toml_edit`), and a reload sent to the running daemon. 4 tests incl. a rendered-screen keyboard flow.
+- **`planor gestures record <name>`**: the daemon captures every touchpad frame for N seconds into an `events.jsonl` fixture (meta line with the monitor and touchpad settings). Fixtures in `tests/fixtures/gestures/recorded/` are replayed by `sim_tests::recorded_gestures_replay_on_landscape_and_portrait` on both orientations (scroll along, roll across, 4-finger carry and drop, invariants after each).
+
+### Changed
+- **Owner rule: every test run rebuilds and restarts the binary.** `verify.ps1` runs `rebuild-daemon.ps1` first and aborts if the daemon does not come back (`-NoRestart` only on request).
+
 ## [0.4.0] - 2026-11-22
 
 Win+W notes N-010..N-024, each checked on landscape and portrait monitors, plus GPU profiling.

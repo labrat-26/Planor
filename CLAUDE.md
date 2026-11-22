@@ -34,6 +34,9 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 
 ## Rules
 
+- **Every test run first rebuilds and restarts the binary** (owner rule): `scripts\verify.ps1` runs `scripts\rebuild-daemon.ps1` before
+  any tier and aborts if the daemon does not come back. Use `-NoRestart` only when the owner asks. When running a test outside
+  `verify.ps1`, run `scripts\rebuild-daemon.ps1` first.
 - Never weaken or delete a test to make it pass. Change an assertion only when it is provably stale versus the intended
   behaviour, and say which one and why.
 - Report only what you ran. "Not verified" is a valid and required answer. Give exact counts and failure messages.
@@ -56,6 +59,11 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 
 ## Profiling, state & ring capture
 
+- `planor config`: terminal UI for `%APPDATA%\planor\planor.toml` (help text from `planor.example.toml`, same validation as the
+  daemon, comment-preserving save, tells the daemon to reload). Code: `src/config_tui.rs`.
+- `planor gestures record <name> [--seconds 15] [--out f]`: capture real touchpad frames into an `events.jsonl` fixture; copy it to
+  `tests/fixtures/gestures/recorded/`, where `sim_tests::recorded_gestures_replay_on_landscape_and_portrait` replays it on both
+  orientations.
 - `planor state --json`: dump live monitors, strips, active/parked tiles, expected rects, and config version.
 - `planor perf [--json | --trace <file> | --bundle <dir> | --reset]`: QPC span latency percentiles (p50/p95/p99/max),
   CPU/RAM/GDI/USER/handles, GPU (`gpu.draw` GPU time per overlay draw, engine %, VRAM, DWM compose fps vs refresh Hz), Chrome/Perfetto JSON traces, and budgets (`startup <600ms`, `render.scene <16ms`,

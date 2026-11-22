@@ -131,6 +131,13 @@ use std::{
 };
 use win32::Event;
 type Key = (u128, String);
+pub(crate) struct GestureRec {
+    pub until: Instant,
+    pub out: PathBuf,
+    pub started_us: i64,
+    pub meta: serde_json::Value,
+    pub frames: Vec<(i64, Vec<(f64, f64)>)>,
+}
 pub(crate) struct DragSession {
     pub id: isize,
     pub key: Key,
@@ -202,6 +209,8 @@ pub(crate) struct Engine<B: WindowBackend> {
     /// Newly managed windows and how many times they were put back after moving themselves (apps restore
     /// their own saved position just after they appear).
     pub born: HashMap<isize, (Instant, u8)>,
+    /// `planor gestures record`: every touchpad frame until the deadline, written to the file afterwards.
+    pub gesture_rec: Option<GestureRec>,
     pub gesture: Gesture,
     pub seq: u64,
     pub input: Option<Instant>,
@@ -260,6 +269,7 @@ impl<B: WindowBackend> Engine<B> {
             v_travel: 0.,
         hopped: false,
         born: HashMap::new(),
+        gesture_rec: None,
             gesture: Default::default(),
             seq: 0,
             input: None,
@@ -390,6 +400,33 @@ impl<B: WindowBackend> Engine<B> {
         reload: &crossbeam_channel::Sender<toml::Value>,
     ) -> Result<String> {
         match cmd {
+            Command::Gestures { action: crate::GestureAction::Record { name, seconds, out } } => {
+                let Some(out) = out else { return Ok("no output path".into()) };
+                let cursor = self.backend.cursor_pos();
+                let monitor = self.displays.iter().find(|m| contains(m.2, cursor)).or(self.displays.first());
+                let t = &self.cfg["touchpad"];
+                self.gesture_rec = Some(GestureRec {
+                    until: Instant::now() + Duration::from_secs(seconds.clamp(1, 600)),
+                    out: out.clone(),
+                    started_us: perf::qpc_us(),
+                    meta: serde_json::json!({
+                        "kind": "meta",
+                        "schema": planor::replay::REPLAY_SCHEMA_VERSION,
+                        "name": name,
+                        "recorded": diag::stamp(),
+                        "monitor": monitor.map(|m| serde_json::json!({
+                            "name": m.0, "horizontal": m.2.horizontal(),
+                            "bounds": [m.2.x, m.2.y, m.2.w, m.2.h],
+                        })),
+                        "axis_lock_deadzone": t["axis_lock_deadzone"].as_integer(),
+                        "swipe_scroll_gain": t["swipe_scroll_gain"].as_float(),
+                        "swipe_drag_gain": t["swipe_drag_gain"].as_float(),
+                        "swipe_natural_direction": t["swipe_natural_direction"].as_bool(),
+                    }),
+                    frames: vec![],
+                });
+                return Ok(format!("recording touchpad frames to {}", out.display()));
+            }
             Command::Stop => {
                 self.paused = true;
                 self.clear()?;
@@ -781,6 +818,9 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         self.refresh();
+        if self.gesture_rec.as_ref().is_some_and(|r| Instant::now() >= r.until) {
+            self.write_gesture_recording();
+        }
         if self.pad.as_ref().is_some_and(|p| p.seen.elapsed() > Duration::from_millis(800)) {
             self.pad_end()
         }
@@ -795,6 +835,20 @@ impl<B: WindowBackend> Engine<B> {
             self.drag_update()
         }
         Ok(())
+    }
+    /// Write a finished `planor gestures record` capture: one meta line, then one `contacts` line per frame
+    /// (`t` in microseconds from the start; an empty `pts` is a lift), the format `replay` and the tests read.
+    pub(crate) fn write_gesture_recording(&mut self) {
+        let Some(rec) = self.gesture_rec.take() else { return };
+        let mut text = format!("{}\n", rec.meta);
+        for (t, pts) in &rec.frames {
+            let pts: Vec<[f64; 2]> = pts.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
+            text += &format!("{}\n", serde_json::json!({ "t": t, "kind": "contacts", "pts": pts }));
+        }
+        let result = std::fs::write(&rec.out, text);
+        if self.diag.enabled {
+            diag::trace(format!("GESTURES recorded {} frames to {} ({result:?})", rec.frames.len(), rec.out.display()));
+        }
     }
     /// True while the strip moves by itself and should be stepped at frame rate.
     pub(crate) fn wants_fast_tick(&self) -> bool {
@@ -2084,6 +2138,9 @@ impl<B: WindowBackend> Engine<B> {
             {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
+                if let Some(rec) = self.gesture_rec.as_mut() {
+                    rec.frames.push((perf::qpc_us() - rec.started_us, p.clone()));
+                }
                 if self.diag.enabled
                     && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
                 {
@@ -2239,6 +2296,7 @@ pub fn run() -> Result<()> {
         v_travel: 0.,
         hopped: false,
         born: HashMap::new(),
+        gesture_rec: None,
         gesture: Default::default(),
         seq: 0,
         input: None,

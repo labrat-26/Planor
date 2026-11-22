@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   One command to build and test Planor: progressive tiers, direct test-exe execution, condition-based
   waits, daemon coexistence, caching, change-based selection, cheap retries, perf budgets, and digests.
@@ -23,7 +23,10 @@ param(
   [switch]$Perf,
   [switch]$Parallel,
   [int]$MaxJobs = 0,
-  [switch]$UpdateDocs
+  [switch]$UpdateDocs,
+  # Owner rule (2026-11-22): every run first rebuilds target\release\planor.exe and restarts the real daemon,
+  # so tests always run against the current code. -NoRestart skips it (only when asked).
+  [switch]$NoRestart
 )
 
 $ErrorActionPreference = "Continue"
@@ -39,6 +42,20 @@ $hasRecBin = Test-Path $recBin
 $cachePath = Join-Path $root "build\verify\cache.json"
 $gitCommit = (git rev-parse --short HEAD 2>$null)
 if (-not $gitCommit) { $gitCommit = "unknown" }
+
+if (-not $NoRestart) {
+  Write-Host "== rebuilding and restarting planor.exe (owner rule; -NoRestart to skip)"
+  $rb = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "rebuild-daemon.ps1") 2>&1
+  $rbCode = $LASTEXITCODE
+  $rb | Set-Content (Join-Path $out "rebuild-daemon.log") -Encoding UTF8
+  $ready = @($rb | Where-Object { "$_" -match "^Ready:" }) | Select-Object -Last 1
+  if ($rbCode -ne 0 -or -not $ready) {
+    Write-Host "rebuild/restart failed (see $out\rebuild-daemon.log)" -ForegroundColor Red
+    $rb | Select-Object -Last 15 | ForEach-Object { Write-Host "  $_" }
+    exit 2
+  }
+  Write-Host "   $ready"
+}
 
 function Format-Dur([int64]$ms) {
   return ("{0:N2}s" -f ($ms / 1000.0))

@@ -1061,3 +1061,144 @@ fn n020_a_new_window_that_moves_itself_is_put_back() {
     assert_eq!(h.rect(id), slot, "the newborn window is back in its slot");
     h.stop_clean();
 }
+
+// ---- Recorded touchpad gestures (`planor gestures record`), replayed on landscape AND portrait ----
+
+/// One gesture: the frames from the first touch to the lift of the last finger.
+fn split_gestures(events: &[planor::replay::ReplayEvent]) -> Vec<Vec<Vec<(f64, f64)>>> {
+    let (mut out, mut cur) = (vec![], vec![]);
+    for e in events {
+        if let planor::replay::ReplayKind::Contacts(p) = &e.kind {
+            if p.is_empty() {
+                if !cur.is_empty() {
+                    out.push(std::mem::take(&mut cur));
+                }
+            } else {
+                cur.push(p.clone());
+            }
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
+/// Fingers used (most seen) and centroid travel of the frames with that many fingers.
+fn describe_gesture(frames: &[Vec<(f64, f64)>]) -> (usize, f64, f64) {
+    let fingers = frames.iter().map(|f| f.len()).max().unwrap_or(0);
+    let c = |f: &Vec<(f64, f64)>| {
+        let n = f.len() as f64;
+        (f.iter().map(|p| p.0).sum::<f64>() / n, f.iter().map(|p| p.1).sum::<f64>() / n)
+    };
+    let full: Vec<_> = frames.iter().filter(|f| f.len() == fingers).collect();
+    match (full.first(), full.last()) {
+        (Some(a), Some(b)) => {
+            let (a, b) = (c(a), c(b));
+            (fingers, b.0 - a.0, b.1 - a.1)
+        }
+        _ => (fingers, 0., 0.),
+    }
+}
+
+/// Replays one gesture on `mon` ("MON0" landscape or "MON2" portrait) and checks the engine did what the
+/// gesture means there. Returns a one-line description for the report.
+fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
+    let (fingers, dx, dy) = describe_gesture(frames);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, mon.to_string());
+    let horizontal_strip = h.engine.strips[&key].area.horizontal();
+    let deadzone = h.engine.cfg["touchpad"]["axis_lock_deadzone"].as_integer().unwrap_or(12) as f64;
+    let travel = dx.hypot(dy);
+    let along = (dx.abs() >= dy.abs()) == horizontal_strip;
+    let first = h.engine.strips[&key].columns[0].members[0];
+    focus(&mut h, first);
+    if fingers == 3 && !along {
+        // Across the strip: give it a group of three to roll (a pair stops at its ends, N-010, so a swipe
+        // towards the end it already shows would rightly do nothing).
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let rest = h.engine.strips[&key].columns.get(1).map(|c| c.members[0]);
+        if let Some(third) = rest {
+            focus(&mut h, third);
+            h.cmd(Command::Key { name: "stack_toggle".into() });
+            h.settle();
+        }
+        assert!(h.engine.strips[&key].columns.iter().any(|c| c.members.len() >= 3), "setup: a group of three on {mon}");
+    }
+    if fingers == 3 && along {
+        // Along the strip: start in the middle so either direction can scroll.
+        let s = h.engine.strips.get_mut(&key).unwrap();
+        s.offset = i32::MAX / 4;
+        s.scroll(0);
+        s.offset /= 2;
+        h.engine.dirty = true;
+        h.settle();
+    }
+    let start = h.engine.strips[&key].clone();
+    let (mut moved, mut rolled, mut dragged) = (false, false, false);
+    for f in frames {
+        h.engine.event(Event::Contacts(f.clone()));
+        h.settle_quiet();
+        let s = &h.engine.strips[&key];
+        moved |= s.offset != start.offset;
+        rolled |= s.columns.iter().any(|c| c.frac != 0.)
+            || s.columns.iter().zip(&start.columns).any(|(a, b)| a.active != b.active);
+        dragged |= h.engine.pad.is_some();
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle_quiet();
+    settle_now(&mut h);
+    h.settle(); // invariants and os_rect == expected_rect after the gesture
+    let what = format!("{fingers} fingers, travel ({dx:.0}, {dy:.0}) on {mon}");
+    assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "{what}: gesture left state behind");
+    if travel < deadzone * 2. {
+        return format!("{what}: too short to mean anything, only checked it leaves no state");
+    }
+    match fingers {
+        3 if along => {
+            assert!(moved, "{what}: fingers along the strip must scroll it");
+            format!("{what}: scrolled the strip")
+        }
+        3 => {
+            assert!(rolled, "{what}: fingers across the strip must roll the group");
+            assert_eq!(h.engine.strips[&key].offset, start.offset, "{what}: rolling must not scroll the strip");
+            format!("{what}: rolled the group")
+        }
+        4 => {
+            assert!(dragged, "{what}: four fingers must pick the window up");
+            assert!(!moved || !h.engine.pad_scrolling, "{what}: no stray scroll after the drop");
+            format!("{what}: carried and dropped the window")
+        }
+        _ => format!("{what}: no gesture for this many fingers"),
+    }
+}
+
+#[test]
+fn recorded_gestures_replay_on_landscape_and_portrait() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/gestures/recorded");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .map(|d| d.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "jsonl")).collect())
+        .unwrap_or_default();
+    files.sort();
+    assert!(!files.is_empty(), "no recordings in {}", dir.display());
+    let mut report = vec![];
+    for f in &files {
+        let text = std::fs::read_to_string(f).unwrap();
+        let gestures = split_gestures(&planor::replay::parse_events_jsonl(&text));
+        assert!(!gestures.is_empty(), "{}: no gestures", f.display());
+        for (n, g) in gestures.iter().enumerate() {
+            for mon in ["MON0", "MON2"] {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_on(g, mon)));
+                match r {
+                    Ok(line) => report.push(format!("{} #{n}: {line}", f.file_name().unwrap().to_string_lossy())),
+                    Err(e) => {
+                        let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+                        panic!("{} gesture #{n} on {mon}: {msg}\nso far:\n{}", f.display(), report.join("\n"));
+                    }
+                }
+            }
+        }
+    }
+    println!("{}", report.join("\n"));
+}
