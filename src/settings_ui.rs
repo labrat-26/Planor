@@ -103,6 +103,53 @@ pub fn hotkey_text(ctrl: bool, alt: bool, shift: bool, win: bool, vk: u32) -> Op
     Some(parts.join("+"))
 }
 
+/// What the Install page needs to know about this machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InstallView {
+    /// `%LOCALAPPDATA%\Planor\planor.exe` exists.
+    pub installed: bool,
+    /// This process is that installed copy.
+    pub running_installed: bool,
+    /// The Run-key entry points at the installed copy.
+    pub autostart: bool,
+}
+pub fn install_view() -> InstallView {
+    InstallView {
+        installed: crate::install::installed_exe().map(|p| p.exists()).unwrap_or(false),
+        running_installed: crate::install::running_is_installed(),
+        autostart: crate::install::autostart_enabled(),
+    }
+}
+/// Which Install-page buttons are usable, and what they say.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ButtonStates {
+    pub install_label: &'static str,
+    pub install_enabled: bool,
+    pub uninstall_enabled: bool,
+    pub autostart_enabled: bool,
+    /// Why autostart is unavailable (empty when it is available).
+    pub note: &'static str,
+}
+pub fn button_states(v: &InstallView) -> ButtonStates {
+    ButtonStates {
+        install_label: if v.running_installed {
+            "Installed"
+        } else if v.installed {
+            "Reinstall"
+        } else {
+            "Install"
+        },
+        install_enabled: !v.running_installed,
+        uninstall_enabled: v.installed,
+        autostart_enabled: v.running_installed,
+        note: match (v.installed, v.running_installed) {
+            (_, true) => "",
+            (true, false) => "Open Settings from the installed Planor's tray icon to change this.",
+            (false, false) => "Install Planor to enable autostart.",
+        },
+    }
+}
+
 /// Write the file unless it is currently invalid.
 pub fn save_guarded(model: &mut Model) -> std::result::Result<(), String> {
     if Model::load_error(&model.path).is_some() {
@@ -146,6 +193,9 @@ const RULES_PAGE: &str = "Rules";
 const RULE_BASE: usize = 5000;
 const ADD_BASE: usize = 6000;
 const ADD_ERR: usize = 100_000;
+const INSTALL_BASE: usize = 7000;
+const WM_INSTALL_DONE: u32 = WM_APP + 2;
+const WM_UNINSTALL_DONE: u32 = WM_APP + 3;
 
 struct Fonts {
     title: HFONT,
@@ -198,6 +248,10 @@ struct State {
     nav_hover: Option<usize>,
     new_matcher: crate::settings_model::RuleMatch,
     new_action: crate::settings_model::RuleAction,
+    install: InstallView,
+    install_note: String,
+    install_busy: bool,
+    delete_config: bool,
     scheduler: SaveScheduler,
     stamp: Option<(std::time::SystemTime, u64)>,
     quiet: bool,
@@ -506,25 +560,7 @@ fn build_page(st: &mut State) {
     let page = st.pages[st.selected].clone();
     let body = st.fonts.body;
     if page == INSTALL_PAGE {
-        let desc = "Install Planor for your user account and start it when you sign in.";
-        let text_w = card_r - card_l - 2 * pad;
-        let dh = measure_height(st, st.fonts.small, desc, text_w);
-        let h = pad * 2 + s(20) + s(2) + dh;
-        let card = rect(card_l, y, card_r, y + h);
-        st.rows.push(Row {
-            entry: None,
-            err_key: None,
-            card,
-            title: "Install".into(),
-            title_rc: rect(card_l + pad, y + pad, card_r - pad, y + pad + s(20)),
-            desc: desc.into(),
-            desc_rc: rect(card_l + pad, y + pad + s(22), card_r - pad, y + pad + s(22) + dh),
-            field: None,
-            swatch: false,
-            ctl: std::ptr::null_mut(),
-            reset: std::ptr::null_mut(),
-        });
-        y += h + gap;
+        y = build_install(st, y);
     } else if page == RULES_PAGE {
         y = build_rules(st, y);
     } else {
@@ -702,6 +738,67 @@ fn build_rules(st: &mut State, mut y: i32) -> i32 {
     push(st, &g4, "Add the new rule", "", false, b4, std::ptr::null_mut(), None);
     y += g4.h + gap;
     y
+}
+
+/// The Install page: install or uninstall for this user, autostart, and whether uninstalling keeps settings.
+fn build_install(st: &mut State, mut y: i32) -> i32 {
+    let dpi = st.dpi;
+    let s = |px: i32| mul(px, dpi);
+    let gap = s(6);
+    let body = st.fonts.body;
+    st.install = install_view();
+    let b = button_states(&st.install);
+    let path = crate::install::installed_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let push = |st: &mut State, g: &Geo, title: &str, desc: &str, ctl: HWND, reset: HWND| {
+        st.rows.push(Row {
+            entry: None,
+            err_key: None,
+            card: g.card,
+            title: title.into(),
+            title_rc: g.title_rc,
+            desc: desc.into(),
+            desc_rc: g.desc_rc,
+            field: None,
+            swatch: false,
+            ctl,
+            reset,
+        });
+    };
+    let hover = |h: HWND| unsafe { SetWindowSubclass(h, Some(hover_proc), 2, 0) };
+    let note = if st.install_note.is_empty() { String::new() } else { format!("\n{}", st.install_note) };
+    let (title, desc) = if st.install.running_installed {
+        ("Planor is installed".to_string(), format!("This copy runs from {path}.{note}"))
+    } else if st.install.installed {
+        ("Planor is installed".to_string(), format!("Installed at {path}. Reinstall to update it with this copy.{note}"))
+    } else {
+        ("Install Planor".to_string(), format!("Copies Planor to {path} for your user account only, and starts it.{note}"))
+    };
+    let g = geo(st, y, &desc, s(120), s(100));
+    let install = child(st, "BUTTON", b.install_label, BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE, body);
+    let uninstall = child(st, "BUTTON", "Uninstall", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.reset, INSTALL_BASE + 1, body);
+    unsafe {
+        EnableWindow(install, (b.install_enabled && !st.install_busy) as i32);
+        EnableWindow(uninstall, (b.uninstall_enabled && !st.install_busy) as i32);
+    }
+    hover(install);
+    hover(uninstall);
+    push(st, &g, &title, &desc, install, uninstall);
+    y += g.h + gap;
+
+    let desc = if b.note.is_empty() { "Planor starts hidden when you sign in to Windows." } else { b.note };
+    let g = geo(st, y, desc, s(92), 0);
+    let auto = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE + 2, body);
+    unsafe { EnableWindow(auto, b.autostart_enabled as i32) };
+    hover(auto);
+    push(st, &g, "Start Planor when I sign in", desc, auto, std::ptr::null_mut());
+    y += g.h + gap;
+
+    let desc = "Uninstalling also deletes planor.toml. Leave this off to keep your settings.";
+    let g = geo(st, y, desc, s(92), 0);
+    let del = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE + 3, body);
+    hover(del);
+    push(st, &g, "Delete my settings when uninstalling", desc, del, std::ptr::null_mut());
+    y + g.h + gap
 }
 
 fn apply_scroll(st: &mut State) {
@@ -926,8 +1023,85 @@ fn rules_command(st: &mut State, id: usize, code: u32) {
     }
 }
 
+/// Run `job` on a worker thread and post its outcome to the window as `msg` (`wp` 1 = ok, `lp` = Box<String>).
+fn run_job(st: &mut State, msg: u32, job: impl FnOnce() -> std::result::Result<String, String> + Send + 'static) {
+    st.install_busy = true;
+    build_page(st);
+    let hwnd = st.hwnd as usize;
+    std::thread::spawn(move || {
+        let outcome = job();
+        let ok = outcome.is_ok();
+        let text = Box::into_raw(Box::new(outcome.unwrap_or_else(|e| e)));
+        unsafe { PostMessageW(hwnd as HWND, msg, ok as usize, text as isize) };
+    });
+}
+
+/// Clicks on the Install page.
+fn install_command(st: &mut State, id: usize, code: u32) {
+    if code != BN_CLICKED || st.install_busy {
+        return;
+    }
+    match id - INSTALL_BASE {
+        0 => {
+            st.install_note = "Installing...".into();
+            run_job(st, WM_INSTALL_DONE, || crate::install::install().map(|p| p.display().to_string()).map_err(|e| e.to_string()));
+        }
+        1 => {
+            let asked = unsafe {
+                MessageBoxW(
+                    st.hwnd,
+                    wide("Uninstall Planor? Your windows go back to normal and Planor stops starting at sign-in.").as_ptr(),
+                    wide("Uninstall Planor").as_ptr(),
+                    MB_OKCANCEL | MB_ICONWARNING,
+                )
+            };
+            if asked == IDOK {
+                let delete = st.delete_config;
+                st.install_note = "Uninstalling...".into();
+                run_job(st, WM_UNINSTALL_DONE, move || crate::install::uninstall(delete).map(|_| String::new()).map_err(|e| e.to_string()));
+            }
+        }
+        2 => {
+            if let Err(e) = crate::install::set_autostart(!st.install.autostart) {
+                st.install_note = e.to_string();
+            } else {
+                st.install_note.clear();
+            }
+            build_page(st);
+        }
+        _ => {
+            st.delete_config = !st.delete_config;
+            let item = unsafe { GetDlgItem(st.page, id as i32) };
+            unsafe { InvalidateRect(item, std::ptr::null(), 0) };
+        }
+    }
+}
+
+/// An install or uninstall job finished. After a successful install this window (the old copy) closes and
+/// the installed copy opens Settings, where autostart is available.
+fn job_done(st: &mut State, msg: u32, ok: bool, text: String) {
+    st.install_busy = false;
+    if !ok {
+        st.install_note = text;
+        build_page(st);
+        return;
+    }
+    if msg == WM_INSTALL_DONE {
+        use std::os::windows::process::CommandExt;
+        let _ = std::process::Command::new("cmd")
+            .raw_arg(format!("/c ping -n 2 127.0.0.1 >nul & \"{text}\" settings"))
+            .creation_flags(0x0800_0000)
+            .spawn();
+    }
+    unsafe { PostMessageW(st.hwnd, WM_CLOSE, 0, 0) };
+}
+
 fn row_command(st: &mut State, id: usize, code: u32) {
     if st.quiet || id < ROW_BASE {
+        return;
+    }
+    if id >= INSTALL_BASE {
+        install_command(st, id, code);
         return;
     }
     if id >= RULE_BASE {
@@ -1066,6 +1240,45 @@ fn paint_text_button(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool, fi
     }
 }
 
+/// A Settings-style switch with its On/Off word: accent track and dark knob when on, outline when off.
+fn paint_switch(st: &State, c: &Canvas, rc: RECT, on: bool, hot: bool, hover: bool, disabled: bool) {
+    let (pal, dpi) = (st.pal, st.dpi);
+    let s = |px: i32| mul(px, dpi);
+    let (w, h) = (s(40), s(20));
+    let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
+    let word = if on { "On" } else { "Off" };
+    c.text(word, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, if disabled { pal.subtext } else { pal.text }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    let cy = sw.top + h / 2;
+    let knob = if hot && !disabled { s(14) } else { s(12) };
+    if disabled {
+        c.rrect(sw, (h / 2) as f32, None, Some((pal.border, 1.0)));
+        c.circle(if on { sw.right - s(10) } else { sw.left + s(10) }, cy, knob, pal.border);
+    } else if on {
+        c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
+        c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
+    } else {
+        c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
+        c.circle(sw.left + s(10), cy, knob, pal.track);
+    }
+}
+fn paint_disabled_button(st: &State, c: &Canvas, rc: RECT, text: &str, filled: bool) {
+    if filled {
+        c.rrect(rc, mul(4, st.dpi) as f32, Some(st.pal.hover), None);
+    }
+    c.text(text, rc, st.fonts.body, st.pal.subtext, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+fn paint_install(st: &State, c: &Canvas, rc: RECT, id: usize, hot: bool, hover: bool, disabled: bool) {
+    let label = button_states(&st.install).install_label;
+    match id - INSTALL_BASE {
+        0 if disabled => paint_disabled_button(st, c, rc, label, true),
+        0 => paint_text_button(st, c, rc, label, hot, true),
+        1 if disabled => paint_disabled_button(st, c, rc, "Uninstall", false),
+        1 => paint_text_button(st, c, rc, "Uninstall", hot, false),
+        2 => paint_switch(st, c, rc, st.install.autostart, hot, hover, disabled),
+        _ => paint_switch(st, c, rc, st.delete_config, hot, hover, disabled),
+    }
+}
+
 fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
     let id = d.CtlID as usize;
     if id < ROW_BASE {
@@ -1080,7 +1293,9 @@ fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
     let focus = d.itemState & ODS_FOCUS != 0 && d.itemState & ODS_NOFOCUSRECT == 0;
     buffered(d.hDC, rc, |c| {
         c.fill(rc, pal.card);
-        if id >= ADD_BASE {
+        if id >= INSTALL_BASE {
+            paint_install(st, c, rc, id, hot, hover, d.itemState & ODS_DISABLED != 0);
+        } else if id >= ADD_BASE {
             match id - ADD_BASE {
                 0 => paint_dropdown(st, c, rc, matcher_names()[(st.new_matcher == crate::settings_model::RuleMatch::Class) as usize], hot),
                 2 => paint_dropdown(st, c, rc, action_names()[crate::settings_model::RuleAction::ALL.iter().position(|a| *a == st.new_action).unwrap_or(0)], hot),
@@ -1099,21 +1314,7 @@ fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
                 paint_text_button(st, c, rc, "Reset", hot, false);
             } else {
                 match control_for(&st.model.entries[i]) {
-                    Control::Check => {
-                        let on = st.model.value(i).as_bool() == Some(true);
-                        let (w, h) = (s(40), s(20));
-                        let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
-                        c.text(if on { "On" } else { "Off" }, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, pal.text, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
-                        let cy = sw.top + h / 2;
-                        let knob = if hot { s(14) } else { s(12) };
-                        if on {
-                            c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
-                            c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
-                        } else {
-                            c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
-                            c.circle(sw.left + s(10), cy, knob, pal.track);
-                        }
-                    }
+                    Control::Check => paint_switch(st, c, rc, st.model.value(i).as_bool() == Some(true), hot, hover, false),
                     Control::Choice(_) => paint_dropdown(st, c, rc, st.model.value(i).as_str().unwrap_or(""), hot),
                     _ => (),
                 }
@@ -1417,6 +1618,11 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 }
                 0
             }
+            WM_INSTALL_DONE | WM_UNINSTALL_DONE => {
+                let text = *Box::from_raw(lp as *mut String);
+                job_done(s, msg, wp == 1, text);
+                0
+            }
             WM_CTLCOLORSTATIC => {
                 SetTextColor(wp as HDC, s.pal.error);
                 SetBkColor(wp as HDC, s.pal.bg);
@@ -1568,6 +1774,10 @@ pub fn run(path: &Path) -> Result<()> {
             nav_hover: None,
             new_matcher: crate::settings_model::RuleMatch::Process,
             new_action: crate::settings_model::RuleAction::Ignore,
+            install: install_view(),
+            install_note: String::new(),
+            install_busy: false,
+            delete_config: false,
             scheduler: SaveScheduler::new(Duration::from_millis(250)),
             stamp: stamp_of(path),
             quiet: false,
@@ -1736,6 +1946,36 @@ mod tests {
         let broken = temp("rules-broken", "[layout\n");
         let mut m2 = Model::from_text(&broken, crate::EXAMPLE).unwrap();
         assert!(apply_rules(&mut m2, &[]).is_err());
+    }
+
+    #[test]
+    fn autostart_disabled_until_running_from_install() {
+        let v = InstallView { installed: true, running_installed: false, autostart: false };
+        let b = button_states(&v);
+        assert!(!b.autostart_enabled);
+        assert!(!b.note.is_empty(), "the reason is shown");
+        let b = button_states(&InstallView { installed: false, running_installed: false, autostart: false });
+        assert!(!b.autostart_enabled && b.note.contains("Install Planor"), "{}", b.note);
+        let b = button_states(&InstallView { installed: true, running_installed: true, autostart: true });
+        assert!(b.autostart_enabled);
+    }
+
+    #[test]
+    fn uninstall_enabled_only_when_installed() {
+        assert!(!button_states(&InstallView { installed: false, running_installed: false, autostart: false }).uninstall_enabled);
+        assert!(button_states(&InstallView { installed: true, running_installed: false, autostart: false }).uninstall_enabled);
+        assert!(button_states(&InstallView { installed: true, running_installed: true, autostart: false }).uninstall_enabled);
+    }
+
+    #[test]
+    fn install_button_label_reinstalls() {
+        let label = |installed, running_installed| button_states(&InstallView { installed, running_installed, autostart: false });
+        assert_eq!(label(false, false).install_label, "Install");
+        assert_eq!(label(true, false).install_label, "Reinstall");
+        let running = label(true, true);
+        assert_eq!(running.install_label, "Installed");
+        assert!(!running.install_enabled, "cannot copy the running installed exe over itself");
+        assert!(label(true, false).install_enabled && label(false, false).install_enabled);
     }
     #[test]
     fn invalid_value_is_rejected_and_not_saved() {
