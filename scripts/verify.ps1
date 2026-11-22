@@ -367,9 +367,9 @@ if ($Cache) { Save-CacheMap $cachePath $cacheMap }
 $runSw.Stop()
 $totalRunMs = [int64][Math]::Round($runSw.Elapsed.TotalMilliseconds)
 
-$pass = ($results | Where-Object Verdict -eq "PASS").Count
-$flaky = ($results | Where-Object Verdict -eq "FLAKY").Count
-$fail = ($results | Where-Object Verdict -eq "FAIL").Count
+$pass = @($results | Where-Object Verdict -eq "PASS").Count
+$flaky = @($results | Where-Object Verdict -eq "FLAKY").Count
+$fail = @($results | Where-Object Verdict -eq "FAIL").Count
 $slowest10 = @($results | Where-Object DurationMs -gt 0 | Sort-Object DurationMs -Descending | Select-Object -First 10)
 $perfLatest = if ($perfReports.Count -gt 0) { $perfReports[-1] } else { $null }
 if ($perfLatest) {

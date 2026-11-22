@@ -62,7 +62,7 @@ elseif ($Bundle) {
   if (Test-Path $sp) {
     try {
       $st = Get-Content -Raw $sp -Encoding UTF8 | ConvertFrom-Json
-      Add-Line ("state: monitors=$($st.monitors.Count) strips=$($st.strips.Count) tiles=$($st.tiles.Count) animating=$($st.animating) focus=$($st.focus_hwnd)")
+      Add-Line ("state: monitors=$($st.monitors.Count) strips=$($st.strips.Count) tiles=$($st.tiles.Count) parked=$($st.parked.Count) seq=$($st.seq) stalls=$($st.stalls)")
     } catch { Add-Line "state.json: parse error" }
   }
   $pp = Join-Path $Bundle "perf.json"
@@ -88,9 +88,16 @@ elseif ($Log) {
   $res = [regex]::Match($t, "test result: [^\r\n]+").Value
   Add-Line "log: $Log"
   Add-Line $res
-  foreach ($m in [regex]::Matches($t, "(?m)^---- (\S+) stdout ----\r?\n(?<body>(?:.*\r?\n){0,8})")) {
+  $matchedBlocks = [regex]::Matches($t, "(?m)^---- (\S+) stdout ----\r?\n(?<body>(?:.*\r?\n){0,8})")
+  foreach ($m in $matchedBlocks) {
     Add-Line "FAIL $($m.Groups[1].Value)"
     ($m.Groups["body"].Value -split "\r?\n" | Where-Object { $_.Trim() -and $_ -notmatch "RUST_BACKTRACE" } | Select-Object -First 4) | ForEach-Object { Add-Line ("  " + (Short $_)) }
+  }
+  if ($matchedBlocks.Count -eq 0) {
+    foreach ($pm in [regex]::Matches($t, "(?m)^thread '([^']+)'[^\r\n]*panicked at ([^\r\n]+)\r?\n([^\r\n]+)")) {
+      Add-Line ("FAIL {0} ({1})" -f $pm.Groups[1].Value, (Short $pm.Groups[2].Value 80))
+      Add-Line ("  " + (Short $pm.Groups[3].Value))
+    }
   }
   $e = [regex]::Matches($t, "(?m)^error(\[E\d+\])?:[^\r\n]*") | Select-Object -First 5
   foreach ($x in $e) { Add-Line (Short $x.Value) }

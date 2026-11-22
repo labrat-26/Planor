@@ -415,9 +415,72 @@ fn wait_settled(d: &Daemon, expected_windows: usize, timeout: Duration) -> bool 
         let Ok(v) = serde_json::from_slice::<serde_json::Value>(&out.stdout) else {
             return false;
         };
-        let animating = v["animating"].as_bool().unwrap_or(true);
-        let tiles = v["tiles"].as_array().map(|a| a.len()).unwrap_or(0);
-        !animating && tiles >= expected_windows
+        if v["schema_version"].as_u64() != Some(1) {
+            return false;
+        }
+        let Some(tiles) = v["tiles"].as_array() else {
+            return false;
+        };
+        if tiles.len() < expected_windows
+            || (expected_windows > 0 && v["seq"].as_u64().unwrap_or(0) < 1)
+        {
+            return false;
+        }
+        let Some(park_x) = v["park_x"].as_i64() else {
+            return false;
+        };
+        tiles.iter().all(|t| {
+            if t["pinned"].as_bool().unwrap_or(false) {
+                return true;
+            }
+            let Some(os) = t["os_rect"].as_object() else {
+                return false;
+            };
+            let (Some(ox), Some(oy), Some(ow), Some(oh)) = (
+                os.get("x").and_then(|x| x.as_i64()),
+                os.get("y").and_then(|y| y.as_i64()),
+                os.get("w").and_then(|w| w.as_i64()),
+                os.get("h").and_then(|h| h.as_i64()),
+            ) else {
+                return false;
+            };
+            if t["parked"].as_bool().unwrap_or(false) {
+                return ox >= park_x - 4;
+            }
+            let Some(exp) = t["expected_rect"].as_object() else {
+                return false;
+            };
+            let (Some(ex), Some(ey), Some(ew), Some(eh)) = (
+                exp.get("x").and_then(|x| x.as_i64()),
+                exp.get("y").and_then(|y| y.as_i64()),
+                exp.get("w").and_then(|w| w.as_i64()),
+                exp.get("h").and_then(|h| h.as_i64()),
+            ) else {
+                return false;
+            };
+            let (cx, cy, cw, ch) = if let Some(b) = t["bound"].as_object() {
+                if let (Some(bx), Some(by), Some(bw), Some(bh)) = (
+                    b.get("x").and_then(|x| x.as_i64()),
+                    b.get("y").and_then(|y| y.as_i64()),
+                    b.get("w").and_then(|w| w.as_i64()),
+                    b.get("h").and_then(|h| h.as_i64()),
+                ) {
+                    let cl = ex.max(bx);
+                    let ct = ey.max(by);
+                    let cr = (ex + ew).min(bx + bw);
+                    let cb = (ey + eh).min(by + bh);
+                    (cl, ct, (cr - cl).max(0), (cb - ct).max(0))
+                } else {
+                    (ex, ey, ew, eh)
+                }
+            } else {
+                (ex, ey, ew, eh)
+            };
+            (ox - cx).abs() <= 4
+                && (oy - cy).abs() <= 4
+                && (ow - cw).abs() <= 4
+                && (oh - ch).abs() <= 4
+        })
     })
 }
 fn focus_key(vk: u8) {
