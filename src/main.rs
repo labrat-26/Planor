@@ -6,6 +6,7 @@ mod diag;
 mod gpu;
 mod guide;
 mod input;
+mod install;
 mod note;
 mod perf;
 mod render;
@@ -470,7 +471,6 @@ fn client(name: &str, cmd: &Command) -> Result<String> {
         serde_json::from_slice(&read_frame(&mut file)?)?;
     Ok(response?)
 }
-fn autostart(mode:Switch)->Result<()>{use windows_sys::Win32::System::Registry::*;let cmd=wide(&format!("\"{}\" start",std::env::current_exe()?.display()));unsafe{let mut key=null_mut();let path=wide(r"Software\Microsoft\Windows\CurrentVersion\Run");let status=RegCreateKeyExW(HKEY_CURRENT_USER,path.as_ptr(),0,null(),REG_OPTION_NON_VOLATILE,KEY_SET_VALUE,null(),&mut key,null_mut());if status!=0{return Err(io::Error::from_raw_os_error(status as i32).into())}let name=wide("Planor");let result=match mode{Switch::On=>RegSetValueExW(key,name.as_ptr(),0,REG_SZ,cmd.as_ptr().cast(),(cmd.len()*2)as u32),Switch::Off=>RegDeleteValueW(key,name.as_ptr())};RegCloseKey(key);if result!=0&&result!=ERROR_FILE_NOT_FOUND{return Err(io::Error::from_raw_os_error(result as i32).into())}Ok(())}}
 fn main() -> Result<()> {
     // Panics in any thread are appended to crash.log (the daemon usually runs without a console).
     std::panic::set_hook(Box::new(|info| {
@@ -505,7 +505,7 @@ fn main() -> Result<()> {
     let cmd = Cli::parse().cmd.unwrap_or(Command::Start);
     match cmd {
         Command::Start => daemon::run(),
-        Command::Autostart{mode}=>autostart(mode),
+        Command::Autostart{mode}=>install::set_autostart(matches!(mode,Switch::On)),
         Command::Diag {
             action: Diagnostic::Export { ref path },
         } => {
