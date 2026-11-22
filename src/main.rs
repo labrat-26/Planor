@@ -211,6 +211,9 @@ enum GestureAction {
         #[arg(long)]
         live: bool,
     },
+    /// Name every gesture in a recording (fingers, tap/swipe/drag/scroll/pinch/circle, direction, pace) and,
+    /// for a guided one, check each against its step's instruction.
+    Analyze { file: PathBuf },
     /// Add a step label to the running recording.
     Mark { text: String },
     /// Finish the running recording now and write it.
@@ -599,6 +602,7 @@ fn main() -> Result<()> {
         Command::Gestures {
             action: GestureAction::Guide { name, step_seconds, live },
         } => guide::run(name, step_seconds, live),
+        Command::Gestures { action: GestureAction::Analyze { file } } => analyze_gestures(&file),
         _ => {
             println!("{}", client(&pipe_name(), &cmd)?);
             Ok(())
@@ -607,6 +611,58 @@ fn main() -> Result<()> {
 }
 /// `planor gestures record <name>`: the daemon captures every touchpad frame it sees for `seconds` and
 /// writes them (events.jsonl, plus a meta line) to the output file; this side waits and summarises.
+/// `planor gestures analyze <file>`: what each gesture was, step by step.
+fn analyze_gestures(file: &std::path::Path) -> Result<()> {
+    use planor::replay::{fits, identify, parse_events_jsonl, segments};
+    let text = fs::read_to_string(file)?;
+    let events = parse_events_jsonl(&text);
+    let segs = segments(&events);
+    // Clicks per step, from the `button` lines (not part of the replay events).
+    let mut clicks: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut label = String::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        match v["kind"].as_str() {
+            Some("mark") => {
+                let m = v["text"].as_str().unwrap_or("");
+                if !m.starts_with("end ") {
+                    label = m.to_string()
+                }
+            }
+            Some("button") if v["down"].as_bool() == Some(true) => {
+                clicks.entry(label.clone()).or_default().push(v["button"].as_str().unwrap_or("?").to_string())
+            }
+            _ => (),
+        }
+    }
+    let (mut ok, mut off, mut current) = (0, 0, None::<String>);
+    for s in &segs {
+        if current.as_deref() != Some(&s.label) {
+            current = Some(s.label.clone());
+            let c = clicks.get(&s.label).map(|c| format!("   clicks: {}", c.join(" "))).unwrap_or_default();
+            println!("\n{}{c}", if s.label.is_empty() { "(no step)" } else { &s.label });
+        }
+        let g = identify(s);
+        let guided = !s.label.is_empty();
+        // Made in the get-ready gap: it may be finishing the previous step instead of starting this one.
+        let late = !s.previous.is_empty() && !fits(&s.label, &g) && fits(&s.previous, &g);
+        let good = !guided || late || fits(&s.label, &g);
+        if guided {
+            if good { ok += 1 } else { off += 1 }
+        }
+        println!(
+            "  {} {:<34} travel ({:>5.0}, {:>5.0})  {:>5.0} ms{}",
+            if !guided { " " } else if good { "ok" } else { "--" },
+            g.name(),
+            g.dx,
+            g.dy,
+            g.ms,
+            if late { "   (late, belongs to the step before)" } else { "" }
+        );
+    }
+    println!("\n{} gestures: {ok} as instructed, {off} different from the step (\"--\").", segs.len());
+    Ok(())
+}
 fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bool) -> Result<()> {
     let slug: String = name
         .chars()

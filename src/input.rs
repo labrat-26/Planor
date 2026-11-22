@@ -116,7 +116,7 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                     .then_some(v)
             };
             let mut points = vec![];
-            let all=RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);let count=get(13,0,0x54).unwrap_or(0);if count==3||count==4||count==0||(all&&count>=1) {
+            let all=RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);let count=get(13,0,0x54).unwrap_or(0);if count>=3||count==0||(all&&count>=1) {
                 for link in 1..caps.NumberLinkCollectionNodes {
                     let mut usages = [0u16; 32];
                     let mut used = 32;

@@ -11,6 +11,14 @@ All notable changes to Planor and its developer tooling harness are documented h
 ### Fixed
 - **Sideways three-finger swipes sometimes did nothing** (found by the owner's first recording): the axis was locked after 3 units of travel, and fingers that settle downwards as they land locked a sideways swipe vertical. Now locked after 3 units only when one axis leads 1.5x, else at `axis_lock_deadzone`. Fixture `owner-mixed-3and4-finger.jsonl` (12 real gestures) replays on both orientations; `tests/core.rs::axis_lock_waits_for_a_clear_direction_owner_recording`.
 
+### Found by the owner's guided recording (114 gestures, 24 steps)
+- **`planor gestures analyze <file>`** + `replay::{segments, identify, fits}`: splits a recording into gestures (lift frames or >50 ms gaps), names each one (fingers, tap/move/scroll/pinch/swipe/drag/circle, direction, slow/flick, staggered lift) and checks it against its guided step; a gesture in the get-ready gap may finish the previous step. 84 of 114 matched; the rest were genuinely different (e.g. 3-finger taps in the 1-finger step, left/right swapped).
+- **Fingers landing one at a time**: a 3-finger scroll that has moved less than twice `axis_lock_deadzone` gives way to a 4-finger drag when the fourth finger lands (gesture #107 never picked the window up).
+- **Five fingers veto**: the whole hand lands and lifts in stages (3, 4, 5); once five are seen the started drag is cancelled (window back in its slot, `DragCancel`) or the scroll ended, and nothing starts until fewer than three fingers remain. 5-finger frames now reach the daemon.
+- **Recordings had no lift frames** with all finger counts on: a frame opening with no finger touching is now the lift.
+- `rebuild-daemon.ps1` compile-checks before stopping the daemon (a build error left the owner without one for a minute).
+- Replay of all recordings: 258 gesture replays (landscape + portrait): 66 ignored as they should be (1-2 fingers), 58 too short, 48 carried and dropped, 38 rolled, 38 scrolled, 10 vetoed with the layout unchanged.
+
 ### Added (guided recording)
 - **`planor gestures guide [name]`**: a window on top (never takes focus, not tiled) walks through 24 steps: one finger move and tap, physical left and right click, two-finger tap, scroll and pinch, three and four fingers tap and every direction (slow, flick, diagonal, circle, lifting one finger at a time), five fingers. Each step is a `mark` in the recording. Records only by default (`--live` lets Planor act). While recording, 1-, 2- and 5-finger frames (`input::RECORD_ALL`, `ContactFrame::all`) and mouse buttons (`button` lines from the LL hook) are captured too; `gestures mark` / `gestures stop` drive it over IPC.
 - Replay test: 1-, 2- and 5-finger gestures must leave Planor untouched; every gesture is reported with its guided step.

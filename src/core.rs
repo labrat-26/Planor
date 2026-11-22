@@ -498,6 +498,10 @@ pub struct Gesture {
     fingers: usize,
     dragging: bool,
     scrolling: bool,
+    /// Finger travel of the scroll so far (decides whether a fourth finger may still turn it into a drag).
+    travel: f64,
+    /// Five or more fingers were seen: nothing is a Planor gesture until the hand is lifted.
+    vetoed: bool,
 }
 #[derive(Debug, PartialEq)]
 pub enum Swipe {
@@ -515,13 +519,26 @@ pub enum Swipe {
     DragMove(f64, f64),
     /// Fingers lifted (or their number changed): drop the window.
     DragEnd,
+    /// A fifth finger touched while carrying a window: put it back, drop nothing.
+    DragCancel,
     /// `direction` is +1 for rightwards/downwards finger travel and -1 for leftwards/upwards.
     Step { fingers: usize, horizontal: bool, direction: isize },
 }
 impl Gesture {
     pub fn sample(&mut self, points: &[(f64, f64)], deadzone: f64, step: f64) -> Swipe {
         let n = points.len();
-        let ended = |g: &Self| {
+        if n >= 5 || (self.vetoed && n >= 3) {
+            // The whole hand on the pad is not a Planor gesture. It lands and lifts in stages (3, 4, 5
+            // fingers in the owner's recording), so whatever the first fingers started is cancelled and
+            // everything is ignored until fewer than three fingers remain.
+            let was = (self.dragging, self.scrolling);
+            *self = Self { vetoed: true, ..Self::default() };
+            return match was {
+                (true, _) => Swipe::DragCancel,
+                (_, true) => Swipe::ScrollEnd,
+                _ => Swipe::None,
+            };
+        }        let ended = |g: &Self| {
             if g.dragging {
                 Swipe::DragEnd
             } else if g.scrolling {
@@ -540,6 +557,12 @@ impl Gesture {
             points.iter().map(|p| p.1).sum::<f64>() / n as f64,
         );
         if self.fingers != n {
+            if self.scrolling && n == 4 && self.fingers == 3 && self.travel < 2. * deadzone {
+                // Fingers also LAND one at a time: the owner's recorded four-finger drags often touched with
+                // three first for a few frames. A scroll that has barely moved becomes the drag.
+                *self = Self { fingers: n, ..Self::default() };
+                return Swipe::ScrollEnd;
+            }
             if self.dragging || self.scrolling {
                 // The gesture is locked once it started: fingers rarely lift together, and the first one
                 // up used to end a drag and start a three-finger scroll with the rest (a jerk at every
@@ -590,6 +613,7 @@ impl Gesture {
         let horizontal = self.horizontal.unwrap_or(true);
         let delta = if horizontal { pos.0 - self.last.0 } else { pos.1 - self.last.1 };
         self.last = pos;
+        self.travel += delta.abs();
         if horizontal {
             // Sideways: scroll continuously, with the focus following the window nearest the centre.
             self.scrolling = true;
@@ -668,13 +692,21 @@ impl ContactFrame {
     ) -> Option<Vec<(f64, f64)>> {
         if count != 0 {
             self.points.clear();
-            self.waiting = count == 3 || count == 4 || (self.all && count >= 1);
+            self.waiting = count >= 3 || (self.all && count >= 1);
             self.target = count as usize;
         }
         if !self.waiting {
             return Some(vec![]);
         }
+        let before = self.points.len();
         self.points.extend(contacts);
+        if self.all && count != 0 && self.points.len() == before {
+            // Recording: a frame that opens with no finger touching is the lift (the lifting contacts are
+            // still counted, tip up, so it would otherwise never complete and recordings had no lifts).
+            self.waiting = false;
+            self.points.clear();
+            return Some(vec![]);
+        }
         if self.points.len() < self.target {
             return None;
         }

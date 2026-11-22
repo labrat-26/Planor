@@ -426,7 +426,7 @@ impl<B: WindowBackend> Engine<B> {
                     None => "not recording".into(),
                 });
             }
-            Command::Gestures { action: crate::GestureAction::Guide { .. } } => return Ok("guide runs in the client".into()),
+            Command::Gestures { action: crate::GestureAction::Guide { .. } | crate::GestureAction::Analyze { .. } } => return Ok("runs in the client".into()),
             Command::Gestures { action: crate::GestureAction::Record { name, seconds, out, passive } } => {
                 let Some(out) = out else { return Ok("no output path".into()) };
                 let cursor = self.backend.cursor_pos();
@@ -1710,6 +1710,15 @@ impl<B: WindowBackend> Engine<B> {
             self.drag_update();
         }
     }
+    /// Five fingers while carrying a window: nothing is dropped, the layout puts the window back.
+    fn pad_cancel(&mut self) {
+        if self.pad.take().is_some() {
+            self.drag = None;
+            self.flung = false;
+            self.instant = true;
+            self.dirty = true;
+        }
+    }
     fn pad_end(&mut self) {
         let Some(p) = self.pad.take() else { return };
         // Fling: a fast flick at lift-off throws the window to the neighbouring screen in that direction.
@@ -2181,8 +2190,9 @@ impl<B: WindowBackend> Engine<B> {
                         return;
                     }
                 }
-                // 1, 2 or 5 fingers only arrive while recording; to the gestures they are a lift.
-                let p = if p.len() == 3 || p.len() == 4 { p } else { vec![] };
+                // 1 or 2 fingers only arrive while recording; to the gestures they are a lift. Five or more are
+                // passed on: they veto the gesture.
+                let p = if p.len() >= 3 { p } else { vec![] };
                 if self.diag.enabled
                     && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
                 {
@@ -2216,6 +2226,7 @@ impl<B: WindowBackend> Engine<B> {
                     }
                     Swipe::DragMove(dx, dy) => return self.pad_move(dx, dy),
                     Swipe::DragEnd => return self.pad_end(),
+                    Swipe::DragCancel => return self.pad_cancel(),
                     Swipe::Scroll(d) => return self.pad_scroll(d, false),
                     Swipe::ScrollV(d) => return self.pad_scroll(d, true),
                     Swipe::ScrollEnd => return self.pad_scroll_end(),

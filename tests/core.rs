@@ -125,6 +125,8 @@ fn synthetic_contacts() {
     for n in 1..=5 {
         assert_eq!(g.sample(&vec![(0., 0.); n], 12., 100.), Swipe::None)
     }
+    // (Five fingers veto everything until the hand is lifted.)
+    assert_eq!(g.sample(&[], 12., 100.), Swipe::None);
     // Three fingers sideways: continuous scroll (dead-zone travel included), vertical drift ignored.
     g.sample(&[(0., 0.); 3], 12., 100.);
     assert_eq!(g.sample(&[(2., 1.); 3], 12., 100.), Swipe::None);
@@ -991,10 +993,10 @@ fn gesture_survives_fingers_lifting_one_by_one() {
     assert_eq!(g.sample(&[(85., 40.); 3], 12., 100.), Swipe::DragMove(5., 0.));
     assert_eq!(g.sample(&[(85., 40.); 2], 12., 100.), Swipe::DragEnd);
     assert_eq!(g.sample(&[], 12., 100.), Swipe::None, "no scroll and no second drop after the lift");
-    // A fourth finger touching mid-scroll does not pick a window up.
+    // A fourth finger touching an established scroll (past the dead zone) does not pick a window up.
     let mut g = Gesture::default();
     g.sample(&[(0., 0.); 3], 12., 100.);
-    assert_eq!(g.sample(&[(10., 0.); 3], 12., 100.), Swipe::Scroll(10.));
+    assert_eq!(g.sample(&[(30., 0.); 3], 12., 100.), Swipe::Scroll(30.));
     assert_eq!(g.sample(&[(50., 50.); 4], 12., 100.), Swipe::None);
     assert_eq!(g.sample(&[(60., 50.); 4], 12., 100.), Swipe::Scroll(10.));
     assert_eq!(g.sample(&[], 12., 100.), Swipe::ScrollEnd);
@@ -1035,4 +1037,76 @@ fn contact_frames_of_any_finger_count_while_recording() {
     assert_eq!(f.packet(1, [(1, (5., 5.))]), Some(vec![(5., 5.)]));
     assert_eq!(f.packet(2, [(1, (5., 5.))]), None, "waits for the second finger");
     assert_eq!(f.packet(0, [(2, (9., 5.))]).unwrap().len(), 2);
+    // The lift: a frame that opens with no finger touching (the contact is reported with its tip up).
+    assert_eq!(f.packet(1, []), Some(vec![]));
+}
+
+#[test]
+fn classifier_names_the_owners_guided_recording() {
+    // tests/fixtures/gestures/recorded/owner-guided-full-range.jsonl: 24 guided steps, recorded without
+    // lift frames (split on time gaps). The owner did not follow every instruction; these steps they did.
+    use planor::replay::{Kind, fits, identify, parse_events_jsonl, segments};
+    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gestures/recorded/owner-guided-full-range.jsonl")).unwrap();
+    let segs = segments(&parse_events_jsonl(&text));
+    assert_eq!(segs.len(), 114, "gestures found");
+    // A gesture made in the get-ready gap that fits the step before belongs to that step.
+    let late = |s: &planor::replay::Segment| {
+        let g = identify(s);
+        !s.previous.is_empty() && !fits(&s.label, &g) && fits(&s.previous, &g)
+    };
+    let in_step = |n: u32| -> Vec<planor::replay::Identified> {
+        let p = format!("step {n}:");
+        segs.iter().filter(|s| s.label.starts_with(&p) && !late(s)).map(identify).collect()
+    };
+    let all = |n: u32, f: &dyn Fn(&planor::replay::Identified) -> bool, what: &str| {
+        let g = in_step(n);
+        assert!(!g.is_empty() && g.iter().all(f), "step {n} should be all {what}: {:?}", g.iter().map(|g| g.name()).collect::<Vec<_>>());
+    };
+    all(4, &|g| g.fingers == 2 && g.kind == Kind::Tap, "two-finger taps");
+    all(7, &|g| g.fingers == 2 && g.kind == Kind::Scroll && (g.direction == "left" || g.direction == "right"), "sideways two-finger scrolls");
+    all(8, &|g| matches!(g.kind, Kind::Pinch { .. }), "pinches");
+    all(9, &|g| g.fingers == 3 && g.kind == Kind::Tap, "three-finger taps");
+    all(13, &|g| g.fingers == 3 && g.direction == "down", "three-finger swipes down");
+    all(15, &|g| g.fingers == 3 && g.direction == "right", "three-finger swipes right");
+    all(16, &|g| g.direction.contains('-'), "diagonals");
+    all(17, &|g| g.fingers == 4 && g.kind == Kind::Tap, "four-finger taps");
+    all(22, &|g| g.kind == Kind::Circle, "circles");
+    // Overall agreement with the instructions (late gestures may belong to the step before).
+    let ok = segs
+        .iter()
+        .filter(|s| {
+            let g = identify(s);
+            fits(&s.label, &g) || (!s.previous.is_empty() && fits(&s.previous, &g))
+        })
+        .count();
+    assert_eq!(ok, 84, "gestures matching their step");
+}
+
+#[test]
+fn fingers_landing_one_by_one_still_make_a_four_finger_drag() {
+    // Owner recording, gesture #107: finger counts 1,2,2,3,3,3,3,3,3 then 4 for the rest of a drag. The
+    // brief three-finger start used to lock a scroll, so the window was never picked up.
+    let mut g = Gesture::default();
+    g.sample(&[(0., 0.); 3], 12., 100.);
+    assert_eq!(g.sample(&[(4., 0.); 3], 12., 100.), Swipe::Scroll(4.));
+    assert_eq!(g.sample(&[(4., 0.); 4], 12., 100.), Swipe::ScrollEnd, "young scroll gives way");
+    g.sample(&[(4., 0.); 4], 12., 100.);
+    assert_eq!(g.sample(&[(30., 0.); 4], 12., 100.), Swipe::DragStart);
+}
+
+#[test]
+fn five_fingers_veto_and_cancel_what_the_first_fingers_started() {
+    // Owner recording, gesture #113: 3,3, then 4 fingers for 6 frames, then 5. The early four-finger
+    // frames picked the window up; the fifth finger must cancel that and nothing else may start.
+    let mut g = Gesture::default();
+    g.sample(&[(0., 0.); 4], 12., 100.);
+    assert_eq!(g.sample(&[(20., 0.); 4], 12., 100.), Swipe::DragStart);
+    assert_eq!(g.sample(&[(25., 0.); 5], 12., 100.), Swipe::DragCancel);
+    assert_eq!(g.sample(&[(90., 0.); 5], 12., 100.), Swipe::None);
+    assert_eq!(g.sample(&[(150., 0.); 4], 12., 100.), Swipe::None, "lifting back through 4 fingers starts nothing");
+    assert_eq!(g.sample(&[(160., 0.); 3], 12., 100.), Swipe::None);
+    assert_eq!(g.sample(&[], 12., 100.), Swipe::None);
+    // After the lift, gestures work again.
+    g.sample(&[(0., 0.); 3], 12., 100.);
+    assert_eq!(g.sample(&[(5., 0.); 3], 12., 100.), Swipe::Scroll(5.));
 }

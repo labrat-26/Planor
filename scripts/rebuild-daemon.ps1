@@ -7,6 +7,10 @@ $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $release = Join-Path $root "target\release\planor.exe"
 
+# Compile-check first: a build error must not leave the owner without a running daemon.
+cargo check --release --bin planor
+if ($LASTEXITCODE -ne 0) { throw "cargo check failed; the running daemon was left alone" }
+
 $existing = @(Get-Process planor -ErrorAction SilentlyContinue)
 if ($existing.Count -gt 0) {
   Write-Output ("Stopping existing planor.exe pid(s): " + (($existing | ForEach-Object { $_.Id }) -join ", "))

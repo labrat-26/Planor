@@ -1,4 +1,4 @@
-﻿use crate::backend::sim::{FakeBackend, SimDesktop, SimWindow};
+use crate::backend::sim::{FakeBackend, SimDesktop, SimWindow};
 use crate::backend::WindowBackend;
 use crate::daemon::{Engine, Journal};
 use crate::win32::Event;
@@ -1065,27 +1065,6 @@ fn n020_a_new_window_that_moves_itself_is_put_back() {
 // ---- Recorded touchpad gestures (`planor gestures record`), replayed on landscape AND portrait ----
 
 /// One gesture: the frames from the first touch to the lift of the last finger.
-/// Each gesture comes with the label of the guided step it was recorded in (`mark` lines), if any.
-fn split_gestures(events: &[planor::replay::ReplayEvent]) -> Vec<(String, Vec<Vec<(f64, f64)>>)> {
-    let (mut out, mut cur, mut label) = (vec![], vec![], String::new());
-    for e in events {
-        match &e.kind {
-            planor::replay::ReplayKind::Contacts(p) if p.is_empty() => {
-                if !cur.is_empty() {
-                    out.push((label.clone(), std::mem::take(&mut cur)));
-                }
-            }
-            planor::replay::ReplayKind::Contacts(p) => cur.push(p.clone()),
-            planor::replay::ReplayKind::Mark(m) if !m.starts_with("end ") => label = m.clone(),
-            _ => (),
-        }
-    }
-    if !cur.is_empty() {
-        out.push((label, cur));
-    }
-    out
-}
-
 /// Fingers used (most seen) and centroid travel of the frames with that many fingers.
 fn describe_gesture(frames: &[Vec<(f64, f64)>]) -> (usize, f64, f64) {
     let fingers = frames.iter().map(|f| f.len()).max().unwrap_or(0);
@@ -1154,10 +1133,18 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     h.settle(); // invariants and os_rect == expected_rect after the gesture
     let what = format!("{fingers} fingers, travel ({dx:.0}, {dy:.0}) on {mon}");
     assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "{what}: gesture left state behind");
-    if !(3..=4).contains(&fingers) {
-        // Cursor moves, taps, clicks, two-finger scroll and pinch, five fingers: Planor must stay out of it.
+    if fingers < 3 {
+        // Cursor moves, taps, clicks, two-finger scroll and pinch: Planor must stay out of it.
         assert!(!moved && !dragged && !rolled, "{what}: Planor reacted to a {fingers}-finger gesture");
         return format!("{what}: ignored, as it should be");
+    }
+    if fingers >= 5 {
+        // The whole hand lands and lifts in stages, so the first fingers may briefly start something; the
+        // fifth cancels it. What counts is that the layout ends exactly as it was.
+        let end = &h.engine.strips[&key];
+        let order = |s: &planor::Strip| s.columns.iter().map(|c| (c.members.clone(), c.active)).collect::<Vec<_>>();
+        assert_eq!(order(end), order(&start), "{what}: a five-finger gesture changed the layout");
+        return format!("{what}: vetoed, layout unchanged");
     }
     if travel < deadzone * 2. {
         return format!("{what}: too short to mean anything, only checked it leaves no state");
@@ -1192,7 +1179,10 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
     let mut report = vec![];
     for f in &files {
         let text = std::fs::read_to_string(f).unwrap();
-        let gestures = split_gestures(&planor::replay::parse_events_jsonl(&text));
+        let gestures: Vec<(String, Vec<Vec<(f64, f64)>>)> = planor::replay::segments(&planor::replay::parse_events_jsonl(&text))
+            .into_iter()
+            .map(|s| (s.label, s.frames.into_iter().map(|f| f.1).collect()))
+            .collect();
         assert!(!gestures.is_empty(), "{}: no gestures", f.display());
         for (n, (label, g)) in gestures.iter().enumerate() {
             for mon in ["MON0", "MON2"] {
