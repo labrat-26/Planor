@@ -17,6 +17,7 @@ impl Event {
             Event::Key(_) => "key",
             Event::Contacts(_) => "contacts",
             Event::Wheel { .. } => "wheel",
+            Event::Button { .. } => "button",
             Event::Suspend(_) => "suspend",
             Event::Topology => "topology",
             Event::Stop => "stop",
@@ -33,6 +34,8 @@ pub enum Event {
     /// Mouse wheel turned with the Windows key held (`delta` in notches of 120; `tilt`: the horizontal
     /// wheel; `shift`: Shift held too), at screen point `x`, `y`.
     Wheel { delta: i32, tilt: bool, shift: bool, x: i32, y: i32 },
+    /// A mouse button went down or up (only reported while a gesture recording runs). `button`: left, right, middle.
+    Button { button: &'static str, down: bool, x: i32, y: i32 },
     Suspend(bool),
     Topology,
     Stop,
@@ -58,6 +61,19 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::HookMouse);
     use std::sync::atomic::Ordering::*;
     if code >= 0 {
+        if crate::input::RECORD_ALL.load(Relaxed) {
+            let button = match w as u32 {
+                WM_LBUTTONDOWN | WM_LBUTTONUP => Some("left"),
+                WM_RBUTTONDOWN | WM_RBUTTONUP => Some("right"),
+                WM_MBUTTONDOWN | WM_MBUTTONUP => Some("middle"),
+                _ => None,
+            };
+            if let Some(button) = button {
+                let p = unsafe { (*(l as *const MSLLHOOKSTRUCT)).pt };
+                let down = matches!(w as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN);
+                emit(Event::Button { button, down, x: p.x, y: p.y });
+            }
+        }
         if w == WM_LBUTTONDOWN as usize {
             let p = unsafe { (*(l as *const MSLLHOOKSTRUCT)).pt };
             let hit = PEEKS.try_lock().ok().and_then(|v| {

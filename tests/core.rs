@@ -1024,3 +1024,15 @@ fn axis_lock_waits_for_a_clear_direction_owner_recording() {
     g.sample(&[(0., 0.); 3], 12., 60.);
     assert_eq!(g.sample(&[(3., 0.5); 3], 12., 60.), Swipe::Scroll(3.));
 }
+
+#[test]
+fn contact_frames_of_any_finger_count_while_recording() {
+    // Normally only 3 and 4 fingers are assembled; a recording (`all`) also wants 1, 2 and 5.
+    let mut f = ContactFrame::default();
+    assert!(f.packet(1, [(1, (5., 5.))]).unwrap().is_empty(), "one finger is ignored normally");
+    let mut f = ContactFrame::default();
+    f.all = true;
+    assert_eq!(f.packet(1, [(1, (5., 5.))]), Some(vec![(5., 5.)]));
+    assert_eq!(f.packet(2, [(1, (5., 5.))]), None, "waits for the second finger");
+    assert_eq!(f.packet(0, [(2, (9., 5.))]).unwrap().len(), 2);
+}

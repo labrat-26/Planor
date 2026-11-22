@@ -3,6 +3,7 @@ mod config_tui;
 mod daemon;
 mod diag;
 mod gpu;
+mod guide;
 mod input;
 mod note;
 mod perf;
@@ -194,7 +195,26 @@ enum GestureAction {
         /// Output file (default: %LOCALAPPDATA%\planor\gestures\<stamp>-<name>.jsonl).
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Record only: Planor does not act on the gestures while recording.
+        #[arg(long)]
+        passive: bool,
     },
+    /// Guided session: a window on top walks through every gesture (1-5 fingers, taps, clicks, all
+    /// directions) while the daemon records them, marked step by step.
+    Guide {
+        #[arg(default_value = "guided")]
+        name: String,
+        /// Seconds per step (plus 2 s to get ready).
+        #[arg(long, default_value_t = 6)]
+        step_seconds: u64,
+        /// Let Planor act on the gestures while recording (default: record only).
+        #[arg(long)]
+        live: bool,
+    },
+    /// Add a step label to the running recording.
+    Mark { text: String },
+    /// Finish the running recording now and write it.
+    Stop,
 }
 #[derive(Subcommand, Serialize, Deserialize, Debug)]
 enum Diagnostic {
@@ -574,8 +594,11 @@ fn main() -> Result<()> {
         },
         Command::Config => config_tui::run(&folder("APPDATA")?.join("planor.toml")),
         Command::Gestures {
-            action: GestureAction::Record { name, seconds, out },
-        } => record_gestures(name, seconds, out),
+            action: GestureAction::Record { name, seconds, out, passive },
+        } => record_gestures(name, seconds, out, passive),
+        Command::Gestures {
+            action: GestureAction::Guide { name, step_seconds, live },
+        } => guide::run(name, step_seconds, live),
         _ => {
             println!("{}", client(&pipe_name(), &cmd)?);
             Ok(())
@@ -584,7 +607,7 @@ fn main() -> Result<()> {
 }
 /// `planor gestures record <name>`: the daemon captures every touchpad frame it sees for `seconds` and
 /// writes them (events.jsonl, plus a meta line) to the output file; this side waits and summarises.
-fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>) -> Result<()> {
+fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bool) -> Result<()> {
     let slug: String = name
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
@@ -602,7 +625,7 @@ fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>) -> Result<(
     let _ = fs::remove_file(&out);
     let reply = client(
         &pipe_name(),
-        &Command::Gestures { action: GestureAction::Record { name: slug, seconds, out: Some(out.clone()) } },
+        &Command::Gestures { action: GestureAction::Record { name: slug, seconds, out: Some(out.clone()), passive } },
     )?;
     println!("{reply}");
     println!("Recording for {seconds} s: do the gesture(s) now on the touchpad (each one, then lift all fingers).");

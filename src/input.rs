@@ -51,6 +51,8 @@ fn cursor_dpi() -> f64 {
         x.max(96) as f64
     }
 }
+/// While a gesture recording runs: pass 1-, 2- and 5-finger frames too (normally only 3 and 4 fingers reach the daemon).
+pub static RECORD_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 thread_local!{static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
 pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::InputContacts);
@@ -114,7 +116,7 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                     .then_some(v)
             };
             let mut points = vec![];
-            let count=get(13,0,0x54).unwrap_or(0);if count==3||count==4||count==0 {
+            let all=RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);let count=get(13,0,0x54).unwrap_or(0);if count==3||count==4||count==0||(all&&count>=1) {
                 for link in 1..caps.NumberLinkCollectionNodes {
                     let mut usages = [0u16; 32];
                     let mut used = 32;
@@ -136,7 +138,7 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                     }
                 }
             }
-            if let Some(frame)=PARTS.with(|v|v.borrow_mut().entry(head.hDevice as usize).or_default().packet(count,points)){frames.push(frame)}
+            if let Some(frame)=PARTS.with(|v|{let mut m=v.borrow_mut();let f=m.entry(head.hDevice as usize).or_default();f.all=all;f.packet(count,points)}){frames.push(frame)}
         }
     }
     frames

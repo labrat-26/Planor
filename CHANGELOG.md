@@ -11,6 +11,10 @@ All notable changes to Planor and its developer tooling harness are documented h
 ### Fixed
 - **Sideways three-finger swipes sometimes did nothing** (found by the owner's first recording): the axis was locked after 3 units of travel, and fingers that settle downwards as they land locked a sideways swipe vertical. Now locked after 3 units only when one axis leads 1.5x, else at `axis_lock_deadzone`. Fixture `owner-mixed-3and4-finger.jsonl` (12 real gestures) replays on both orientations; `tests/core.rs::axis_lock_waits_for_a_clear_direction_owner_recording`.
 
+### Added (guided recording)
+- **`planor gestures guide [name]`**: a window on top (never takes focus, not tiled) walks through 24 steps: one finger move and tap, physical left and right click, two-finger tap, scroll and pinch, three and four fingers tap and every direction (slow, flick, diagonal, circle, lifting one finger at a time), five fingers. Each step is a `mark` in the recording. Records only by default (`--live` lets Planor act). While recording, 1-, 2- and 5-finger frames (`input::RECORD_ALL`, `ContactFrame::all`) and mouse buttons (`button` lines from the LL hook) are captured too; `gestures mark` / `gestures stop` drive it over IPC.
+- Replay test: 1-, 2- and 5-finger gestures must leave Planor untouched; every gesture is reported with its guided step.
+
 ### Changed
 - **Owner rule: every test run rebuilds and restarts the binary.** `verify.ps1` runs `rebuild-daemon.ps1` first and aborts if the daemon does not come back (`-NoRestart` only on request).
 

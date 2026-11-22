@@ -654,6 +654,8 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
 }
 #[derive(Default)]
 pub struct ContactFrame {
+    /// Also assemble frames of 1, 2 or 5 fingers (only while `planor gestures record` runs).
+    pub all: bool,
     waiting: bool,
     target: usize,
     points: std::collections::BTreeMap<u32, (f64, f64)>,
@@ -666,7 +668,7 @@ impl ContactFrame {
     ) -> Option<Vec<(f64, f64)>> {
         if count != 0 {
             self.points.clear();
-            self.waiting = count == 3 || count == 4;
+            self.waiting = count == 3 || count == 4 || (self.all && count >= 1);
             self.target = count as usize;
         }
         if !self.waiting {

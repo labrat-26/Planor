@@ -136,7 +136,16 @@ pub(crate) struct GestureRec {
     pub out: PathBuf,
     pub started_us: i64,
     pub meta: serde_json::Value,
-    pub frames: Vec<(i64, Vec<(f64, f64)>)>,
+    /// Recorded lines (contacts, buttons, step marks), each with `t` in microseconds from the start.
+    pub events: Vec<serde_json::Value>,
+    /// Record only: Planor does not act on the gestures (a guided session must not move windows).
+    pub passive: bool,
+}
+impl GestureRec {
+    fn push(&mut self, mut v: serde_json::Value) {
+        v["t"] = serde_json::json!(perf::qpc_us() - self.started_us);
+        self.events.push(v);
+    }
 }
 pub(crate) struct DragSession {
     pub id: isize,
@@ -400,7 +409,25 @@ impl<B: WindowBackend> Engine<B> {
         reload: &crossbeam_channel::Sender<toml::Value>,
     ) -> Result<String> {
         match cmd {
-            Command::Gestures { action: crate::GestureAction::Record { name, seconds, out } } => {
+            Command::Gestures { action: crate::GestureAction::Mark { text } } => {
+                return Ok(match self.gesture_rec.as_mut() {
+                    Some(r) => {
+                        r.push(serde_json::json!({ "kind": "mark", "text": text }));
+                        "marked".into()
+                    }
+                    None => "not recording".into(),
+                });
+            }
+            Command::Gestures { action: crate::GestureAction::Stop } => {
+                let n = self.gesture_rec.as_ref().map(|r| r.events.len());
+                self.write_gesture_recording();
+                return Ok(match n {
+                    Some(n) => format!("stopped, {n} events written"),
+                    None => "not recording".into(),
+                });
+            }
+            Command::Gestures { action: crate::GestureAction::Guide { .. } } => return Ok("guide runs in the client".into()),
+            Command::Gestures { action: crate::GestureAction::Record { name, seconds, out, passive } } => {
                 let Some(out) = out else { return Ok("no output path".into()) };
                 let cursor = self.backend.cursor_pos();
                 let monitor = self.displays.iter().find(|m| contains(m.2, cursor)).or(self.displays.first());
@@ -423,8 +450,10 @@ impl<B: WindowBackend> Engine<B> {
                         "swipe_drag_gain": t["swipe_drag_gain"].as_float(),
                         "swipe_natural_direction": t["swipe_natural_direction"].as_bool(),
                     }),
-                    frames: vec![],
+                    events: vec![],
+                    passive,
                 });
+                crate::input::RECORD_ALL.store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(format!("recording touchpad frames to {}", out.display()));
             }
             Command::Stop => {
@@ -836,18 +865,19 @@ impl<B: WindowBackend> Engine<B> {
         }
         Ok(())
     }
-    /// Write a finished `planor gestures record` capture: one meta line, then one `contacts` line per frame
-    /// (`t` in microseconds from the start; an empty `pts` is a lift), the format `replay` and the tests read.
+    /// Write a finished `planor gestures record` capture: one meta line, then one line per event in time
+    /// order: `contacts` frames (an empty `pts` is a lift), `button` clicks and `mark` step labels, each with
+    /// `t` in microseconds from the start. The format `replay` and the tests read.
     pub(crate) fn write_gesture_recording(&mut self) {
         let Some(rec) = self.gesture_rec.take() else { return };
+        crate::input::RECORD_ALL.store(false, std::sync::atomic::Ordering::Relaxed);
         let mut text = format!("{}\n", rec.meta);
-        for (t, pts) in &rec.frames {
-            let pts: Vec<[f64; 2]> = pts.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
-            text += &format!("{}\n", serde_json::json!({ "t": t, "kind": "contacts", "pts": pts }));
+        for e in &rec.events {
+            text += &format!("{e}\n");
         }
         let result = std::fs::write(&rec.out, text);
         if self.diag.enabled {
-            diag::trace(format!("GESTURES recorded {} frames to {} ({result:?})", rec.frames.len(), rec.out.display()));
+            diag::trace(format!("GESTURES recorded {} events to {} ({result:?})", rec.events.len(), rec.out.display()));
         }
     }
     /// True while the strip moves by itself and should be stepped at frame rate.
@@ -2132,6 +2162,11 @@ impl<B: WindowBackend> Engine<B> {
                 _ => (),
             },
             Event::Wheel { delta, tilt, shift, x, y } => self.wheel(delta, tilt, shift, (x, y)),
+            Event::Button { button, down, x, y } => {
+                if let Some(rec) = self.gesture_rec.as_mut() {
+                    rec.push(serde_json::json!({ "kind": "button", "button": button, "down": down, "x": x, "y": y }));
+                }
+            }
             Event::Contacts(p)
                 if !self.blocked()
                     && self.cfg["touchpad"]["three_finger_enabled"].as_bool() == Some(true) =>
@@ -2139,8 +2174,15 @@ impl<B: WindowBackend> Engine<B> {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
                 if let Some(rec) = self.gesture_rec.as_mut() {
-                    rec.frames.push((perf::qpc_us() - rec.started_us, p.clone()));
+                    let pts: Vec<[f64; 2]> = p.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
+                    rec.push(serde_json::json!({ "kind": "contacts", "pts": pts }));
+                    if rec.passive {
+                        self.gesture = Default::default();
+                        return;
+                    }
                 }
+                // 1, 2 or 5 fingers only arrive while recording; to the gestures they are a lift.
+                let p = if p.len() == 3 || p.len() == 4 { p } else { vec![] };
                 if self.diag.enabled
                     && (p.len() == 3 || p.len() == 4 || self.pad.is_some() || self.pad_scrolling)
                 {

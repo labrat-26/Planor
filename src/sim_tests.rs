@@ -1065,21 +1065,23 @@ fn n020_a_new_window_that_moves_itself_is_put_back() {
 // ---- Recorded touchpad gestures (`planor gestures record`), replayed on landscape AND portrait ----
 
 /// One gesture: the frames from the first touch to the lift of the last finger.
-fn split_gestures(events: &[planor::replay::ReplayEvent]) -> Vec<Vec<Vec<(f64, f64)>>> {
-    let (mut out, mut cur) = (vec![], vec![]);
+/// Each gesture comes with the label of the guided step it was recorded in (`mark` lines), if any.
+fn split_gestures(events: &[planor::replay::ReplayEvent]) -> Vec<(String, Vec<Vec<(f64, f64)>>)> {
+    let (mut out, mut cur, mut label) = (vec![], vec![], String::new());
     for e in events {
-        if let planor::replay::ReplayKind::Contacts(p) = &e.kind {
-            if p.is_empty() {
+        match &e.kind {
+            planor::replay::ReplayKind::Contacts(p) if p.is_empty() => {
                 if !cur.is_empty() {
-                    out.push(std::mem::take(&mut cur));
+                    out.push((label.clone(), std::mem::take(&mut cur)));
                 }
-            } else {
-                cur.push(p.clone());
             }
+            planor::replay::ReplayKind::Contacts(p) => cur.push(p.clone()),
+            planor::replay::ReplayKind::Mark(m) if !m.starts_with("end ") => label = m.clone(),
+            _ => (),
         }
     }
     if !cur.is_empty() {
-        out.push(cur);
+        out.push((label, cur));
     }
     out
 }
@@ -1152,6 +1154,11 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     h.settle(); // invariants and os_rect == expected_rect after the gesture
     let what = format!("{fingers} fingers, travel ({dx:.0}, {dy:.0}) on {mon}");
     assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "{what}: gesture left state behind");
+    if !(3..=4).contains(&fingers) {
+        // Cursor moves, taps, clicks, two-finger scroll and pinch, five fingers: Planor must stay out of it.
+        assert!(!moved && !dragged && !rolled, "{what}: Planor reacted to a {fingers}-finger gesture");
+        return format!("{what}: ignored, as it should be");
+    }
     if travel < deadzone * 2. {
         return format!("{what}: too short to mean anything, only checked it leaves no state");
     }
@@ -1187,14 +1194,14 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
         let text = std::fs::read_to_string(f).unwrap();
         let gestures = split_gestures(&planor::replay::parse_events_jsonl(&text));
         assert!(!gestures.is_empty(), "{}: no gestures", f.display());
-        for (n, g) in gestures.iter().enumerate() {
+        for (n, (label, g)) in gestures.iter().enumerate() {
             for mon in ["MON0", "MON2"] {
                 let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| replay_on(g, mon)));
                 match r {
-                    Ok(line) => report.push(format!("{} #{n}: {line}", f.file_name().unwrap().to_string_lossy())),
+                    Ok(line) => report.push(format!("{} #{n} [{label}]: {line}", f.file_name().unwrap().to_string_lossy())),
                     Err(e) => {
                         let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
-                        panic!("{} gesture #{n} on {mon}: {msg}\nso far:\n{}", f.display(), report.join("\n"));
+                        panic!("{} gesture #{n} [{label}] on {mon}: {msg}\nso far:\n{}", f.display(), report.join("\n"));
                     }
                 }
             }
