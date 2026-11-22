@@ -21,6 +21,11 @@ Win+W notes N-010..N-024, each checked on landscape and portrait monitors, plus 
 - **Momentum (N-013, not verified live)**: stepped every 8 ms on a frame-rate timer and placed directly, instead of a 70 ms ease restarted every 32 ms.
 - **Render (N-022, N-024, not verified live)**: during motion the border follows the gliding stand-in; peek thumbnails map one source pixel to one screen pixel (title bars were stretched).
 
+### Fixed after live profiling (same day)
+- **Render leak on display changes (`src/render.rs`)**: every overlay host created its own D3D11 device and old ones were never fully released. One display blip cost the user's daemon +540 MB RAM, +10,000 handles, +220 AMD driver threads, +700 MB VRAM. Now one shared D3D11/DirectComposition/Direct2D device for the render thread (replaced if the device is removed); capture sources of a rebuilt host are dropped. Measured on the same blip after the fix: handles 1,285 -> 1,303, threads 45 -> 45, RAM 107 -> 109 MB, VRAM 332 -> 233 MB.
+- **`gesture.to_place` outliers**: an input that caused no scene was charged to an unrelated scene seconds later (p99 7.9 s, max 10.7 s). Inputs older than 250 ms are no longer counted.
+- **`verify.ps1 -Perf` never refreshed `latest-perf.json`**: the `^PERF_JSON` match failed because cargo prints `test ... ` on the same line. **`digest.ps1 -Perf <file>`** ignored the file (it bound to `-Rec`). GPU values in the digest are rounded.
+
 ### Tests
 - `tests/core.rs`: 7 new (pair no-wrap, 50 % settle, sliding member drawn, swap, group reorder, drop decision, gesture lock); the drop-zone mockup disagreement became a passing owner-decision test. One stale assertion updated: `group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape` expected the pair's first member below the second (the loop-around N-010 removes).
 - `src/sim_tests.rs`: 7 new, every one on landscape and portrait (scroll axis, monitor hop, Win+wheel, swap and zone, group reorder, cross-monitor drop, newborn window).

@@ -1166,8 +1166,11 @@ impl<B: WindowBackend> Engine<B> {
         render::EPOCH.store(self.seq, std::sync::atomic::Ordering::Release);
         self.renderer.send(render::Message::Scene(render::Scene {
             epoch: self.seq,
-            input: self.input.take(),
-            input_qpc_us: self.input_qpc_us.take(),
+            // Only an input that caused this scene counts towards gesture-to-place latency: one that changed
+            // nothing (a lift, a tap) stayed pending and was charged to an unrelated scene seconds later
+            // (p99 7.9 s, max 10.7 s in the user's daemon).
+            input: self.input.take().filter(|t| t.elapsed() < Duration::from_millis(250)),
+            input_qpc_us: self.input_qpc_us.take().filter(|&t| perf::qpc_us() - t < 250_000),
             diagnostics: self.diag.enabled,
             tiles,
             monitors: self.displays.clone(),

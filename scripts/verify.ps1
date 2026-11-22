@@ -520,7 +520,7 @@ try {
         foreach ($fin in ($finishedPar | Sort-Object { $_.Tag.Fq })) {
           $tag = $fin.Tag
           $rawLog = Get-Content $fin.Log -Raw -ErrorAction SilentlyContinue
-          if ($rawLog -match "(?m)^PERF_JSON (\{.+\})\r?$") {
+          if ($rawLog -match "(?m)PERF_JSON (\{.+\})\r?$") {
             try { $perfReports += ($Matches[1] | ConvertFrom-Json) } catch {}
           }
           if ($fin.AllOk) {
@@ -581,7 +581,7 @@ try {
         $totalMs += $res.DurationMs
         $lastlog = $log
         $rawLog = Get-Content $log -Raw -ErrorAction SilentlyContinue
-        if ($rawLog -match "(?m)^PERF_JSON (\{.+\})\r?$") {
+        if ($rawLog -match "(?m)PERF_JSON (\{.+\})\r?$") {
           try { $perfReports += ($Matches[1] | ConvertFrom-Json) } catch {}
         }
         if ($res.Code -eq 0) { $passes++; break } else { $detail = Get-FailureLine $log }

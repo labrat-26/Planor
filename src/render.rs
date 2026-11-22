@@ -169,18 +169,23 @@ impl Source {
         }
     }
 }
-struct Surface {
-    gpu: ID3D11Device,
-    dev: IDCompositionDevice,
-    _target: IDCompositionTarget,
-    surface: IDCompositionSurface,
-    context: ID2D1DeviceContext,
-    brushes: HashMap<u32, ID2D1SolidColorBrush>,
-    timer: crate::gpu::GpuTimer,
+thread_local! {
+    /// One D3D11 device (with its DirectComposition and Direct2D devices) for the render thread's lifetime.
+    /// It used to be one per overlay host, created again on every display change; the old devices were
+    /// never fully released (240 AMD driver threads, +500 MB RAM, +700 MB VRAM, +10k handles per display
+    /// blip in the user's daemon). Hosts now only make their own target, surface and context.
+    static SHARED: std::cell::RefCell<Option<(ID3D11Device, IDCompositionDevice, ID2D1Device)>> =
+        const { std::cell::RefCell::new(None) };
 }
-impl Surface {
-    fn new(h: HWND, b: Rect) -> Result<Self> {
-        unsafe {
+fn shared_devices() -> Result<(ID3D11Device, IDCompositionDevice, ID2D1Device)> {
+    SHARED.with(|s| {
+        if let Some(d) = s.borrow().as_ref() {
+            // A removed device (driver reset, GPU switch) is replaced instead of reused.
+            if unsafe { d.0.GetDeviceRemovedReason() }.is_ok() {
+                return Ok(d.clone());
+            }
+        }
+        let d = unsafe {
             let mut device = None;
             D3D11CreateDevice(
                 None,
@@ -196,6 +201,27 @@ impl Surface {
             let gpu = device.unwrap();
             let dx: IDXGIDevice = gpu.cast()?;
             let dev: IDCompositionDevice = DCompositionCreateDevice(&dx)?;
+            let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let d2d = factory.CreateDevice(&dx)?;
+            (gpu, dev, d2d)
+        };
+        *s.borrow_mut() = Some(d.clone());
+        Ok(d)
+    })
+}
+struct Surface {
+    gpu: ID3D11Device,
+    dev: IDCompositionDevice,
+    _target: IDCompositionTarget,
+    surface: IDCompositionSurface,
+    context: ID2D1DeviceContext,
+    brushes: HashMap<u32, ID2D1SolidColorBrush>,
+    timer: crate::gpu::GpuTimer,
+}
+impl Surface {
+    fn new(h: HWND, b: Rect) -> Result<Self> {
+        unsafe {
+            let (gpu, dev, d2d) = shared_devices()?;
             let target = dev.CreateTargetForHwnd(F::HWND(h), true)?;
             let visual = dev.CreateVisual()?;
             let surface = dev.CreateSurface(
@@ -207,11 +233,7 @@ impl Surface {
             visual.SetContent(&surface)?;
             target.SetRoot(&visual)?;
             dev.Commit()?;
-            let factory: ID2D1Factory1 =
-                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-            let context = factory
-                .CreateDevice(&dx)?
-                .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
+            let context = d2d.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             Ok(Self {
                 dev,
                 _target: target,
@@ -632,8 +654,16 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         let _hspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderHosts);
                         hosts.retain(|k, h| s.monitors.iter().any(|(n, _, b)| n == k && b == &h.b));
                         applied.retain(|k, _| hosts.contains_key(k));
+                        // Capture sources belong to the D3D device of the host they were made for. When a
+                        // monitor's host goes (display change, unplug) its sources must go too: they kept the
+                        // old device, its frame pools and textures alive, about +500 MB RAM, +700 MB VRAM
+                        // and +10k handles per display blip in the user's daemon.
+                        pictures.retain(|k, _| hosts.contains_key(&k.2));
+                        failed_sources.retain(|k, _| hosts.contains_key(&k.2));
                         for (n, _, b) in &s.monitors {
                             if !hosts.contains_key(n) {
+                                pictures.retain(|k, _| &k.2 != n);
+                                failed_sources.retain(|k, _| &k.2 != n);
                                 if let Ok(h) = Host::new(*b) {
                                     hosts.insert(n.clone(), h);
                                 }
