@@ -86,6 +86,15 @@ pub fn accent_color() -> u32 {
     argb_to_colorref(argb)
 }
 
+/// The app icon embedded as resource 1 (see `planor.rc`), loaded at `size` x `size` pixels.
+pub fn app_icon(size: i32) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON {
+    use windows_sys::Win32::{
+        System::LibraryLoader::GetModuleHandleW,
+        UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW},
+    };
+    unsafe { LoadImageW(GetModuleHandleW(std::ptr::null()), 1usize as *const u16, IMAGE_ICON, size, size, LR_DEFAULTCOLOR) as _ }
+}
+
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
     r as u32 | (g as u32) << 8 | (b as u32) << 16
 }
