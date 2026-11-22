@@ -1,13 +1,18 @@
 mod backend;
-mod config_tui;
+mod settings_model;
+mod settings_ui;
 mod daemon;
+mod config_watch;
 mod diag;
 mod gpu;
 mod guide;
 mod input;
+mod install;
 mod note;
 mod perf;
 mod render;
+mod theme;
+mod tray;
 #[cfg(test)]
 mod sim_tests;
 mod watchdog;
@@ -70,7 +75,7 @@ fn config() -> Result<toml::Value> {
     };
     parse(&fs::read_to_string(path)?)
 }
-/// Choices for the settings that take one of a few words (also offered by `planor config`).
+/// Choices for the settings that take one of a few words (offered by the settings window).
 pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
     match key {
         "curve" => Some(&["ease_out_cubic", "spring"]),
@@ -79,7 +84,7 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
     }
 }
 /// Whether `v` may replace the default `old` for setting `k`: same type, sane range, a known word, a
-/// `#RRGGBB` colour. Shared by the daemon's config merge and `planor config`.
+/// `#RRGGBB` colour. Shared by the daemon config merge and the settings window.
 pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
     let typed = old.type_str() == v.type_str()
         && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
@@ -181,7 +186,9 @@ enum Command {
         #[command(subcommand)]
         action: GestureAction,
     },
-    /// Edit settings (%APPDATA%\planor\planor.toml) in a terminal UI.
+    /// Open the settings window (the planor.toml in the roaming AppData planor folder).
+    Settings,
+    /// Same as `settings` (kept so older habits and scripts keep working).
     Config,
 }
 #[derive(Subcommand, Serialize, Deserialize, Debug)]
@@ -469,7 +476,6 @@ fn client(name: &str, cmd: &Command) -> Result<String> {
         serde_json::from_slice(&read_frame(&mut file)?)?;
     Ok(response?)
 }
-fn autostart(mode:Switch)->Result<()>{use windows_sys::Win32::System::Registry::*;let cmd=wide(&format!("\"{}\" start",std::env::current_exe()?.display()));unsafe{let mut key=null_mut();let path=wide(r"Software\Microsoft\Windows\CurrentVersion\Run");let status=RegCreateKeyExW(HKEY_CURRENT_USER,path.as_ptr(),0,null(),REG_OPTION_NON_VOLATILE,KEY_SET_VALUE,null(),&mut key,null_mut());if status!=0{return Err(io::Error::from_raw_os_error(status as i32).into())}let name=wide("Planor");let result=match mode{Switch::On=>RegSetValueExW(key,name.as_ptr(),0,REG_SZ,cmd.as_ptr().cast(),(cmd.len()*2)as u32),Switch::Off=>RegDeleteValueW(key,name.as_ptr())};RegCloseKey(key);if result!=0&&result!=ERROR_FILE_NOT_FOUND{return Err(io::Error::from_raw_os_error(result as i32).into())}Ok(())}}
 fn main() -> Result<()> {
     // Panics in any thread are appended to crash.log (the daemon usually runs without a console).
     std::panic::set_hook(Box::new(|info| {
@@ -504,7 +510,7 @@ fn main() -> Result<()> {
     let cmd = Cli::parse().cmd.unwrap_or(Command::Start);
     match cmd {
         Command::Start => daemon::run(),
-        Command::Autostart{mode}=>autostart(mode),
+        Command::Autostart{mode}=>install::set_autostart(matches!(mode,Switch::On)),
         Command::Diag {
             action: Diagnostic::Export { ref path },
         } => {
@@ -614,7 +620,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Config => config_tui::run(&folder("APPDATA")?.join("planor.toml")),
+        Command::Settings | Command::Config => settings_ui::run(&folder("APPDATA")?.join("planor.toml")),
         Command::Gestures {
             action: GestureAction::Record { name, seconds, out, passive },
         } => record_gestures(name, seconds, out, passive),

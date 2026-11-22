@@ -66,8 +66,14 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
 
 ## Profiling, state & ring capture
 
-- `planor config`: terminal UI for `%APPDATA%\planor\planor.toml` (help text from `planor.example.toml`, same validation as the
-  daemon, comment-preserving save, tells the daemon to reload). Code: `src/config_tui.rs`.
+- **Tray icon, settings window, install** (all in the one `planor.exe`): the daemon shows a notification-area icon (`src/tray.rs`:
+  Pause/Resume, Configure, Exit; off in test mode). Configure, `planor settings` and `planor config` open the settings window
+  (`src/settings_ui.rs`, Windows 11 Settings style: GDI+ cards, switches, light/dark/accent follow the system; `PLANOR_THEME=light|dark`
+  forces a theme for screenshots). Its pages come from `planor.example.toml` through `src/settings_model.rs` (same `valid_value` as the
+  daemon, comment-preserving `toml_edit` save), plus a Rules page and an Install page. Changes save after 250 ms and reload the daemon;
+  `src/config_watch.rs` also reloads on hand edits of `%APPDATA%\planor\planor.toml`. Install (`src/install.rs`) copies the exe to
+  `%LOCALAPPDATA%\Planor\planor.exe` (override with `PLANOR_INSTALL_DIR`), and autostart (`HKCU\...\Run\Planor`) is only possible from
+  that installed copy. Icon: `assets/planor.ico` (regenerate with `scripts\make-icon.ps1`), embedded through `planor.rc`.
 - `planor gestures record <name> [--seconds 15] [--out f]`: capture real touchpad frames into an `events.jsonl` fixture; copy it to
   `tests/fixtures/gestures/recorded/`, where `sim_tests::recorded_gestures_replay_on_landscape_and_portrait` replays it on both
   orientations.

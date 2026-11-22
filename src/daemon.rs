@@ -2511,6 +2511,13 @@ pub fn run() -> Result<()> {
     journal.restore(&backend)?;
     win32::tweak_system(&folder("LOCALAPPDATA")?.join("system-settings.json"));
     let cfg = config()?;
+    if !crate::test_mode() {
+        // Hand edits of planor.toml apply live, like changes made in the settings window.
+        crate::config_watch::spawn(folder("APPDATA")?.join("planor.toml"), || {
+            let _ = client(&pipe_name(), &Command::Reload);
+        });
+    }
+    crate::tray::spawn();
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
     perf::init(diag.enabled);
     perf::register_thread("daemon");

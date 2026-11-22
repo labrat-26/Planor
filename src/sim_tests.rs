@@ -1786,3 +1786,15 @@ fn hot_cfg_reloads_and_arc_scenes_stay_synced_on_landscape_and_portrait() {
         h.stop_clean();
     }
 }
+#[test]
+fn config_reload_bumps_version_and_applies_gap() {
+    let mut h = SimHarness::new(primary_only_rig());
+    let before = h.engine.config_version;
+    assert_eq!(h.engine.hot.gap_px, 6);
+    h.desktop.0.lock().unwrap().config["layout"]["gap_px"] = toml::Value::Integer(11);
+    h.cmd(Command::Reload);
+    h.settle();
+    assert_eq!(h.engine.config_version, before + 1, "one reload, one version bump");
+    assert_eq!(h.engine.hot.gap_px, 11);
+    h.stop_clean();
+}

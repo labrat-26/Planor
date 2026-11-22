@@ -12,8 +12,8 @@ $script = @'
 #!/bin/sh
 set -e
 
-echo "[pre-commit] checking for println! in backend/daemon/render/win32/perf/watchdog..."
-for f in src/backend.rs src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs; do
+echo "[pre-commit] checking for println! in backend/daemon/render/win32/perf/watchdog/tray/config_watch..."
+for f in src/backend.rs src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs src/tray.rs src/config_watch.rs; do
   if [ -f "$f" ]; then
     if awk '/#\[cfg\(test\)\]/{exit} /(^|[^a-zA-Z0-9_])println!/{print FILENAME ":" NR ": " $0; found=1} END{if(found) exit 1}' "$f"; then
       :

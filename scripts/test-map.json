@@ -32,6 +32,11 @@
       "live": ["live::state_json_matches_real_windows", "live::stop_restores_exact_rect", "live::perf_spans_and_budgets", "scn_exit::stop_with_many_windows"]
     },
     {
+      "pattern": "^src/(tray|install|theme|settings_ui|settings_model|config_watch)\\.rs$",
+      "unit": ["--bin planor (sim_tests)", "--bin planor (other)"],
+      "live": []
+    },
+    {
       "pattern": "^src/(perf|watchdog)\\.rs$",
       "unit": ["--bin planor (sim_tests)", "--bin planor (other)"],
       "live": ["live::perf_spans_and_budgets"]

@@ -522,8 +522,9 @@ pub fn eligible(id: isize, cfg: &toml::Value) -> bool {
         let mut class = [0; 256];
         let n = GetClassNameW(h, class.as_mut_ptr(), 256);
         let class = String::from_utf16_lossy(&class[..n as usize]);
-        // Never let a user's real daemon hijack sentinel windows owned by isolated test runs.
-        if instance().is_empty() && class.starts_with("PlanorSentinel") {
+        // Never let a user's real daemon hijack sentinel windows owned by isolated test runs, and never tile
+        // Planor's own settings window: it is a dialog and floats.
+        if never_tiled_class(&class, instance().is_empty()) {
             return false;
         }
         for rule in cfg["rules"].as_array().unwrap() {
@@ -880,5 +881,25 @@ pub fn dwm_refresh_period_us() -> Option<f64> {
             }
         }
         None
+    }
+}
+
+/// Windows of these classes are never managed: sentinel windows of isolated test runs (when this is the user's
+/// real daemon) and Planor's own settings window, which is a dialog and floats.
+pub fn never_tiled_class(class: &str, real_daemon: bool) -> bool {
+    class == "PlanorSettings" || (real_daemon && class.starts_with("PlanorSentinel"))
+}
+
+#[cfg(test)]
+mod class_tests {
+    use super::never_tiled_class;
+
+    #[test]
+    fn settings_window_floats_and_sentinels_belong_to_their_test_daemon() {
+        assert!(never_tiled_class("PlanorSettings", true));
+        assert!(never_tiled_class("PlanorSettings", false));
+        assert!(never_tiled_class("PlanorSentinel_p42", true));
+        assert!(!never_tiled_class("PlanorSentinel_p42", false), "an isolated test daemon manages its own sentinels");
+        assert!(!never_tiled_class("Notepad", true));
     }
 }
