@@ -1,0 +1,32 @@
+# Example analyzer thresholds. Copy to `planor-rec.toml` in a recording directory or the current
+# directory. Every key is optional; missing keys keep the defaults shown here.
+
+# Maximum allowed difference between expected, Windows-reported and measured rectangle sides.
+position_tolerance_px = 2
+
+# Lag above this many milliseconds is a failure.
+lag_ms = 50
+
+# Interior black/flat or monitor black/frozen must last longer than this to fail.
+black_flat_ms = 300
+
+# Present-time gaps above this many milliseconds are frame-pacing failures.
+frame_gap_ms = 100
+
+# Outline search radius in pixels.
+edge_search_px = 24
+
+# Minimum normalized edge/step contrast for a measurement (else `unmeasurable`).
+min_edge_score = 0.10
+
+# A Planor border must be this close to an expected tile outline.
+border_tolerance_px = 2
+
+# Per-channel tolerance for matching Planor border colours in lossy H.264 video.
+border_colour_tolerance = 40
+
+# Extra wait after the animation duration before a tile counts as settled.
+settle_margin_ms = 80
+
+# Planor's inter-tile gap (layout.gap_px); used to recognise a gap strip between tiles.
+gap_px = 6

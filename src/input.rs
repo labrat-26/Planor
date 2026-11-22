@@ -1,0 +1,142 @@
+use super::*;
+use windows_sys::Win32::{
+    Devices::HumanInterfaceDevice::*,
+    UI::Input::{KeyboardAndMouse::*, *},
+};
+pub fn bindings(hwnd: HWND, cfg: &toml::Value) -> Vec<String> {
+    let mut out = vec![];
+    for (name, value) in cfg["hotkeys"].as_table().unwrap() {
+        let mut mods = MOD_NOREPEAT;
+        let mut vk = 0;
+        for token in value.as_str().unwrap_or("").split('+') {
+            match token.to_ascii_uppercase().as_str() {
+                "ALT" => mods |= MOD_ALT,
+                "CTRL" => mods |= MOD_CONTROL,
+                "SHIFT" => mods |= MOD_SHIFT,
+                "WIN" => mods |= MOD_WIN,
+                "LEFT" => vk = 0x25,
+                "UP" => vk = 0x26,
+                "RIGHT" => vk = 0x27,
+                "DOWN" => vk = 0x28,
+                "[" => vk = 0xdb,
+                "]" => vk = 0xdd,
+                "BACKSPACE" => vk = 8,
+                s if s.len() == 1 => vk = s.as_bytes()[0] as u32,
+                _ => {
+                    vk = 0;
+                    break;
+                }
+            }
+        }
+        if vk != 0 && unsafe { RegisterHotKey(hwnd, out.len() as i32 + 1, mods, vk) } != 0 {
+            out.push(name.clone())
+        } else {
+            eprintln!("hotkey unavailable: {name}")
+        }
+    }
+    out
+}
+/// DPI of the monitor under the cursor. This used to be `GetDpiForWindow(WindowFromPoint(..))` for every
+/// contact of every report; WindowFromPoint can wait on the window under the cursor (a heavy browser
+/// mid-move), which stalled this thread and, through the mouse hook, all input. A monitor lookup never
+/// talks to another process.
+fn cursor_dpi() -> f64 {
+    use windows_sys::Win32::{Graphics::Gdi::MonitorFromPoint, UI::HiDpi::GetDpiForMonitor};
+    unsafe {
+        let mut pt = POINT::default();
+        windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut pt);
+        let monitor = MonitorFromPoint(pt, 2);
+        let (mut x, mut y) = (96u32, 96u32);
+        GetDpiForMonitor(monitor, 0, &mut x, &mut y);
+        x.max(96) as f64
+    }
+}
+thread_local!{static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
+pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
+    let mut frames = vec![];
+    unsafe {
+        let hdr = size_of::<RAWINPUTHEADER>() as u32;
+        let mut n = 0;
+        GetRawInputData(l as _, RID_INPUT, null_mut(), &mut n, hdr);
+        if n < hdr + 8 || n > 1_048_576 {
+            return frames;
+        }
+        let mut data = vec![0usize; (n as usize).div_ceil(size_of::<usize>())];
+        if GetRawInputData(l as _, RID_INPUT, data.as_mut_ptr().cast(), &mut n, hdr) != n {
+            return frames;
+        }
+        let head = data.as_ptr().cast::<RAWINPUTHEADER>().read();
+        if head.dwType != RIM_TYPEHID {
+            return frames;
+        }
+        let bytes = std::slice::from_raw_parts(data.as_ptr().cast::<u8>(), n as usize);
+        let body = &bytes[hdr as usize..];
+        let size = u32::from_ne_bytes(body[..4].try_into().unwrap()) as usize;
+        let count = u32::from_ne_bytes(body[4..8].try_into().unwrap()) as usize;
+        if size == 0 || count > (body.len() - 8) / size {
+            return frames;
+        }
+        let mut len = 0;
+        GetRawInputDeviceInfoW(head.hDevice, RIDI_PREPARSEDDATA, null_mut(), &mut len);
+        if len == 0 || len > 1_048_576 {
+            return frames;
+        }
+        let mut desc = vec![0usize; (len as usize).div_ceil(size_of::<usize>())];
+        if GetRawInputDeviceInfoW(
+            head.hDevice,
+            RIDI_PREPARSEDDATA,
+            desc.as_mut_ptr().cast(),
+            &mut len,
+        ) == u32::MAX
+        {
+            return frames;
+        }
+        let prep = desc.as_ptr() as isize;
+        let mut caps = HIDP_CAPS::default();
+        if HidP_GetCaps(prep, &mut caps) < 0 {
+            return frames;
+        }
+        let dpi = cursor_dpi();
+        for report in body[8..].chunks_exact(size).take(count) {
+            let get = |page, link, usage| {
+                let mut v = 0;
+                (HidP_GetUsageValue(
+                    HidP_Input,
+                    page,
+                    link,
+                    usage,
+                    &mut v,
+                    prep,
+                    report.as_ptr().cast_mut(),
+                    size as u32,
+                ) >= 0)
+                    .then_some(v)
+            };
+            let mut points = vec![];
+            let count=get(13,0,0x54).unwrap_or(0);if count==3||count==4||count==0 {
+                for link in 1..caps.NumberLinkCollectionNodes {
+                    let mut usages = [0u16; 32];
+                    let mut used = 32;
+                    if HidP_GetUsages(
+                        HidP_Input,
+                        13,
+                        link,
+                        usages.as_mut_ptr(),
+                        &mut used,
+                        prep,
+                        report.as_ptr().cast_mut(),
+                        size as u32,
+                    ) >= 0
+                        && usages[..used as usize].contains(&0x42)
+                    {
+                        if let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31)) {
+                            let scale=|usage|{let mut c=HIDP_VALUE_CAPS::default();let mut n=1;if HidP_GetSpecificValueCaps(HidP_Input,1,link,usage,&mut c,&mut n,prep)<0||c.LogicalMax<=c.LogicalMin||c.PhysicalMax<=c.PhysicalMin{return 1.}let exponent=(c.UnitsExp as i32&15)<<28>>28;let units=match c.Units{0x11=>dpi/2.54,0x13=>dpi,_=>return 1.};(c.PhysicalMax-c.PhysicalMin) as f64/(c.LogicalMax-c.LogicalMin) as f64*10f64.powi(exponent)*units};points.push((get(13,link,0x51).unwrap_or(link as u32),(x as f64*scale(0x30),y as f64*scale(0x31))))
+                        }
+                    }
+                }
+            }
+            if let Some(frame)=PARTS.with(|v|v.borrow_mut().entry(head.hDevice as usize).or_default().packet(count,points)){frames.push(frame)}
+        }
+    }
+    frames
+}

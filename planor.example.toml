@@ -1,0 +1,87 @@
+[layout]
+tile_existing_on_startup = true
+first_pair_split = true
+default_tile_share = 0.5
+gap_px = 6
+peek_enabled = true
+peek_width_px = 48
+stack_peek_px = 96
+stack_hover_ms = 350
+# A dragged window can only be stacked onto another when the cursor is within this many pixels of the
+# middle of that window (and never when it comes from another monitor).
+stack_center_px = 20
+
+# A new window opens on the monitor under the mouse cursor.
+spawn_on_cursor_monitor = true
+drag_stack_modifier = "Shift"
+focus_follows_mouse = false
+warp_cursor_to_focused = false
+
+[borders]
+enabled = true
+width_px = 2
+corner_radius_px = 8
+focused_color = "#3B82F6"
+stacked_color = "#A855F7"
+pinned_color = "#F59E0B"
+drop_target_color = "#10B981"
+# A dragged window over a group lights the group in a lighter shade of the focus colour.
+group_hover_color = "#93C5FD"
+
+[animation]
+enabled = true
+duration_ms = 180
+curve = "ease_out_cubic"
+scroll = true
+open_close = true
+resize = true
+drag_reflow = true
+stack_switch = true
+drag_slow_velocity_px_s = 300
+
+[touchpad]
+three_finger_enabled = true
+axis_lock_deadzone = 12
+scroll_sensitivity = 1.0
+# Three fingers step the focus (left/right/up/down); four fingers move the focused window left/right.
+# One step per swipe_step_px of finger travel. natural_direction: content follows the fingers.
+swipe_step_px = 60
+swipe_natural_direction = true
+# Four fingers pick the focused window up and carry it; it drops where the fingers lift.
+# swipe_drag_gain: window travel per unit of finger travel.
+swipe_drag_gain = 7.0
+# Acceleration: extra gain per 1000 units/s of smoothed finger speed, capped at 1.6x (0 = linear). Kept small so one swipe always moves the window about the same.
+swipe_drag_accel = 0.15
+# Three fingers sideways scroll the strip live (focus follows the window nearest the centre) and
+# settle on lift. swipe_scroll_gain: strip travel per unit of finger travel.
+swipe_scroll_gain = 4.0
+# Momentum: a fast swipe keeps scrolling after the fingers lift and slows down.
+swipe_inertia = true
+# Fling: a flick faster than swipe_fling_speed (units/s) at lift-off throws the window to the
+# neighbouring screen in that direction.
+swipe_fling_enabled = true
+swipe_fling_speed = 1500
+# Carry the window across monitors while dragging (off: stay on its monitor, a fling crosses).
+swipe_drag_cross_monitors = true
+
+[diagnostics]
+enabled = false
+max_log_mb = 25
+max_log_files = 3
+
+[hotkeys]
+focus_left = "Alt+Left"
+focus_right = "Alt+Right"
+focus_up = "Alt+Up"
+focus_down = "Alt+Down"
+move_left = "Alt+Shift+Left"
+move_right = "Alt+Shift+Right"
+stack_toggle = "Alt+S"
+toggle_pin = "Alt+P"
+focus_monitor_next = "Alt+]"
+focus_monitor_prev = "Alt+["
+panic_exit = "Ctrl+Alt+Shift+Backspace"
+
+[[rules]]
+process = "Taskmgr.exe"
+action = "ignore"
