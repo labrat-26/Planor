@@ -411,9 +411,7 @@ impl Engine {
                     return Ok("ok".into());
                 }
                 if trace.is_some() {
-                    return Ok(serde_json::to_string_pretty(&perf::export_chrome_trace(
-                        seconds,
-                    ))?);
+                    return Ok(serde_json::to_string(&perf::export_chrome_trace(seconds))?);
                 }
                 let frame_telemetry = self
                     .diag

@@ -236,7 +236,7 @@ fn read_frame(f: &mut File) -> Result<Vec<u8>> {
     let mut size = [0; 4];
     f.read_exact(&mut size)?;
     let n = u32::from_le_bytes(size);
-    if n > 4_194_304 {
+    if n > 16_777_216 {
         return Err("oversized IPC message".into());
     }
     let mut data = vec![0; n as usize];
@@ -454,7 +454,7 @@ fn main() -> Result<()> {
                 &Command::Perf {
                     reset: false,
                     trace: Some(PathBuf::from("-")),
-                    seconds,
+                    seconds: seconds.or(Some(15)),
                     json: false,
                     bundle: None,
                 },
@@ -503,13 +503,17 @@ fn main() -> Result<()> {
                     bundle: None,
                 },
             )?;
-            if let Some(parent) = path.parent() {
-                if !parent.as_os_str().is_empty() {
-                    fs::create_dir_all(parent)?;
+            if path.as_os_str() == "-" {
+                println!("{payload}");
+            } else {
+                if let Some(parent) = path.parent() {
+                    if !parent.as_os_str().is_empty() {
+                        fs::create_dir_all(parent)?;
+                    }
                 }
+                fs::write(path, payload)?;
+                println!("{}", path.display());
             }
-            fs::write(path, payload)?;
-            println!("{}", path.display());
             Ok(())
         }
         Command::Stop => match client(&pipe_name(), &cmd) {
