@@ -1,0 +1,213 @@
+{
+  "schema_version": 1,
+  "source": "Planor scroll states spec (percent-based monitor-independent layout assertions)",
+  "notes": "All percentages are 0.0..1.0 fractions of monitor work-area width (w) and height (h), accounting for gap_px between adjacent columns.",
+  "states": [
+    {
+      "id": "landscape_0_windows",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 0,
+      "columns": 0,
+      "focus": 0,
+      "expected_tiles": []
+    },
+    {
+      "id": "landscape_1_window",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 1,
+      "columns": 1,
+      "focus": 0,
+      "expected_tiles": [
+        { "id": 1, "x_pct": 0.0, "y_pct": 0.0, "w_pct": 1.0, "h_pct": 1.0, "on_screen": true }
+      ]
+    },
+    {
+      "id": "landscape_2_windows_pair",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 2,
+      "columns": 2,
+      "focus": 1,
+      "expected_tiles": [
+        { "id": 1, "x_pct": 0.0, "y_pct": 0.0, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true },
+        { "id": 2, "x_pct": 0.5, "y_pct": 0.0, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true }
+      ]
+    },
+    {
+      "id": "landscape_3_windows_focus_middle",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 3,
+      "columns": 3,
+      "focus": 1,
+      "reveal_peek": 54,
+      "expected_tiles": [
+        { "id": 1, "w_pct": 0.5, "h_pct": 1.0, "on_screen": false },
+        { "id": 2, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true },
+        { "id": 3, "w_pct": 0.5, "h_pct": 1.0, "on_screen": false }
+      ]
+    },
+    {
+      "id": "landscape_4_windows_focus_end",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 4,
+      "columns": 4,
+      "focus": 3,
+      "reveal_peek": 54,
+      "expected_tiles": [
+        { "id": 3, "x_pct": 0.5, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true },
+        { "id": 4, "x_pct": 0.5, "w_pct": 0.5, "h_pct": 1.0, "on_screen": true }
+      ],
+      "note": "Columns 3 and 4 fill the viewport when focused on the last column"
+    },
+    {
+      "id": "landscape_5_windows",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 5,
+      "columns": 5,
+      "focus": 4
+    },
+    {
+      "id": "landscape_6_windows",
+      "status": "active",
+      "orientation": "landscape",
+      "windows": 6,
+      "columns": 6,
+      "focus": 5
+    },
+    {
+      "id": "portrait_0_windows",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 0,
+      "columns": 0,
+      "focus": 0,
+      "expected_tiles": []
+    },
+    {
+      "id": "portrait_1_window",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 1,
+      "columns": 1,
+      "focus": 0,
+      "expected_tiles": [
+        { "id": 1, "x_pct": 0.0, "y_pct": 0.0, "w_pct": 1.0, "h_pct": 1.0, "on_screen": true }
+      ]
+    },
+    {
+      "id": "portrait_2_windows_pair",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 2,
+      "columns": 2,
+      "focus": 1,
+      "expected_tiles": [
+        { "id": 1, "x_pct": 0.0, "y_pct": 0.0, "w_pct": 1.0, "h_pct": 0.5, "on_screen": true },
+        { "id": 2, "x_pct": 0.0, "y_pct": 0.5, "w_pct": 1.0, "h_pct": 0.5, "on_screen": true }
+      ]
+    },
+    {
+      "id": "portrait_3_windows_focus_middle",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 3,
+      "columns": 3,
+      "focus": 1,
+      "reveal_peek": 54,
+      "expected_tiles": [
+        { "id": 1, "w_pct": 1.0, "h_pct": 0.5, "on_screen": false },
+        { "id": 2, "w_pct": 1.0, "h_pct": 0.5, "on_screen": true },
+        { "id": 3, "w_pct": 1.0, "h_pct": 0.5, "on_screen": false }
+      ]
+    },
+    {
+      "id": "portrait_4_windows",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 4,
+      "columns": 4,
+      "focus": 3
+    },
+    {
+      "id": "portrait_5_windows",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 5,
+      "columns": 5,
+      "focus": 4
+    },
+    {
+      "id": "portrait_6_windows",
+      "status": "active",
+      "orientation": "portrait",
+      "windows": 6,
+      "columns": 6,
+      "focus": 5
+    },
+    {
+      "id": "landscape_group_2",
+      "status": "active",
+      "orientation": "landscape",
+      "group_members": 2,
+      "stack_peek_px": 28,
+      "shown_count": 2
+    },
+    {
+      "id": "landscape_group_3",
+      "status": "active",
+      "orientation": "landscape",
+      "group_members": 3,
+      "stack_peek_px": 28,
+      "shown_count": 3
+    },
+    {
+      "id": "landscape_group_4",
+      "status": "active",
+      "orientation": "landscape",
+      "group_members": 4,
+      "stack_peek_px": 28,
+      "shown_count": 3
+    },
+    {
+      "id": "portrait_group_2",
+      "status": "active",
+      "orientation": "portrait",
+      "group_members": 2,
+      "stack_peek_px": 28,
+      "shown_count": 2
+    },
+    {
+      "id": "portrait_group_3",
+      "status": "active",
+      "orientation": "portrait",
+      "group_members": 3,
+      "stack_peek_px": 28,
+      "shown_count": 3
+    },
+    {
+      "id": "portrait_group_4",
+      "status": "active",
+      "orientation": "portrait",
+      "group_members": 4,
+      "stack_peek_px": 28,
+      "shown_count": 3
+    },
+    {
+      "id": "drop_zone_outer_20_middle_60",
+      "status": "pending_decision",
+      "zones": { "before_end": 0.20, "stack_start": 0.20, "stack_end": 0.80, "after_start": 0.80 },
+      "code_diff": "core::drag uses 0.25 / 0.25..=0.75 / 0.75; daemon::drag_update further restricts stacking to +-stack_center_px (20 px)."
+    },
+    {
+      "id": "cross_monitor_insert_rule",
+      "status": "pending_decision",
+      "expected": "Cross-monitor drag allows dropping onto target before/after or stacking onto target, or inserts after target when no edge zone applies.",
+      "code_diff": "daemon::drag_update forces may_stack = false when crossing monitors (k != d.key)."
+    }
+  ]
+}

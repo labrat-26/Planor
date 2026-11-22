@@ -138,20 +138,129 @@ impl Drop for Sentinel {
     }
 }
 const EXE: &str = env!("CARGO_BIN_EXE_planor");
+
+#[derive(Clone)]
+struct ActiveDaemon {
+    inst: String,
+    dir: PathBuf,
+    test_mode: bool,
+    animated: bool,
+}
+static ACTIVE_DAEMON: std::sync::Mutex<Option<ActiveDaemon>> = std::sync::Mutex::new(None);
+
+fn set_active_daemon(inst: &str, dir: &Path, test_mode: bool, animated: bool) {
+    if let Ok(mut g) = ACTIVE_DAEMON.lock() {
+        *g = Some(ActiveDaemon {
+            inst: inst.to_string(),
+            dir: dir.to_path_buf(),
+            test_mode,
+            animated,
+        });
+    }
+}
+fn clear_active_daemon(inst: &str) {
+    if let Ok(mut g) = ACTIVE_DAEMON.lock() {
+        if g.as_ref().is_some_and(|a| a.inst == inst) {
+            *g = None;
+        }
+    }
+}
+fn active_daemon() -> Option<ActiveDaemon> {
+    ACTIVE_DAEMON.lock().ok().and_then(|g| g.clone())
+}
+
+fn artifacts_dir_for(fallback_label: &str) -> Option<PathBuf> {
+    let base = std::env::var_os("PLANOR_KEEP_ARTIFACTS")?;
+    if base.is_empty() {
+        return None;
+    }
+    let test_name = std::env::var("PLANOR_TEST_NAME")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| {
+            std::thread::current()
+                .name()
+                .map(|s| s.replace("::", "-"))
+                .filter(|s| !s.is_empty() && s != "main")
+        })
+        .unwrap_or_else(|| fallback_label.to_string());
+    let safe: String = test_name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    Some(PathBuf::from(base).join(safe))
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    if !src.is_dir() {
+        return;
+    }
+    let _ = fs::create_dir_all(dst);
+    if let Ok(entries) = fs::read_dir(src) {
+        for entry in entries.flatten() {
+            let from = entry.path();
+            let to = dst.join(entry.file_name());
+            if from.is_dir() {
+                copy_dir_recursive(&from, &to);
+            } else {
+                let _ = fs::copy(&from, &to);
+            }
+        }
+    }
+}
+
+fn copy_daemon_evidence(planor_dir: &Path, dest_dir: &Path) {
+    let _ = fs::create_dir_all(dest_dir);
+    for name in [
+        "trace.log",
+        "trace.prev.log",
+        "crash.log",
+        "frames.0.log",
+        "recovery.json",
+        "planor.toml",
+    ] {
+        let src = planor_dir.join(name);
+        if src.is_file() {
+            let _ = fs::copy(&src, dest_dir.join(name));
+        }
+    }
+}
+
+fn copy_recording_evidence(rec_dir: &Path, dest_dir: &Path) {
+    let dst = dest_dir.join("rec");
+    let _ = fs::create_dir_all(&dst);
+    for name in [
+        "report.md",
+        "report.json",
+        "recorder.log",
+        "events.jsonl",
+        "meta.json",
+        "trace.log",
+    ] {
+        let src = rec_dir.join(name);
+        if src.is_file() {
+            let _ = fs::copy(&src, dst.join(name));
+        }
+    }
+    copy_dir_recursive(&rec_dir.join("suspects"), &dst.join("suspects"));
+}
+
 struct Daemon {
     p: Option<Child>,
     dir: PathBuf,
     inst: String,
+    label: String,
+    test_mode: bool,
+    animated: bool,
+    last_pid: Option<u32>,
 }
 impl Daemon {
-    fn new(label: &str) -> Self {
+    fn create(label: &str, test_mode: bool, animated: bool) -> Self {
         let dir = daemon_dir(label);
         fs::create_dir_all(dir.join("planor")).unwrap();
         let config = format!(
             "{}\n[[rules]]\nprocess={:?}\naction=\"tile\"\n[[rules]]\nclass=\"*\"\naction=\"ignore\"\n",
-            // With PLANOR_RECORD=1 the daemon's diagnostics trace (EXPECT lines) is switched on so the
-            // recording can be checked against what Planor claims; otherwise the config is unchanged.
-            config_for_recording(include_str!("../../planor.example.toml")),
+            config_for_test(include_str!("../../planor.example.toml"), animated),
             std::env::current_exe()
                 .unwrap()
                 .file_name()
@@ -163,27 +272,50 @@ impl Daemon {
             dir,
             p: None,
             inst: format!("t{}-{label}", std::process::id()),
+            label: label.to_string(),
+            test_mode,
+            animated,
+            last_pid: None,
         }
     }
+    fn new(label: &str) -> Self {
+        let test_mode = std::env::var("PLANOR_TEST_MODE").as_deref() != Ok("0");
+        let animated = std::env::var("PLANOR_NO_ANIM").as_deref() != Ok("1");
+        Self::create(label, test_mode, animated)
+    }
+    fn new_animated(label: &str) -> Self {
+        let test_mode = std::env::var("PLANOR_TEST_MODE").as_deref() != Ok("0");
+        Self::create(label, test_mode, true)
+    }
+    fn new_with_hooks(label: &str) -> Self {
+        let animated = std::env::var("PLANOR_NO_ANIM").as_deref() != Ok("1");
+        Self::create(label, false, animated)
+    }
+    fn register_active(&self) {
+        set_active_daemon(&self.inst, &self.dir, self.test_mode, self.animated);
+    }
     fn start(&mut self) {
-        let running = Command::new("tasklist")
-            .args(["/FI", "IMAGENAME eq planor.exe", "/NH"])
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains("planor.exe"))
-            .unwrap_or(false);
-        assert!(
-            !running,
-            "a real planor.exe is running; stop it first (global hotkeys cannot be isolated)"
-        );
-        self.p = Some(
-            Command::new(EXE)
-                .env("PLANOR_INSTANCE", &self.inst)
-                .arg("start")
-                .env("APPDATA", &self.dir)
-                .env("LOCALAPPDATA", &self.dir)
-                .spawn()
-                .unwrap(),
-        );
+        if !self.test_mode {
+            let running = Command::new("tasklist")
+                .args(["/FI", "IMAGENAME eq planor.exe", "/NH"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).contains("planor.exe"))
+                .unwrap_or(false);
+            assert!(
+                !running,
+                "a real planor.exe is running; stop it first (global hotkeys cannot be isolated)"
+            );
+        }
+        let child = Command::new(EXE)
+            .env("PLANOR_INSTANCE", &self.inst)
+            .env("PLANOR_TEST_MODE", if self.test_mode { "1" } else { "0" })
+            .arg("start")
+            .env("APPDATA", &self.dir)
+            .env("LOCALAPPDATA", &self.dir)
+            .spawn()
+            .unwrap();
+        self.last_pid = Some(child.id());
+        self.p = Some(child);
         let until = Instant::now() + Duration::from_secs(8);
         while !self.call("reload") {
             assert!(
@@ -191,39 +323,63 @@ impl Daemon {
                 "daemon exited during startup"
             );
             assert!(Instant::now() < until, "pipe startup timeout");
-            thread::sleep(Duration::from_millis(80))
+            thread::sleep(Duration::from_millis(20))
         }
+        self.register_active();
     }
-    fn call(&self, cmd: &str) -> bool {
+    fn call_output(&self, args: &[&str]) -> std::process::Output {
         Command::new(EXE)
             .env("PLANOR_INSTANCE", &self.inst)
-            .arg(cmd)
+            .env("APPDATA", &self.dir)
+            .env("LOCALAPPDATA", &self.dir)
+            .args(args)
+            .output()
+            .expect("run planor command")
+    }
+    fn call_args(&self, args: &[&str]) -> bool {
+        Command::new(EXE)
+            .env("PLANOR_INSTANCE", &self.inst)
+            .env("APPDATA", &self.dir)
+            .env("LOCALAPPDATA", &self.dir)
+            .args(args)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .unwrap()
             .success()
     }
+    fn call(&self, cmd: &str) -> bool {
+        self.call_args(&[cmd])
+    }
     fn stop(&mut self) {
         // The analyzer expects nothing from Planor once it has stopped (its windows go back where they were).
         recording_mark_global("daemon-stopped");
+        clear_active_daemon(&self.inst);
         assert!(self.call("stop"));
         assert!(self.p.take().unwrap().wait().unwrap().success())
     }
     fn kill(&mut self) {
         recording_mark_global("daemon-stopped");
+        clear_active_daemon(&self.inst);
         let mut p = self.p.take().unwrap();
+        self.last_pid = Some(p.id());
         p.kill().unwrap();
         p.wait().unwrap();
     }
 }
 impl Drop for Daemon {
     fn drop(&mut self) {
+        clear_active_daemon(&self.inst);
         if let Some(p) = self.p.as_mut() {
             if p.try_wait().unwrap().is_none() {
                 recording_mark_global("daemon-stopped");
                 let _ = self.call("stop");
                 let _ = self.p.as_mut().unwrap().wait();
+            }
+        }
+        if std::thread::panicking() {
+            if let Some(dest) = artifacts_dir_for(&self.label) {
+                copy_daemon_evidence(&self.dir.join("planor"), &dest);
             }
         }
         if !self.dir.join("planor/recovery.json").exists() {
@@ -239,13 +395,7 @@ fn wait(mut f: impl FnMut() -> bool) {
     }
 }
 fn focus_key(vk: u8) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-    unsafe {
-        keybd_event(VK_MENU as u8, 0, 0, 0);
-        keybd_event(vk, 0, 0, 0);
-        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-        keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
-    }
+    send_chord_raw(&[ALT], vk);
 }
 struct Capture {
     dev: ID3D11Device,
@@ -378,8 +528,50 @@ impl Capture {
 fn aware() {
     unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 }
-/// Press a chord: hold `mods` (VK codes, e.g. VK_MENU=0x12, VK_SHIFT=0x10, VK_CONTROL=0x11), tap `vk`.
-fn press(mods: &[u8], vk: u8) {
+fn planor_action_for_chord(mods: &[u8], vk: u8) -> Option<&'static str> {
+    let has = |m: u8| mods.contains(&m);
+    if mods.len() == 1 && has(ALT) {
+        match vk {
+            LEFT => Some("focus_left"),
+            UP => Some("focus_up"),
+            RIGHT => Some("focus_right"),
+            DOWN => Some("focus_down"),
+            0x53 => Some("stack_toggle"),
+            0x50 => Some("toggle_pin"),
+            0xDB => Some("focus_monitor_prev"),
+            0xDD => Some("focus_monitor_next"),
+            _ => None,
+        }
+    } else if mods.len() == 2 && has(ALT) && has(SHIFT) {
+        match vk {
+            LEFT => Some("move_left"),
+            RIGHT => Some("move_right"),
+            _ => None,
+        }
+    } else if mods.len() == 3 && has(CTRL) && has(ALT) && has(SHIFT) && vk == 0x08 {
+        Some("panic_exit")
+    } else {
+        None
+    }
+}
+/// Send a chord immediately without post-action settle. Routes Planor hotkeys via IPC in test mode.
+/// Returns `Some(animated)` when a managed test daemon handled it.
+fn send_chord_raw(mods: &[u8], vk: u8) -> Option<bool> {
+    if let Some(active) = active_daemon() {
+        if active.test_mode {
+            if let Some(action) = planor_action_for_chord(mods, vk) {
+                let _ = Command::new(EXE)
+                    .env("PLANOR_INSTANCE", &active.inst)
+                    .env("APPDATA", &active.dir)
+                    .env("LOCALAPPDATA", &active.dir)
+                    .args(["key", action])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                return Some(active.animated);
+            }
+        }
+    }
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
     unsafe {
         for m in mods {
@@ -391,7 +583,13 @@ fn press(mods: &[u8], vk: u8) {
             keybd_event(*m, 0, KEYEVENTF_KEYUP, 0);
         }
     }
-    thread::sleep(Duration::from_millis(700)); // 180ms animation + 250ms frame verification + slack
+    active_daemon().map(|a| a.animated)
+}
+/// Press a chord: hold `mods` (VK codes, e.g. VK_MENU=0x12, VK_SHIFT=0x10, VK_CONTROL=0x11), tap `vk`.
+fn press(mods: &[u8], vk: u8) {
+    let animated = send_chord_raw(mods, vk);
+    let wait_ms = if mods.is_empty() || animated == Some(false) { 120 } else { 700 };
+    thread::sleep(Duration::from_millis(wait_ms));
 }
 const ALT: u8 = 0x12;
 const SHIFT: u8 = 0x10;
@@ -559,18 +757,28 @@ fn recording_enabled() -> bool {
     std::env::var("PLANOR_RECORD").as_deref() == Ok("1")
 }
 
-/// The Planor test config with diagnostics switched on when recording is requested.
-fn config_for_recording(base: &str) -> String {
-    if !recording_enabled() {
-        return base.to_string();
-    }
-    let Some(section) = base.find("[diagnostics]") else {
-        return format!("{base}\n[diagnostics]\nenabled = true\n");
+fn replace_section_flag(base: &str, section: &str, from: &str, to: &str) -> String {
+    let header = format!("[{section}]");
+    let Some(start) = base.find(&header) else {
+        return format!("{base}\n{header}\n{to}\n");
     };
-    let tail = &base[section..];
+    let tail = &base[start..];
     let end = tail[1..].find("\n[").map(|i| i + 1).unwrap_or(tail.len());
-    let body = tail[..end].replacen("enabled = false", "enabled = true", 1);
-    format!("{}{}{}", &base[..section], body, &tail[end..])
+    let body = tail[..end].replacen(from, to, 1);
+    format!("{}{}{}", &base[..start], body, &tail[end..])
+}
+
+/// The Planor test config with diagnostics enabled when recording/artifact-keeping is on, and animation toggled.
+fn config_for_test(base: &str, animated: bool) -> String {
+    let mut cfg = base.to_string();
+    let keep = std::env::var_os("PLANOR_KEEP_ARTIFACTS").is_some_and(|v| !v.is_empty());
+    if recording_enabled() || keep {
+        cfg = replace_section_flag(&cfg, "diagnostics", "enabled = false", "enabled = true");
+    }
+    if !animated {
+        cfg = replace_section_flag(&cfg, "animation", "enabled = true", "enabled = false");
+    }
+    cfg
 }
 
 /// `planor-rec.exe`: `PLANOR_REC_BIN`, else the safe copy in `tools/planor-rec-bin`, else the release build.
@@ -820,7 +1028,15 @@ impl Recording {
         let mut guard = self.inner.borrow_mut();
         let r = guard.as_mut()?;
         if r.summary.is_none() {
-            r.summary = Some(Self::stop_and_analyze(r));
+            let result = Self::stop_and_analyze(r);
+            if std::thread::panicking() || result.as_ref().is_ok_and(|s| s.fail > 0) || result.is_err() {
+                if std::thread::panicking() || result.as_ref().is_ok_and(|s| s.fail > 0) {
+                    if let Some(dest) = artifacts_dir_for(&r.name) {
+                        copy_recording_evidence(&r.dir, &dest);
+                    }
+                }
+            }
+            r.summary = Some(result);
             match r.summary.as_ref().unwrap() {
                 Ok(s) => {
                     println!(

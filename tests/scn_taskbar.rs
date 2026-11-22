@@ -315,7 +315,7 @@ fn click_at(x: i32, y: i32) {
 fn clicking_a_peek_reveals_that_window() {
     aware();
     let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0), Sentinel::new(3, 0)];
-    let mut d = Daemon::new("s6-peek");
+    let mut d = Daemon::new_with_hooks("s6-peek");
     d.start();
     thread::sleep(Duration::from_millis(1800));
     let _cursor = cursor_restore();

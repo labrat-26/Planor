@@ -151,6 +151,7 @@ pub fn events(
 ) {
     let _ = BUS.set(tx);
     let note_hotkey = cfg["diagnostics"]["enabled"].as_bool() == Some(true);
+    let test_mode = crate::test_mode();
     std::thread::spawn(move || unsafe {
         SetConsoleCtrlHandler(Some(ctrl), 1);
         let name = wide("Planor.Events");
@@ -181,14 +182,20 @@ pub fn events(
             return;
         }
         WTSRegisterSessionNotification(h, 0);
-        let raw = RAWINPUTDEVICE {
-            usUsagePage: 13,
-            usUsage: 5,
-            dwFlags: RIDEV_INPUTSINK,
-            hwndTarget: h,
+        if !test_mode {
+            let raw = RAWINPUTDEVICE {
+                usUsagePage: 13,
+                usUsage: 5,
+                dwFlags: RIDEV_INPUTSINK,
+                hwndTarget: h,
+            };
+            RegisterRawInputDevices(&raw, 1, size_of::<RAWINPUTDEVICE>() as _);
+        }
+        let mut keys = if test_mode {
+            Vec::new()
+        } else {
+            input::bindings(h, &cfg)
         };
-        RegisterRawInputDevices(&raw, 1, size_of::<RAWINPUTDEVICE>() as _);
-        let mut keys = input::bindings(h, &cfg);
         let taskbar = RegisterWindowMessageW(wide("TaskbarCreated").as_ptr());
         let hooks = [
             (EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND),
@@ -209,47 +216,53 @@ pub fn events(
                 WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
             )
         });
-        // The mouse hook gets a thread of its own: a low-level hook must answer within a few
-        // milliseconds or all system input lags, so it must never share a thread with anything that
-        // can block (touchpad parsing, window events).
-        std::thread::spawn(move || {
-            let install = || {
-                let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
-                let keys = if note_hotkey {
-                    SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), GetModuleHandleW(null()), 0)
-                } else {
-                    null_mut()
+        if test_mode {
+            if note_hotkey {
+                diag::trace("test mode: skipping global hotkeys and low-level input hooks");
+            }
+        } else {
+            // The mouse hook gets a thread of its own: a low-level hook must answer within a few
+            // milliseconds or all system input lags, so it must never share a thread with anything that
+            // can block (touchpad parsing, window events).
+            std::thread::spawn(move || {
+                let install = || {
+                    let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
+                    let keys = if note_hotkey {
+                        SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), GetModuleHandleW(null()), 0)
+                    } else {
+                        null_mut()
+                    };
+                    (hook, keys)
                 };
-                (hook, keys)
-            };
-            let (mut hook, mut keys) = install();
-            diag::trace(format!("input hooks installed: mouse={} keyboard={}", !hook.is_null(), !keys.is_null()));
-            // Windows silently removes a low-level hook that ever answers too slowly (and after some session
-            // changes), which is how Win+W and peek clicks would stop working with nothing logged. Put the
-            // hooks back every few seconds.
-            SetTimer(null_mut(), 1, 4000, None);
-            let mut m = MSG::default();
-            while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
-                if m.message == WM_TIMER {
-                    if !hook.is_null() {
-                        UnhookWindowsHookEx(hook);
+                let (mut hook, mut keys) = install();
+                diag::trace(format!("input hooks installed: mouse={} keyboard={}", !hook.is_null(), !keys.is_null()));
+                // Windows silently removes a low-level hook that ever answers too slowly (and after some session
+                // changes), which is how Win+W and peek clicks would stop working with nothing logged. Put the
+                // hooks back every few seconds.
+                SetTimer(null_mut(), 1, 4000, None);
+                let mut m = MSG::default();
+                while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
+                    if m.message == WM_TIMER {
+                        if !hook.is_null() {
+                            UnhookWindowsHookEx(hook);
+                        }
+                        if !keys.is_null() {
+                            UnhookWindowsHookEx(keys);
+                        }
+                        (hook, keys) = install();
+                        continue;
                     }
-                    if !keys.is_null() {
-                        UnhookWindowsHookEx(keys);
-                    }
-                    (hook, keys) = install();
-                    continue;
+                    TranslateMessage(&m);
+                    DispatchMessageW(&m);
                 }
-                TranslateMessage(&m);
-                DispatchMessageW(&m);
-            }
-            if !hook.is_null() {
-                UnhookWindowsHookEx(hook);
-            }
-            if !keys.is_null() {
-                UnhookWindowsHookEx(keys);
-            }
-        });
+                if !hook.is_null() {
+                    UnhookWindowsHookEx(hook);
+                }
+                if !keys.is_null() {
+                    UnhookWindowsHookEx(keys);
+                }
+            });
+        }
         SetTimer(h, 1, 200, None);
         let mut m = MSG::default();
         while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
@@ -261,10 +274,12 @@ pub fn events(
                 emit(Event::Topology)
             } else if m.message == WM_TIMER {
                 if let Ok(cfg) = reload.try_recv() {
-                    for id in 1..=keys.len() {
-                        KeyboardAndMouse::UnregisterHotKey(h, id as _);
+                    if !test_mode {
+                        for id in 1..=keys.len() {
+                            KeyboardAndMouse::UnregisterHotKey(h, id as _);
+                        }
+                        keys = input::bindings(h, &cfg)
                     }
-                    keys = input::bindings(h, &cfg)
                 }
             }
             TranslateMessage(&m);
@@ -444,6 +459,10 @@ pub fn eligible(id: isize, cfg: &toml::Value) -> bool {
         let mut class = [0; 256];
         let n = GetClassNameW(h, class.as_mut_ptr(), 256);
         let class = String::from_utf16_lossy(&class[..n as usize]);
+        // Never let a user's real daemon hijack sentinel windows owned by isolated test runs.
+        if instance().is_empty() && class.starts_with("PlanorSentinel") {
+            return false;
+        }
         for rule in cfg["rules"].as_array().unwrap() {
             if rule
                 .get("class")

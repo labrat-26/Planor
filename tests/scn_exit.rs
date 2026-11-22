@@ -142,11 +142,23 @@ fn assert_no_real_planor(context: &str) {
     );
 }
 
-/// Waits (up to 5 s) for the killed daemon's planor.exe to disappear; panics with details otherwise.
-fn wait_no_planor(context: &str) {
-    if !eventually(5, || !planor_running()) {
+/// Waits (up to 5 s) for the killed daemon's process (or all planor.exe when pid is unknown) to disappear.
+fn wait_no_planor(d: &Daemon, context: &str) {
+    let gone = if let Some(pid) = d.last_pid {
+        eventually(5, || {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .map(|o| !String::from_utf8_lossy(&o.stdout).contains(&pid.to_string()))
+                .unwrap_or(false)
+        })
+    } else {
+        eventually(5, || !planor_running())
+    };
+    if !gone {
         panic!(
-            "{context}: expected no planor.exe within 5 s of Daemon::kill(), observed one still running:\ntasklist /FI \"IMAGENAME eq planor.exe\":\n{}\nGet-Process planor (Id, Path):\n{}",
+            "{context}: expected killed daemon (pid {:?}) to exit within 5 s, observed still running:\ntasklist /FI \"IMAGENAME eq planor.exe\":\n{}\nGet-Process planor (Id, Path):\n{}",
+            d.last_pid,
             tasklist_planor(),
             planor_processes()
         );
@@ -230,17 +242,7 @@ fn set_tile_on_startup(d: &Daemon, on: bool) {
 
 /// Sends a chord without the 700 ms settle that `press` adds.
 fn send_chord(mods: &[u8], vk: u8) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{KEYEVENTF_KEYUP, keybd_event};
-    unsafe {
-        for m in mods {
-            keybd_event(*m, 0, 0, 0);
-        }
-        keybd_event(vk, 0, 0, 0);
-        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-        for m in mods.iter().rev() {
-            keybd_event(*m, 0, KEYEVENTF_KEYUP, 0);
-        }
-    }
+    send_chord_raw(mods, vk);
 }
 
 /// Scrolls the strip right `n` times so that several windows are parked off-screen.
@@ -278,7 +280,7 @@ fn panic_hotkey() {
     aware();
     let ws = make_windows(6);
     let before = snapshot(&ws);
-    let mut d = Daemon::new("scn-exit-panic");
+    let mut d = Daemon::new_with_hooks("scn-exit-panic");
     d.start();
     thread::sleep(Duration::from_millis(1500));
     press(&[CTRL, ALT, SHIFT], BACKSPACE);
@@ -339,7 +341,7 @@ fn kill_twice() {
     thread::sleep(Duration::from_millis(1500));
     scroll_right(3);
     d.kill();
-    wait_no_planor("after kill 1");
+    wait_no_planor(&d, "after kill 1");
     let parked = count_parked(&ws);
     assert!(
         parked > 0,
@@ -358,7 +360,7 @@ fn kill_twice() {
     thread::sleep(Duration::from_millis(1500));
     scroll_right(3);
     d.kill();
-    wait_no_planor("after kill 2");
+    wait_no_planor(&d, "after kill 2");
     let parked = count_parked(&ws);
     assert!(
         parked > 0,
@@ -381,7 +383,7 @@ fn stop_during_animation() {
     aware();
     let ws = make_windows(6);
     let before = snapshot(&ws);
-    let mut d = Daemon::new("scn-exit-animation");
+    let mut d = Daemon::new_animated("scn-exit-animation");
     d.start();
     thread::sleep(Duration::from_millis(1500));
     send_chord(&[ALT], RIGHT);
@@ -564,7 +566,7 @@ fn stop_without_daemon_rescues_windows() {
     thread::sleep(Duration::from_millis(1500));
     scroll_right(3);
     d.kill();
-    wait_no_planor("stop without daemon (after kill)");
+    wait_no_planor(&d, "stop without daemon (after kill)");
     let _rescue = Rescue {
         inst: d.inst.clone(),
         dir: d.dir.clone(),
@@ -609,15 +611,16 @@ fn ctrl_break_restores_before_exit() {
     let ws = make_windows(6);
     let before = snapshot(&ws);
     let mut d = Daemon::new("scn-exit-ctrl-break");
-    assert_no_real_planor("ctrl_break_restores_before_exit");
 
     // Spawn the daemon directly (same environment as Daemon::start) in its own process group,
     // so CTRL_BREAK can be aimed at it alone.
     let child = planor_cmd(&d.inst, &d.dir, "start")
+        .env("PLANOR_TEST_MODE", if d.test_mode { "1" } else { "0" })
         .creation_flags(CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .expect("test bug: could not spawn planor start");
     let pid = child.id();
+    d.last_pid = Some(pid);
     d.p = Some(child);
     let _rescue = Rescue {
         inst: d.inst.clone(),
@@ -638,6 +641,7 @@ fn ctrl_break_restores_before_exit() {
         assert!(Instant::now() < until, "pipe startup timeout (ctrl-break test)");
         thread::sleep(Duration::from_millis(80));
     }
+    d.register_active();
     thread::sleep(Duration::from_millis(1500));
     scroll_right(3);
     let parked = count_parked(&ws);

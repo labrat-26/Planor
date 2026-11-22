@@ -35,6 +35,9 @@ unsafe fn present(h: HWND) {
 /// open, bring that one to the cursor instead of ignoring the key: a box that ended up hidden or off
 /// screen used to make Win+W do nothing for the rest of the session.
 pub fn open() {
+    if crate::test_mode() {
+        return;
+    }
     if OPEN.swap(true, AcqRel) {
         let h = NOTE.load(Acquire);
         if h != 0 && unsafe { IsWindow(h as _) } != 0 {

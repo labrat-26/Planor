@@ -60,7 +60,7 @@ fn compute_visual() {
     let first = Sentinel::new(0, 0);
     let w = Sentinel::new(1, 0);
     let _third = Sentinel::new(2, 0);
-    let mut d = Daemon::new("visual");
+    let mut d = Daemon::new_animated("visual");
     let output = Path::new("build/live");
     fs::create_dir_all(output).unwrap();
     let mut report = serde_json::json!({"bleed_events":null,"border_delta_px":null,"input_to_first_pixel_ms":null,"median_dt_ms":null,"p99_dt_ms":null,"frozen_frames":null,"non_monotonic_jumps":null});

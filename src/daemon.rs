@@ -366,6 +366,31 @@ impl Engine {
                 }
                 self.reveal()
             }
+            Command::Key { name } if name == "panic_exit" => {
+                self.paused = true;
+                self.clear()?;
+                self.journal.restore()?;
+            }
+            Command::Key { name } if !self.blocked() => {
+                let valid = matches!(
+                    name.as_str(),
+                    "focus_left"
+                        | "focus_right"
+                        | "focus_up"
+                        | "focus_down"
+                        | "move_left"
+                        | "move_right"
+                        | "stack_toggle"
+                        | "toggle_pin"
+                        | "focus_monitor_next"
+                        | "focus_monitor_prev"
+                );
+                if !valid {
+                    return Err(format!("unknown key action: {name}").into());
+                }
+                self.input = Some(Instant::now());
+                self.keypress(&name);
+            }
             Command::Diag { action } => return self.diag.command(action),
             _ => return Err("command unavailable".into()),
         }
@@ -1681,7 +1706,7 @@ pub fn run() -> Result<()> {
     win32::tweak_system(&folder("LOCALAPPDATA")?.join("system-settings.json"));
     let cfg = config()?;
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
-    if diag.enabled {
+    if diag.enabled && !crate::test_mode() {
         record_input();
     }
     let (tx, events) = crossbeam_channel::unbounded();
@@ -1740,6 +1765,23 @@ pub fn run() -> Result<()> {
             slow("layout", t);
             if server.poll(|cmd| engine.command(cmd, &reload))? {
                 break;
+            }
+            if server.has_pending_write() {
+                while let Ok(e) = events.try_recv() {
+                    match e {
+                        Event::Stop => return Ok(()),
+                        Event::Key(k) if k == "panic_exit" => return Ok(()),
+                        e if !server.closing => {
+                            let t = Instant::now();
+                            let name = e.name();
+                            engine.event(e);
+                            slow(name, t);
+                        }
+                        _ => (),
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(1));
+                continue;
             }
             crossbeam_channel::select! {recv(events)->e=>match e?{Event::Stop=>break,Event::Key(k) if k=="panic_exit"=>break,e if !server.closing=>{let t=Instant::now();let name=e.name();if engine.diag.enabled&&!matches!(name,"frame"|"contacts"){let detail=match &e{Event::Window(k,id)=>format!(" {k:#x} {id}"),Event::Rejected(s,v)=>format!(" seq={s} n={} first={:?}",v.len(),v.first()),Event::Peek(id)=>format!(" {id}"),_=>String::new()};diag::trace(format!("EV {name}{detail}"))}engine.event(e);slow(name,t)},_=>()},recv(tick)->_=>{if !server.closing{let t=Instant::now();engine.tick()?;slow("tick",t)}}}
         }

@@ -27,6 +27,19 @@ fn instance() -> String {
         .map(|v| format!("-{v}"))
         .unwrap_or_default()
 }
+/// Test mode disables OS-wide global hotkeys, raw input registration, low-level hooks, and
+/// interactive Win+W note popups so isolated test daemons can coexist with the user's real daemon.
+pub(crate) fn test_mode() -> bool {
+    if let Ok(v) = std::env::var("PLANOR_TEST_MODE") {
+        if v == "1" || v.eq_ignore_ascii_case("true") {
+            return true;
+        }
+        if v == "0" || v.eq_ignore_ascii_case("false") {
+            return false;
+        }
+    }
+    !instance().is_empty()
+}
 fn pipe_name() -> String {
     format!(r"\\.\pipe\planor-ipc{}", instance())
 }
@@ -108,6 +121,10 @@ enum Command {
     Resume,
     Pin,
     PullOrphans,
+    /// Trigger a hotkey action over IPC (for isolated test mode without global hotkeys).
+    Key {
+        name: String,
+    },
     Autostart {
         mode: Switch,
     },
@@ -230,6 +247,9 @@ impl PipeServer {
             closing: false,
         })
     }
+    fn has_pending_write(&self) -> bool {
+        self.sent < self.reply.len()
+    }
     fn reset(&mut self) {
         unsafe {
             DisconnectNamedPipe(self.file.as_raw_handle());
@@ -269,7 +289,7 @@ impl PipeServer {
                 null_mut(),
             )
         } == 0
-            || self.started.elapsed().as_secs() > 5
+            || self.started.elapsed().as_secs() > 10
         {
             self.reset();
             return Ok(self.closing);
@@ -284,7 +304,8 @@ impl PipeServer {
                 let result = read_frame(&mut self.file)
                     .and_then(|data| Ok(serde_json::from_slice::<Command>(&data)?))
                     .and_then(|cmd| {
-                        let stop = matches!(cmd, Command::Stop);
+                        let stop = matches!(cmd, Command::Stop)
+                            || matches!(&cmd, Command::Key { name } if name == "panic_exit");
                         let result = handle(cmd);
                         self.closing = stop && result.is_ok();
                         result
@@ -296,10 +317,22 @@ impl PipeServer {
                 self.reply.extend(body)
             }
         }
-        if self.sent < self.reply.len() {
+        while self.sent < self.reply.len() {
             match self.file.write(&self.reply[self.sent..]) {
+                Ok(0) => break,
                 Ok(n) => self.sent += n,
-                Err(e) if e.raw_os_error() == Some(ERROR_NO_DATA as i32) => {
+                Err(e)
+                    if e.raw_os_error() == Some(ERROR_NO_DATA as i32)
+                        || e.kind() == io::ErrorKind::WouldBlock =>
+                {
+                    break;
+                }
+                Err(e)
+                    if matches!(
+                        e.raw_os_error().map(|c| c as u32),
+                        Some(ERROR_BROKEN_PIPE | ERROR_PIPE_NOT_CONNECTED)
+                    ) =>
+                {
                     self.reset();
                     return Ok(self.closing);
                 }
@@ -424,6 +457,25 @@ mod tests {
             Ok(())
         });
         assert_eq!(client(&name, &Command::Pause).unwrap(), "Pause");
+        worker.join().unwrap().unwrap()
+    }
+    #[test]
+    fn large_reply_round_trip() {
+        let name = format!(r"\\.\pipe\planor-test-large-{}", std::process::id());
+        let mut server = PipeServer::new(&name).unwrap();
+        let big = "x".repeat(180_000);
+        let expected = big.clone();
+        let worker = std::thread::spawn(move || -> Result<()> {
+            while !server.connected || server.reply.is_empty() || server.sent < server.reply.len() {
+                server.poll(|_| Ok(big.clone()))?;
+                std::thread::yield_now()
+            }
+            unsafe {
+                FlushFileBuffers(server.file.as_raw_handle());
+            }
+            Ok(())
+        });
+        assert_eq!(client(&name, &Command::Pause).unwrap(), expected);
         worker.join().unwrap().unwrap()
     }
 }

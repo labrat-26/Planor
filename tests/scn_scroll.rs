@@ -97,19 +97,9 @@ fn assert_on_primary(ws: &[Sentinel], mon: Rect4) {
     }
 }
 
-/// Press a chord without the 700 ms wait of `press()`, so the caller can sample while it animates.
+/// Press a chord without the post-action wait of `press()`, so the caller can sample while it animates.
 fn chord_now(mods: &'static [u8], vk: u8) {
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
-    unsafe {
-        for m in mods {
-            keybd_event(*m, 0, 0, 0);
-        }
-        keybd_event(vk, 0, 0, 0);
-        keybd_event(vk, 0, KEYEVENTF_KEYUP, 0);
-        for m in mods.iter().rev() {
-            keybd_event(*m, 0, KEYEVENTF_KEYUP, 0);
-        }
-    }
+    send_chord_raw(mods, vk);
 }
 
 /// One desktop frame with its output size and sentinel colour boxes. Retries until a frame arrives (5 s max).
@@ -459,7 +449,7 @@ fn scroll_boxes_constant_size() {
     let (mon, _work) = primary();
     assert_on_primary(&ws, mon);
     let hw = hwnds(&ws);
-    let mut d = Daemon::new("scroll-size");
+    let mut d = Daemon::new_animated("scroll-size");
     d.start();
     thread::sleep(Duration::from_millis(1500));
     // Sentinel 0 is parked at start: bring it on screen first, so every sentinel has a settled reference.
@@ -517,7 +507,7 @@ fn scroll_monotonic_and_gapped() {
     let (mon, _work) = primary();
     assert_on_primary(&ws, mon);
     let hw = hwnds(&ws);
-    let mut d = Daemon::new("scroll-mono");
+    let mut d = Daemon::new_animated("scroll-mono");
     d.start();
     thread::sleep(Duration::from_millis(1500));
     // Sentinels 0 and 1 fit the monitor side by side, so stepping from 0 to 1 never moves the strip. The scroll
@@ -718,7 +708,7 @@ fn scroll_no_shrink_or_offset_6_windows() {
     let (mon, _work) = primary();
     assert_on_primary(&ws, mon);
     let hw = hwnds(&ws);
-    let mut d = Daemon::new("scroll-six");
+    let mut d = Daemon::new_animated("scroll-six");
     d.start();
     thread::sleep(Duration::from_millis(1500));
     focus_to(&ws, N - 1);
