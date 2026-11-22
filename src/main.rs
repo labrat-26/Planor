@@ -1,5 +1,6 @@
 mod backend;
 mod config_tui;
+mod settings_model;
 mod daemon;
 mod diag;
 mod gpu;
