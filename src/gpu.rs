@@ -77,6 +77,14 @@ impl GpuTimer {
                 ctx.GetData(&p.disjoint, Some((&mut dj as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast()), size_of_val(&dj) as u32, flags)
             };
             // S_FALSE (not ready yet) is a success code and leaves the data untouched.
+            if let Err(ref e) = ok {
+                let code = e.code().0;
+                // DXGI_ERROR_DEVICE_REMOVED / HUNG / RESET: drop all queries bound to the dead device.
+                if matches!(code, -2005270523 | -2005270522 | -2005270521) {
+                    self.clear();
+                    return;
+                }
+            }
             if ok.is_err() || dj.Frequency == 0 {
                 if ok.is_err() || self.pending.len() >= 6 {
                     let p = self.pending.pop_front().unwrap();
@@ -97,6 +105,12 @@ impl GpuTimer {
             }
             self.spare.push((p.disjoint, p.begin, p.end));
         }
+    }
+    /// Drop all queued/cached queries (e.g. after a D3D11 device reset).
+    pub fn clear(&mut self) {
+        self.pending.clear();
+        self.spare.clear();
+        self.broken = false;
     }
 }
 
@@ -159,7 +173,16 @@ impl Sampler {
             let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
             a.QueryVideoMemoryInfo(0, group, &mut info).ok().map(|_| info.CurrentUsage as f64 / (1024. * 1024.))
         };
-        (read(DXGI_MEMORY_SEGMENT_GROUP_LOCAL), read(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL))
+        let (local, non_local) = (
+            read(DXGI_MEMORY_SEGMENT_GROUP_LOCAL),
+            read(DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL),
+        );
+        if local.is_none() && non_local.is_none() {
+            // Adapter handle went stale (driver reset / GPU switch); re-enumerate on the next slow tick.
+            self.adapter = None;
+            self.adapter_tried = false;
+        }
+        (local, non_local)
     }
 
     fn engine_pct(&mut self) -> Option<f64> {
