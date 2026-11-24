@@ -157,6 +157,11 @@ impl Strip {
     }
     pub fn remove(&mut self, id: WindowId) {
         if let Some((i, j)) = self.locate(id) {
+            // A destroyed fullscreen window must not leave its tuple behind: it would block
+            // fill_gaps, set_area rescale and every future fullscreen on this strip for good.
+            if self.fullscreen.as_ref().is_some_and(|(fid, _, _)| *fid == id) {
+                self.fullscreen = None;
+            }
             let c = &mut self.columns[i];
             c.members.remove(j);
             if c.members.is_empty() {
@@ -286,6 +291,9 @@ impl Strip {
             return;
         }
         let max = (self.start(self.columns.len()) - self.gap - self.area.length()).max(0);
+        if max == 0 {
+            return;
+        }
         if self.offset <= 0 {
             self.focus = 0;
         } else if self.offset >= max {
@@ -730,6 +738,11 @@ impl Strip {
         if n < 2 {
             return false;
         }
+        if !delta.is_finite() {
+            // A zero-depth divide (or a poisoned gain) can produce inf/NaN: refuse it instead of
+            // spinning forever or leaving frac = NaN behind.
+            return false;
+        }
         if !c.wraps() {
             // No window above: clamp to the ends instead of looping round.
             let p = (c.active as f64 + c.frac + delta).clamp(0., (n - 1) as f64);
@@ -740,15 +753,16 @@ impl Strip {
             }
             return true;
         }
-        c.frac += delta;
-        while c.frac >= 1. {
-            c.frac -= 1.;
-            c.active = (c.active as isize + 1).rem_euclid(n) as usize;
-        }
-        while c.frac <= -1. {
-            c.frac += 1.;
-            c.active = (c.active as isize - 1).rem_euclid(n) as usize;
-        }
+        // Whole steps in O(1), remainder keeps its sign in (-1, 1) exactly like the old per-step
+        // wrap. A per-step loop hangs the daemon thread on a huge delta (swipe_scroll_gain has no
+        // upper bound) and never terminates on inf.
+        let total = c.frac + delta;
+        let step = total.trunc();
+        c.frac = total - step;
+        // Reduce before adding: a huge delta saturates `step as isize` to isize::MAX, which would
+        // overflow the add (debug builds panic). (a + s) mod n == (a + s mod n) mod n.
+        let shift = (step as isize).rem_euclid(n);
+        c.active = (c.active as isize + shift).rem_euclid(n) as usize;
         true
     }
     /// End of a roll: the deck settles on the nearest member.

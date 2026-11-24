@@ -72,6 +72,9 @@ pub(crate) trait WindowBackend {
     fn max_refresh_hz(&self) -> f64 {
         60.0
     }
+    fn contact_dpi(&self) -> Option<f64> {
+        Some(96.0)
+    }
 }
 
 const RECOVERY_PROP: &str = "Planor.Recovery.Identity";
@@ -342,6 +345,10 @@ impl WindowBackend for Win32Backend {
     fn max_refresh_hz(&self) -> f64 {
         win32::max_monitor_refresh_hz()
     }
+
+    fn contact_dpi(&self) -> Option<f64> {
+        crate::input::last_contacts_dpi()
+    }
 }
 
 #[cfg(test)]
@@ -423,6 +430,7 @@ pub(crate) mod sim {
     pub(crate) struct SimDesktop {
         pub monitors: Vec<(String, Rect, Rect)>,
         pub max_refresh_hz: f64,
+        pub contact_dpi: Option<f64>,
         pub current_desktop: Option<u128>,
         pub windows: BTreeMap<isize, SimWindow>,
         pub z_order: Vec<isize>,
@@ -441,6 +449,7 @@ pub(crate) mod sim {
             Self {
                 monitors,
                 max_refresh_hz: 60.0,
+                contact_dpi: Some(96.0),
                 current_desktop: Some(1),
                 windows: BTreeMap::new(),
                 z_order: Vec::new(),
@@ -921,6 +930,10 @@ pub(crate) mod sim {
 
         fn max_refresh_hz(&self) -> f64 {
             self.0.lock().unwrap().max_refresh_hz
+        }
+
+        fn contact_dpi(&self) -> Option<f64> {
+            self.0.lock().unwrap().contact_dpi
         }
     }
 }

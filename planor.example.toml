@@ -68,7 +68,7 @@ swipe_drag_cross_monitors = true
 
 [mouse]
 # Win + MOUSE wheel (not the touchpad) scrolls the strip under the cursor along its axis (sideways on landscape, up and down on
-# portrait); Win + Shift + wheel rolls the focused group. Strip travel per wheel notch:
+# portrait), or rolls the focused group when a group is focused; Win + Shift + wheel does the opposite. Strip travel per wheel notch:
 win_wheel_step_px = 240
 
 [diagnostics]

@@ -883,6 +883,21 @@ pub(crate) fn is_capture_stale(
     (capture_size.0 - target.0).abs() > 24 || (capture_size.1 - target.1).abs() > 24
 }
 
+/// Compute the off-screen parked placement rectangle for a proxy window.
+/// While `in_live_motion` (`s.live || moving`), anchor `y` to `bound.y` so rolling a group
+/// Anchor parked tiles at `(park, bound.y)` during both live motion and settle so rolling a group
+/// vertically never triggers per-frame `DeferWindowPos` / `EVENT_OBJECT_LOCATIONCHANGE` storms
+/// (#46) and never emits an extra settle-time move that could drift `y` into another monitor's DPI
+/// band in mixed-DPI layouts.
+pub(crate) fn parked_target_rect(
+    park: i32,
+    tile_rect: Rect,
+    bound: Rect,
+    _in_live_motion: bool,
+) -> Rect {
+    Rect { x: park, y: bound.y, ..tile_rect }
+}
+
 /// Recompute 1:1 thumbnail `(src, dst)` when a parked window's DWM thumbnail source size changes
 /// asynchronously after settling. Returns `None` when unchanged.
 pub(crate) fn refresh_thumb_props_if_resized(
@@ -1532,10 +1547,7 @@ impl RenderState {
                         }
                     }
                     let target = if park_window {
-                        Rect {
-                            x: park,
-                            ..tile.rect
-                        }
+                        parked_target_rect(park, tile.rect, bound, s.live || moving)
                     } else {
                         tile.rect
                     };
@@ -2076,8 +2088,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_proxy_backing, is_capture_stale, proxy_blit_rects, refresh_thumb_props_if_resized,
-        should_draw_backing, wgc_capture_insets,
+        choose_proxy_backing, is_capture_stale, parked_target_rect, proxy_blit_rects,
+        refresh_thumb_props_if_resized, should_draw_backing, wgc_capture_insets,
     };
     use planor::Rect;
 
@@ -2248,5 +2260,20 @@ mod tests {
         // (c) Settled proxy / idle refresh with mismatched OS frame is stale and dropped.
         assert!(is_capture_stale((1277, 1364), (1277, 1364), grown_os, false));
         assert!(!is_capture_stale((2560, 1364), (2560, 1364), grown_os, false));
+    }
+
+    #[test]
+    fn parked_target_rect_holds_constant_y_during_live_group_roll_and_restores_on_settle() {
+        // Repro of #46 (bundle 001446456): rolling a 3-window group changed tile.rect.y every frame.
+        let bound = Rect { x: 0, y: -1440, w: 2560, h: 1392 };
+        let frame1 = Rect { x: 0, y: -301, w: 1277, h: 1336 };
+        let frame2 = Rect { x: 0, y: -291, w: 1277, h: 1336 };
+        let p1 = parked_target_rect(3584, frame1, bound, true);
+        let p2 = parked_target_rect(3584, frame2, bound, true);
+        assert_eq!(p1, p2, "parked target stays constant during live roll (no per-frame DeferWindowPos storm)");
+        assert_eq!(p1, Rect { x: 3584, y: -1440, w: 1277, h: 1336 });
+        // At settle, parked target keeps bound.y as well (zero extra settle move, no mixed-DPI y drift).
+        let settled = parked_target_rect(3584, frame2, bound, false);
+        assert_eq!(settled, Rect { x: 3584, y: -1440, w: 1277, h: 1336 });
     }
 }

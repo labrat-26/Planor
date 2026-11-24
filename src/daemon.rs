@@ -358,7 +358,10 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
     pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
-    pub inertia: Option<(bool, f64, Instant)>,
+    pub scroll_start_focus: Option<(Key, isize)>,
+    pub scroll_dpi: Option<f64>,
+    pub wheel_mode: Option<(Key, Instant, bool, bool)>,
+    pub inertia: Option<(bool, f64, Instant, Option<f64>)>,
     pub v_travel: f64,
     /// A cross-axis swipe already hopped to another monitor: the rest of that gesture is ignored.
     pub hopped: bool,
@@ -428,6 +431,9 @@ impl<B: WindowBackend> Engine<B> {
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
             scroll_samples: Default::default(),
+            scroll_start_focus: None,
+            scroll_dpi: None,
+            wheel_mode: None,
             inertia: None,
             v_travel: 0.,
         hopped: false,
@@ -646,6 +652,7 @@ impl<B: WindowBackend> Engine<B> {
                 return Ok(format!("recording touchpad frames to {}", out.display()));
             }
             Command::Stop => {
+                self.clear_scroll_state();
                 self.paused = true;
                 self.clear()?;
                 self.journal.restore(&self.backend)?
@@ -662,6 +669,7 @@ impl<B: WindowBackend> Engine<B> {
                 self.reveal()
             }
             Command::Pause => {
+                self.clear_scroll_state();
                 self.paused = true;
                 self.clear()?
             }
@@ -1048,7 +1056,7 @@ impl<B: WindowBackend> Engine<B> {
             self.pad_end()
         }
         // Momentum normally runs on `fast_tick`; this keeps it going if the fast timer is not wired (tests).
-        if self.inertia.is_some_and(|(_, _, last)| last.elapsed() >= Duration::from_millis(30)) {
+        if self.inertia.is_some_and(|(_, _, last, _)| last.elapsed() >= Duration::from_millis(30)) {
             self.pad_inertia()
         }
         if self.settle.is_some_and(|t| Instant::now() >= t) {
@@ -1176,7 +1184,30 @@ impl<B: WindowBackend> Engine<B> {
         self.select(self.backend.foreground());
         self.reveal()
     }
+    fn settle_pending_rolls(&mut self) {
+        let mut settled_any = false;
+        for s in self.strips.values_mut() {
+            if s.columns.iter().any(|c| c.frac != 0.0) {
+                s.settle_roll();
+                settled_any = true;
+            }
+        }
+        if settled_any {
+            self.dirty = true;
+        }
+    }
+    fn clear_scroll_state(&mut self) {
+        if !self.pad_scrolling && (self.settle.is_some() || self.inertia.is_some()) {
+            self.settle_pending_rolls();
+        }
+        self.scroll_start_focus = None;
+        self.scroll_dpi = None;
+        self.inertia = None;
+        self.wheel_mode = None;
+        self.settle = None;
+    }
     fn select(&mut self, id: isize) {
+        self.clear_scroll_state();
         if let Some((desk, name)) = self.owning(id)
             && Some(desk) == self.desktop
         {
@@ -1593,6 +1624,7 @@ impl<B: WindowBackend> Engine<B> {
         if self.blocked() {
             return;
         }
+        self.clear_scroll_state();
         // Act on the monitor that really holds focus, not the one Planor last recorded.
         let focused = self.backend.foreground();
         if self.owning(focused).is_some() {
@@ -1732,6 +1764,7 @@ impl<B: WindowBackend> Engine<B> {
             self.pad_scrolling = true;
             self.scroll_frac = 0.;
             self.inertia = None;
+            self.wheel_mode = None;
             self.v_travel = 0.;
             self.hopped = false;
             self.scroll_samples.clear();
@@ -1742,6 +1775,10 @@ impl<B: WindowBackend> Engine<B> {
                     self.select(focused)
                 }
             }
+            self.scroll_dpi = self.backend.contact_dpi();
+            self.scroll_start_focus = self
+                .key()
+                .and_then(|k| self.strips.get(&k).and_then(|s| s.active()).map(|id| (k, id)));
         }
         self.settle = None;
         self.inertia = None;
@@ -1750,26 +1787,27 @@ impl<B: WindowBackend> Engine<B> {
         while self.scroll_samples.front().is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150)) {
             self.scroll_samples.pop_front();
         }
-        self.scroll_by(d, vertical, true)
+        let dpi = self.scroll_dpi;
+        let _ = self.scroll_by(d, vertical, true, dpi);
     }
     /// Move the strip (or roll the focused group) by `d` finger units. Shared by the live gesture and the
-    /// momentum that carries on after the fingers lift.
-    fn scroll_by(&mut self, d: f64, vertical: bool, live: bool) {
+    /// momentum that carries on after the fingers lift. Returns `(changed, clamped)`.
+    fn scroll_by(&mut self, d: f64, vertical: bool, live: bool, contact_dpi: Option<f64>) -> (bool, bool) {
         let gain = self.hot.swipe_scroll_gain;
         let natural = self.hot.swipe_natural_direction;
         let signed = if natural { -d } else { d } * gain;
         if self.hopped {
-            return;
+            return (false, true);
         }
         let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) else {
-            return;
+            return (false, true);
         };
         // The same controls on every monitor, turned with it: fingers along the strip scroll it (sideways
         // on a landscape monitor, up and down on a portrait one); fingers across it roll the group.
         let along = vertical != s.area.horizontal();
         if !along {
-            let depth = if s.area.horizontal() { s.area.h } else { s.area.w } as f64;
-            if !s.roll(signed / (depth * 0.5)) {
+            let prev = s.columns.get(s.focus).map(|c| (c.active, c.frac));
+            if !s.roll(group_roll_delta(signed, contact_dpi)) {
                 // No group here: a long swipe across the strip hops to the monitor that way instead
                 // (up/down from a landscape monitor, left/right from a portrait one), once per gesture.
                 self.v_travel += d;
@@ -1784,14 +1822,27 @@ impl<B: WindowBackend> Engine<B> {
                         (false, false) => "focus_left",
                     });
                 }
-                return;
+                return (false, false);
+            }
+            let after = s.columns.get(s.focus).map(|c| (c.active, c.frac));
+            if after == prev {
+                return (false, signed.abs() > 1e-6);
             }
         } else {
-            self.scroll_frac += signed;
+            self.scroll_frac += strip_scroll_px(signed, s.area.length(), contact_dpi);
             let whole = self.scroll_frac.trunc();
             self.scroll_frac -= whole;
-            s.scroll(whole as i32);
+            let delta_px = whole as i32;
+            if delta_px == 0 {
+                return (false, false);
+            }
+            let prev_offset = s.offset;
+            let prev_focus = s.focus;
+            s.scroll(delta_px);
             s.focus_nearest_center();
+            if s.offset == prev_offset && s.focus == prev_focus {
+                return (false, true);
+            }
         }
         // Under the fingers the strip follows with no easing at all (one to one). The momentum after the
         // lift is stepped at frame rate (see `fast_tick`), so it is placed directly too: re-targeting a
@@ -1808,7 +1859,8 @@ impl<B: WindowBackend> Engine<B> {
             ));
         }
         self.action = "scroll";
-        self.dirty = true
+        self.dirty = true;
+        (true, false)
     }
     /// Win + mouse wheel: scroll the strip of the monitor under the cursor along its own axis (sideways on
     /// a landscape monitor, up and down on a portrait one); wheel down / tilt right moves forward. With
@@ -1836,11 +1888,46 @@ impl<B: WindowBackend> Engine<B> {
         }
         let delta = delta.clamp(-240, 240);
         let notches = if tilt { delta } else { -delta } as f64 / 120.;
-        let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) else { return };
-        let roll = shift || (tilt && !s.area.horizontal());
+        if !self.pad_scrolling && (self.inertia.is_some() || self.settle.is_some()) {
+            self.settle_pending_rolls();
+        }
+        self.scroll_start_focus = None;
+        self.scroll_dpi = None;
+        self.inertia = None;
+        let now = Instant::now();
+        let Some(key) = self.key() else { return };
+        let Some(s) = self.strips.get_mut(&key) else { return };
+        let focused_is_group = s.columns.get(s.focus).is_some_and(|c| c.members.len() > 1);
+        let roll = if tilt {
+            !s.area.horizontal()
+        } else if let Some((prev_key, prev_at, prev_shift, prev_roll)) = &self.wheel_mode
+            && *prev_key == key
+            && now.duration_since(*prev_at) <= Duration::from_millis(260)
+            && *prev_shift == shift
+        {
+            let r = *prev_roll;
+            if r && !focused_is_group {
+                self.wheel_mode = None;
+                false
+            } else {
+                self.wheel_mode = Some((key.clone(), now, shift, r));
+                r
+            }
+        } else {
+            let r = focused_is_group ^ shift;
+            if r && !focused_is_group {
+                self.wheel_mode = None;
+                return;
+            }
+            self.wheel_mode = Some((key.clone(), now, shift, r));
+            r
+        };
         if roll {
             // One member per notch: a wheel has no lift to settle on, so it never leaves the deck half rolled.
-            if !s.roll(notches.signum() * notches.abs().round().max(1.)) {
+            let prev = s.columns.get(s.focus).map(|c| (c.active, c.frac));
+            if !s.roll(notches.signum() * notches.abs().round().max(1.))
+                || s.columns.get(s.focus).map(|c| (c.active, c.frac)) == prev
+            {
                 return;
             }
         } else {
@@ -1860,21 +1947,91 @@ impl<B: WindowBackend> Engine<B> {
             return;
         }
         self.scroll_frac = 0.;
+        let scroll_dpi = self.scroll_dpi.take();
+        if self.hopped {
+            self.scroll_samples.clear();
+            self.clear_scroll_state();
+            return;
+        }
         // Momentum: a swipe that was still moving when the fingers lifted keeps going and slows down, the
         // way a page or a phone list does.
         let now = Instant::now();
-        let (mut sum, mut vertical) = (0., false);
+        let vertical = self.scroll_samples.back().map(|s| s.2).unwrap_or(false);
+        let mut recent = Vec::new();
         for (t, d, v) in &self.scroll_samples {
-            if now.duration_since(*t) <= Duration::from_millis(100) {
-                sum += d;
-                vertical = *v;
+            let age = now.duration_since(*t);
+            if age <= Duration::from_millis(100) && *v == vertical {
+                recent.push((age.as_secs_f64(), *d));
             }
         }
         self.scroll_samples.clear();
-        let speed = sum / 0.1;
+        let unit_dpi = scroll_dpi.unwrap_or(96.0).max(1.0);
+        let total_travel_in: f64 = recent.iter().map(|&(_, d)| d).sum::<f64>() / unit_dpi;
+        let speed = scroll_fling_velocity(&recent);
+        let speed_ips = speed / unit_dpi;
+        let fling_dir = fling_advance_direction(
+            speed_ips,
+            total_travel_in,
+            self.hot.swipe_natural_direction,
+            250.0 / 96.0,
+            18.0 / 96.0,
+        );
+        // Deliberate fling while still on (or just reaching) the adjacent target: choose the destination at
+        // lift and animate directly to it in one continuous motion (no inertia decay pause + second slide).
+        if let (Some(dir), Some((start_key, start_win))) = (fling_dir, self.scroll_start_focus.take())
+            && self.key().as_ref() == Some(&start_key)
+            && let Some(s) = self.strips.get_mut(&start_key)
+        {
+            let along = vertical != s.area.horizontal();
+            let mut handled = false;
+            if along {
+                if s.active() == Some(start_win) && !s.columns.is_empty() {
+                    s.settle_roll();
+                    let max_col = s.columns.len().saturating_sub(1) as isize;
+                    s.focus = (s.focus as isize + dir).clamp(0, max_col) as usize;
+                    handled = true;
+                }
+            } else if let Some((start_col, start_member)) = s.locate(start_win)
+                && s.focus == start_col
+                && let Some(c) = s.columns.get_mut(start_col)
+                && c.members.len() > 1
+            {
+                let n = c.members.len() as isize;
+                let target = if c.wraps() {
+                    (start_member as isize + dir).rem_euclid(n) as usize
+                } else {
+                    (start_member as isize + dir).clamp(0, n - 1) as usize
+                };
+                let pos = c.active as f64 + c.frac;
+                let nearest = if c.wraps() {
+                    (pos.round() as isize).rem_euclid(n) as usize
+                } else {
+                    (pos.round() as isize).clamp(0, n - 1) as usize
+                };
+                if nearest == start_member || nearest == target {
+                    c.active = target;
+                    c.frac = 0.0;
+                    handled = true;
+                }
+            }
+            if handled {
+                let id = s.active();
+                self.inertia = None;
+                self.settle = None;
+                self.wheel_mode = None;
+                self.action = "scroll";
+                self.quick = true;
+                self.reveal();
+                if let Some(id) = id {
+                    self.backend.activate(id);
+                }
+                return;
+            }
+        }
+        self.scroll_start_focus = None;
         let enabled = self.hot.swipe_inertia;
-        if enabled && speed.abs() > 150. {
-            self.inertia = Some((vertical, speed, now));
+        if enabled && speed_ips.abs() > (150.0 / 96.0) {
+            self.inertia = Some((vertical, speed, now, scroll_dpi));
             self.settle = None;
         } else {
             // Settle only after the fingers have stayed off for a moment, so a swipe that continues
@@ -1884,20 +2041,24 @@ impl<B: WindowBackend> Engine<B> {
     }
     /// One tick of momentum.
     fn pad_inertia(&mut self) {
-        let Some((vertical, speed, last)) = self.inertia else { return };
+        let Some((vertical, speed, last, dpi)) = self.inertia else { return };
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64().min(0.1);
-        self.scroll_by(speed * dt, vertical, false);
+        let (_, clamped) = self.scroll_by(speed * dt, vertical, false, dpi);
         let speed = speed * 0.9f64.powf(dt / 0.032);
-        if speed.abs() < 40. || self.blocked() {
+        let speed_ips = speed / dpi.unwrap_or(96.0).max(1.0);
+        if clamped || speed_ips.abs() < (40.0 / 96.0) || self.blocked() {
             self.inertia = None;
             self.settle = Some(now + Duration::from_millis(120));
         } else {
-            self.inertia = Some((vertical, speed, now));
+            self.inertia = Some((vertical, speed, now, dpi));
         }
     }
     fn pad_settle(&mut self) {
         self.settle = None;
+        self.scroll_start_focus = None;
+        self.scroll_dpi = None;
+        self.wheel_mode = None;
         if self.blocked() {
             return;
         }
@@ -1916,6 +2077,7 @@ impl<B: WindowBackend> Engine<B> {
         if self.blocked() || self.drag.is_some() {
             return;
         }
+        self.clear_scroll_state();
         let focused = self.backend.foreground();
         if self.owning(focused).is_some() {
             self.select(focused)
@@ -2431,6 +2593,7 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Suspend(v) => {
+                self.clear_scroll_state();
                 let _ = self.clear();
                 self.locked = v;
                 if !v {
@@ -2438,6 +2601,7 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Topology => {
+                self.clear_scroll_state();
                 self.drag = None;
                 let _ = self.clear();
                 self.deadline = Some(Instant::now() + Duration::from_millis(1500))
@@ -2566,6 +2730,60 @@ fn clip(a: Rect, b: Rect) -> Option<Rect> {
 fn contains(r: Rect, p: (i32, i32)) -> bool {
     p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
 }
+/// Universal strip-scroll sensitivity: fraction of the active monitor's strip span traversed per
+/// inch of physical finger travel at `swipe_scroll_gain = 1.0` (`0.0375 * 4.0 = 15%` of viewport
+/// per inch). Derived dynamically from the contact frame's physical DPI (`None` for raw-unit
+/// digitizers, which stay independent of `cursor_dpi`) and the active strip's live span.
+const STRIP_SCROLL_VIEWPORT_PER_INCH_PER_GAIN: f64 = 0.0375;
+/// Universal group-roll sensitivity: deck steps per inch of physical finger travel at
+/// `swipe_scroll_gain = 1.0` (`0.138 * 4.0 ≈ 0.552` deck steps/inch, matching the external
+/// landscape reference feel across all display resolutions and DPIs).
+const GROUP_ROLL_STEPS_PER_INCH_PER_GAIN: f64 = 0.138;
+
+pub(crate) fn strip_scroll_px(signed_delta: f64, area_len: i32, contact_dpi: Option<f64>) -> f64 {
+    let inches = signed_delta / contact_dpi.unwrap_or(96.0).max(1.0);
+    inches * area_len.max(1) as f64 * STRIP_SCROLL_VIEWPORT_PER_INCH_PER_GAIN
+}
+
+pub(crate) fn group_roll_delta(signed_delta: f64, contact_dpi: Option<f64>) -> f64 {
+    let inches = signed_delta / contact_dpi.unwrap_or(96.0).max(1.0);
+    inches * GROUP_ROLL_STEPS_PER_INCH_PER_GAIN
+}
+
+/// Compute touchpad release velocity (finger units/s) from `(age_s, delta)` samples within the
+/// recent 100 ms window. Requires at least 2 samples and a recent newest sample (`<= 40 ms`, so a
+/// pause before lifting never counts as a fling), excluding the oldest sample's delta so `n - 1`
+/// deltas are divided by `n - 1` intervals symmetrically in both directions.
+pub(crate) fn scroll_fling_velocity(samples: &[(f64, f64)]) -> f64 {
+    if samples.len() < 2 {
+        return 0.0;
+    }
+    let newest = samples.iter().map(|&(a, _)| a).fold(f64::INFINITY, f64::min);
+    if newest > 0.04 {
+        return 0.0;
+    }
+    let oldest = samples.iter().map(|&(a, _)| a).fold(0.0f64, f64::max);
+    let sum: f64 = samples[1..].iter().map(|&(_, d)| d).sum();
+    let span = (oldest - newest).clamp(0.03, 0.10);
+    sum / span
+}
+
+/// Direction (`+1` next, `-1` prev) to advance on lift when a touchpad swipe exceeds both the
+/// fling speed threshold and minimum travel, honoring `natural` scroll direction symmetrically.
+pub(crate) fn fling_advance_direction(
+    speed: f64,
+    total_travel: f64,
+    natural: bool,
+    threshold: f64,
+    min_travel: f64,
+) -> Option<isize> {
+    if speed.abs() < threshold || total_travel.abs() < min_travel {
+        return None;
+    }
+    let signed = if natural { -speed } else { speed };
+    Some(if signed > 0.0 { 1 } else { -1 })
+}
+
 /// Smooth time-based edge-scroll step during a drag: at most one step per display refresh,
 /// advancing at a steady pixel/second velocity with fractional carry and per-tick clamping.
 pub(crate) fn edge_scroll_step(
@@ -2699,6 +2917,9 @@ pub fn run() -> Result<()> {
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),
         scroll_samples: Default::default(),
+        scroll_start_focus: None,
+        scroll_dpi: None,
+        wheel_mode: None,
         inertia: None,
         v_travel: 0.,
         hopped: false,

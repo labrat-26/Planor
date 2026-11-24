@@ -126,7 +126,7 @@ Planor's strip already does the job virtual desktops usually do, and windows hid
 
 **On a touchpad,** slide **three fingers sideways**. The strip follows your fingers, and the window nearest the middle becomes the focused one. A fast swipe keeps gliding for a moment after you lift, like a phone list.
 
-**With a mouse,** hold <kbd>Win</kbd> and turn the **mouse wheel**. Every notch moves the strip one fixed step. Watch the animation: the touchpad turns into a mouse halfway through to show the second way.
+**With a mouse,** hold <kbd>Win</kbd> and turn the **mouse wheel**. Every notch moves the strip one fixed step (or cycles through a focused stack; hold <kbd>Shift</kbd> to do the opposite). Watch the animation: the touchpad turns into a mouse halfway through to show the second way.
 
 <p align="center">
   <img src="docs/img/gesture-scroll.svg" alt="Animation: three fingers swipe the touchpad and the strip scrolls; the touchpad turns into a mouse and the wheel scrolls the strip too" width="800">
@@ -150,7 +150,7 @@ Pick a window up with **four fingers** (or drag it with the mouse), then drop it
 
 Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window.
 
-**Switching inside a stack.** Once windows are stacked, the slot shows them as a **vertical list**. The purple box marks the one you are looking at. **Swipe three fingers up or down**, or press <kbd>Alt</kbd>+<kbd>↓</kbd> / <kbd>Alt</kbd>+<kbd>↑</kbd>, to move the selection, and the window in the slot changes with it. With a mouse, hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the wheel.
+**Switching inside a stack.** Once windows are stacked, the slot shows them as a **vertical list**. The purple box marks the one you are looking at. **Swipe three fingers up or down**, or press <kbd>Alt</kbd>+<kbd>↓</kbd> / <kbd>Alt</kbd>+<kbd>↑</kbd>, to move the selection, and the window in the slot changes with it. With a mouse, hold <kbd>Win</kbd> and turn the wheel while the stack is focused (hold <kbd>Win</kbd>+<kbd>Shift</kbd> and turn the wheel to scroll the strip past the stack).
 
 <p align="center">
   <img src="docs/img/stack-switch.svg" alt="Animation: a stack lists its windows vertically and the selection steps down through them" width="800">
@@ -236,8 +236,8 @@ The thin slivers at the screen edges are **peeks**. They show that more windows 
 
 | Action | What it does |
 |---|---|
-| <kbd>Win</kbd> + wheel | Scroll the strip under the pointer |
-| <kbd>Win</kbd>+<kbd>Shift</kbd> + wheel | Roll through the focused stack |
+| <kbd>Win</kbd> + wheel | Scroll the strip under the pointer, or roll through the focused stack |
+| <kbd>Win</kbd>+<kbd>Shift</kbd> + wheel | Do the opposite (scroll the strip when a stack is focused, or roll a stack) |
 | Drag a window by its title bar, drop on another | Swap or stack (see above) |
 | Click a peek at the screen edge | Bring that window into view |
 

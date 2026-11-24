@@ -921,18 +921,17 @@ fn n023_win_wheel_scrolls_the_strip_under_the_cursor_on_both_orientations() {
     settle_now(&mut h);
     let s = &h.engine.strips[&port];
     assert_eq!(h.desktop.foreground(), s.active().unwrap(), "focus settles on the window the wheel brought in");
-    // Win + Shift + wheel rolls the focused group.
+    // Win + wheel rolls the focused group (#35); Win + Shift + wheel scrolls the strip instead.
     focus(&mut h, 101);
     h.cmd(Command::Key { name: "stack_toggle".into() });
     h.settle();
     let s = &h.engine.strips[&land];
     assert!(s.columns[s.focus].members.len() >= 2);
     let active = s.active();
-    wheel(&mut h, 120, false, true, 900, 500);
-    wheel(&mut h, 120, false, true, 900, 500);
+    wheel(&mut h, 120, false, false, 900, 500);
     settle_now(&mut h);
     let s = &h.engine.strips[&land];
-    assert_ne!(s.active(), active, "Win+Shift+wheel rolled the group");
+    assert_ne!(s.active(), active, "Win+wheel rolled the focused group");
     h.stop_clean();
 }
 
@@ -1428,13 +1427,13 @@ fn high_refresh_and_vrr_momentum_steps_smoothly_on_both_orientations() {
             let before = h.engine.strips[&key].offset;
             // Drive an active momentum inertia state and advance fast_tick intervals.
             let vertical = mon == "MON2";
-            h.engine.inertia = Some((vertical, -1200.0, Instant::now() - Duration::from_millis(8)));
+            h.engine.inertia = Some((vertical, -1200.0, Instant::now() - Duration::from_millis(8), Some(96.0)));
             assert!(h.engine.wants_fast_tick(), "{mon}@{hz}Hz wants fast tick during inertia");
             for _ in 0..4 {
                 h.engine.fast_tick();
                 h.settle_quiet();
-                if let Some((v, s, _)) = h.engine.inertia {
-                    h.engine.inertia = Some((v, s, Instant::now() - Duration::from_millis(planor::pacing::fast_tick_ms(hz))));
+                if let Some((v, s, _, d)) = h.engine.inertia {
+                    h.engine.inertia = Some((v, s, Instant::now() - Duration::from_millis(planor::pacing::fast_tick_ms(hz)), d));
                 }
             }
             let after = h.engine.strips[&key].offset;
@@ -2185,6 +2184,565 @@ fn fast_tick_drives_smooth_refresh_paced_edge_scroll() {
     h.desktop.0.lock().unwrap().cursor = (500, 500);
     h.engine.fast_tick();
     assert!(!h.engine.wants_fast_tick(), "leaving edge zone must disarm fast_tick");
+    h.stop_clean();
+}
+
+#[test]
+fn win_wheel_cycles_group_members_and_burst_never_traps_on_both_orientations() {
+    // Repro of #35 (bundle 000625060) + Finding #5:
+    // - Focused group: plain Win+wheel cycles members (clamping cleanly at pair ends, wrapping on 3+);
+    //   Win+Shift+wheel does the opposite (scrolls the strip away from the group).
+    // - Focused ungrouped column: plain Win+wheel scrolls the strip, and a burst that scrolls across
+    //   a group keeps scrolling the strip without getting trapped.
+    for (mon, w1, _w2, w3, cursor) in [
+        ("MON0", 101, 102, 103, (500, 500)),
+        ("MON2", 301, 302, 303, (-700, 500)),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            three_per_monitor(sim);
+            // Add a 4th window on each monitor so the strip has scrollable overflow even with a 2-window group.
+            sim.add_window(SimWindow::new(104, Rect { x: 1000, y: 100, w: 600, h: 400 }));
+            sim.add_window(SimWindow::new(304, Rect { x: -1300, y: 1600, w: 900, h: 400 }));
+        });
+        let key = (h.engine.desktop.unwrap(), mon.to_string());
+        focus(&mut h, w1);
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let s = &h.engine.strips[&key];
+        assert_eq!(s.columns[s.focus].members.len(), 2, "{mon}: col 0 is a 2-window pair");
+        let first_active = s.active().unwrap();
+        let first_idx = s.columns[s.focus].active;
+        let step_delta = if first_idx == 0 { -120 } else { 120 };
+
+        // 1. Plain Win+wheel on focused 2-window pair cycles to the other member.
+        h.engine.event(Event::Wheel { delta: step_delta, tilt: false, shift: false, x: cursor.0, y: cursor.1 });
+        h.settle();
+        let second_active = h.engine.strips[&key].active().unwrap();
+        assert_ne!(second_active, first_active, "{mon}: Win+Scroll cycles pair member");
+
+        // 2. Another notch in the same direction hits the pair end: no wrap, no dead scene.
+        let scenes_at_end = h.desktop.0.lock().unwrap().scenes.len();
+        h.engine.event(Event::Wheel { delta: step_delta, tilt: false, shift: false, x: cursor.0, y: cursor.1 });
+        h.settle();
+        assert_eq!(h.engine.strips[&key].active().unwrap(), second_active, "{mon}: pair clamps at end");
+        assert_eq!(h.desktop.0.lock().unwrap().scenes.len(), scenes_at_end, "{mon}: clamped pair end emits no dead scene");
+
+        // 3. Opposite notch returns to first member.
+        h.engine.event(Event::Wheel { delta: -step_delta, tilt: false, shift: false, x: cursor.0, y: cursor.1 });
+        h.settle();
+        assert_eq!(h.engine.strips[&key].active().unwrap(), first_active, "{mon}: opposite Win+Scroll returns");
+
+        // 4. Win+Shift+wheel on a focused group does the opposite: scrolls the strip!
+        let off_before = h.engine.strips[&key].offset;
+        h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: true, x: cursor.0, y: cursor.1 });
+        h.settle();
+        assert!(h.engine.strips[&key].offset > off_before, "{mon}: Win+Shift+wheel scrolls strip away from focused group");
+        settle_now(&mut h);
+
+        // 5. Focused ungrouped column (w3): plain Win+wheel scrolls the strip, and a burst scrolling back
+        //    across the group at col 0 keeps scrolling the strip without getting trapped rolling the group.
+        focus(&mut h, w3);
+        let group_active_before = h.engine.strips[&key].columns[0].active;
+        let off_start = h.engine.strips[&key].offset;
+        // Scroll back toward col 0 in a multi-notch burst (without settling between notches).
+        for _ in 0..6 {
+            h.engine.event(Event::Wheel { delta: 120, tilt: false, shift: false, x: cursor.0, y: cursor.1 });
+        }
+        h.settle();
+        assert!(h.engine.strips[&key].offset < off_start, "{mon}: ungrouped Win+wheel scrolls strip");
+        assert_eq!(
+            h.engine.strips[&key].columns[0].active, group_active_before,
+            "{mon}: strip-scroll burst across group must not get trapped rolling the group"
+        );
+        settle_now(&mut h);
+
+        // 6. 3-member group: plain Win+wheel wraps around all 3 members.
+        focus(&mut h, w3);
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let group_col = h.engine.strips[&key].focus;
+        assert_eq!(h.engine.strips[&key].columns[group_col].members.len(), 3, "{mon}: 3-member group");
+        let start_id = h.engine.strips[&key].active().unwrap();
+        let mut seen = vec![start_id];
+        for _ in 0..3 {
+            h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: cursor.0, y: cursor.1 });
+            h.settle();
+            seen.push(h.engine.strips[&key].active().unwrap());
+        }
+        assert_eq!(seen.last().copied(), Some(start_id), "{mon}: 3-member group wraps back to start after 3 notches");
+        assert_eq!(seen[0..3].iter().collect::<std::collections::HashSet<_>>().len(), 3, "{mon}: visits all 3 members");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn touchpad_fling_velocity_edges_shipped_inertia_one_motion_and_wrapping() {
+    // Covers #16, #45, and Findings #1, #2, #3, #4, #8, #9.
+    use crate::daemon::{fling_advance_direction, scroll_fling_velocity};
+
+    // Finding #3: velocity edge cases (pause-then-lift, single report, slow drag, short flick, symmetry).
+    assert_eq!(scroll_fling_velocity(&[(0.0, 25.0)]), 0.0, "single report must not be a fling");
+    assert_eq!(
+        scroll_fling_velocity(&[(0.09, 30.0), (0.06, 30.0)]),
+        0.0,
+        "pause >40ms before lift must not be a fling"
+    );
+    let v_slow = scroll_fling_velocity(&[(0.09, 2.0), (0.06, 2.0), (0.03, 2.0), (0.0, 2.0)]);
+    assert_eq!(fling_advance_direction(v_slow, 8.0, true, 250.0, 18.0), None, "slow drag must not fling");
+    assert_eq!(
+        fling_advance_direction(500.0, 10.0, true, 250.0, 18.0),
+        None,
+        "tiny travel below min_travel must not fling"
+    );
+    let v_right = scroll_fling_velocity(&[(0.06, 30.0), (0.03, 30.0), (0.0, 30.0)]);
+    let v_left = scroll_fling_velocity(&[(0.06, -30.0), (0.03, -30.0), (0.0, -30.0)]);
+    assert!((v_right + v_left).abs() < 1e-9, "velocity must be exactly symmetric left vs right");
+    assert!((v_right - 1000.0).abs() < 1e-6, "n-1 deltas over n-1 intervals: 60 / 0.06 = 1000");
+    assert_eq!(fling_advance_direction(v_right, 90.0, true, 250.0, 18.0), Some(-1));
+    assert_eq!(fling_advance_direction(v_left, -90.0, true, 250.0, 18.0), Some(1));
+    assert_eq!(fling_advance_direction(v_right, 90.0, false, 250.0, 18.0), Some(1));
+    assert_eq!(fling_advance_direction(v_left, -90.0, false, 250.0, 18.0), Some(-1));
+
+    // Finding #4: Shipped default config (`swipe_inertia = true`): fast flick under 50% on a 3-column
+    // strip advances directly to the adjacent column in ONE continuous motion (no inertia pause/second slide,
+    // and never skips past the next window).
+    let mut shipped_cfg = test_cfg();
+    shipped_cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(true);
+    shipped_cfg["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    shipped_cfg["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(4.0);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), shipped_cfg, three_per_monitor);
+    let k0 = (h.engine.desktop.unwrap(), "MON0".to_string());
+    // Make col 2 wide (1600px) so a short flick under 50% keeps focus == 2 before lift (matching bundle 212643035).
+    h.engine.strips.get_mut(&k0).unwrap().columns[2].length = 1600;
+    focus(&mut h, 103); // rightmost column (col 2 of [101, 102, 103])
+    let pts = |x: f64| vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)];
+
+    // Fast flick right (natural -> toward col 1), releasing well under 50%.
+    h.engine.event(Event::Contacts(pts(100.0)));
+    h.engine.event(Event::Contacts(pts(115.0)));
+    h.engine.event(Event::Contacts(pts(135.0)));
+    h.engine.event(Event::Contacts(pts(155.0)));
+    assert_eq!(h.engine.strips[&k0].focus, 2, "still col 2 before lift");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].focus, 1, "shipped inertia=true fling advances directly to col 1, never skipping to col 0");
+    assert!(h.engine.inertia.is_none(), "one-motion fling must not leave decaying inertia");
+    assert!(h.engine.settle.is_none(), "one-motion fling must not wait on a settle pause");
+
+    // Symmetric fast flick left (natural -> toward col 2).
+    h.engine.event(Event::Contacts(pts(200.0)));
+    h.engine.event(Event::Contacts(pts(185.0)));
+    h.engine.event(Event::Contacts(pts(165.0)));
+    h.engine.event(Event::Contacts(pts(145.0)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].focus, 2, "symmetric fling advances directly back to col 2");
+    assert!(h.engine.inertia.is_none());
+    assert!(h.engine.settle.is_none());
+
+    // Boundary-clamped inertia stops immediately without emitting redundant no-op scenes.
+    focus(&mut h, 103);
+    let scenes_before = h.desktop.0.lock().unwrap().scenes.len();
+    h.engine.inertia = Some((false, -800.0, Instant::now() - Duration::from_millis(16), Some(96.0)));
+    h.engine.fast_tick();
+    assert!(h.engine.inertia.is_none(), "inertia clamped at strip boundary must stop immediately");
+    assert_eq!(h.desktop.0.lock().unwrap().scenes.len(), scenes_before, "clamped inertia emits no redundant scenes");
+
+    // Finding #2: focus key and Win+wheel during inertia clear inertia/scroll state immediately.
+    h.engine.inertia = Some((false, 600.0, Instant::now() - Duration::from_millis(16), Some(96.0)));
+    h.cmd(Command::Key { name: "focus_left".into() });
+    h.settle();
+    assert!(h.engine.inertia.is_none(), "focus key must cancel active inertia");
+    assert!(h.engine.scroll_start_focus.is_none(), "focus key must clear scroll_start_focus");
+
+    h.engine.inertia = Some((false, 600.0, Instant::now() - Duration::from_millis(16), Some(96.0)));
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 500, y: 500 });
+    h.settle();
+    assert!(h.engine.inertia.is_none(), "Win+wheel must cancel active inertia");
+    settle_now(&mut h);
+
+    // Finding #1: monitor hop (portrait MON2 -> landscape MON0 and back) with fast lift must NOT advance
+    // focus on the landed monitor.
+    focus(&mut h, 301);
+    let mon0_active_before = h.engine.strips[&k0].active().unwrap();
+    // Sideways swipe right on portrait MON2 (cross-axis) hops right to MON0.
+    let hop_pts = |x: f64| vec![(x, 300.0), (x + 20.0, 300.0), (x + 40.0, 300.0)];
+    h.engine.event(Event::Contacts(hop_pts(200.0)));
+    h.engine.event(Event::Contacts(hop_pts(150.0)));
+    h.engine.event(Event::Contacts(hop_pts(90.0)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    settle_now(&mut h);
+    assert_eq!(h.engine.active, "MON0", "fast cross-axis swipe from MON2 hops to MON0");
+    assert_eq!(
+        h.engine.strips[&k0].active().unwrap(),
+        mon0_active_before,
+        "hop with fast lift must land on MON0's active window without an extra column advance"
+    );
+
+    // Finding #9: 3-member wrapping group fling past last member wraps to member 0 (and 0 -> 2).
+    focus(&mut h, 101);
+    h.cmd(Command::Key { name: "stack_toggle".into() });
+    h.settle();
+    focus(&mut h, 103);
+    h.cmd(Command::Key { name: "stack_toggle".into() });
+    h.settle();
+    let last_id = {
+        let s = &h.engine.strips[&k0];
+        assert_eq!(s.columns[0].members.len(), 3);
+        s.columns[0].members[2]
+    };
+    focus(&mut h, last_id);
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 2);
+    let vpts = |y: f64| vec![(200.0, y), (220.0, y), (240.0, y)];
+    // Fast upward flick under 50% (natural -> dir = +1) wraps from member 2 -> 0 in one motion.
+    h.engine.event(Event::Contacts(vpts(300.0)));
+    h.engine.event(Event::Contacts(vpts(285.0)));
+    h.engine.event(Event::Contacts(vpts(265.0)));
+    h.engine.event(Event::Contacts(vpts(245.0)));
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 2, "still member 2 before lift");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 0, "3-member group fling wraps 2 -> 0");
+
+    // Fast downward flick under 50% (natural -> dir = -1) wraps from member 0 -> 2 in one motion.
+    h.engine.event(Event::Contacts(vpts(200.0)));
+    h.engine.event(Event::Contacts(vpts(215.0)));
+    h.engine.event(Event::Contacts(vpts(235.0)));
+    h.engine.event(Event::Contacts(vpts(255.0)));
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 0, "still member 0 before lift");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 2, "3-member group fling wraps 0 -> 2");
+    h.stop_clean();
+
+    // Finding #8: fitting 2- and 3-column strip (max_offset == 0) flings symmetrically left and right.
+    for n_cols in [2usize, 3] {
+        let mut cfg = test_cfg();
+        cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(true);
+        cfg["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+        let mut hf = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+            for i in 0..n_cols {
+                sim.add_window(SimWindow::new(501 + i as isize, Rect { x: 100 * i as i32, y: 100, w: 500, h: 400 }));
+            }
+        });
+        let kf = (hf.engine.desktop.unwrap(), "MON0".to_string());
+        {
+            let s = hf.engine.strips.get_mut(&kf).unwrap();
+            let col_w = (s.area.w - s.gap * (n_cols as i32 - 1)) / n_cols as i32;
+            for c in &mut s.columns {
+                c.length = col_w;
+            }
+            s.offset = 0;
+            s.focus = 0;
+        }
+        hf.desktop.0.lock().unwrap().foreground = 501;
+        // Fling left (natural -> +1): 0 -> 1.
+        hf.engine.event(Event::Contacts(pts(200.0)));
+        hf.engine.event(Event::Contacts(pts(175.0)));
+        hf.engine.event(Event::Contacts(pts(145.0)));
+        hf.engine.event(Event::Contacts(pts(115.0)));
+        hf.engine.event(Event::Contacts(vec![]));
+        hf.settle();
+        assert_eq!(hf.engine.strips[&kf].focus, 1, "fitting {n_cols}-col strip: fling +1 advances 0 -> 1");
+        if n_cols == 3 {
+            // Fling +1 again: 1 -> 2.
+            hf.engine.event(Event::Contacts(pts(200.0)));
+            hf.engine.event(Event::Contacts(pts(175.0)));
+            hf.engine.event(Event::Contacts(pts(145.0)));
+            hf.engine.event(Event::Contacts(pts(115.0)));
+            hf.engine.event(Event::Contacts(vec![]));
+            hf.settle();
+            assert_eq!(hf.engine.strips[&kf].focus, 2, "fitting 3-col strip: fling +1 advances 1 -> 2");
+            // Fling -1: 2 -> 1.
+            hf.engine.event(Event::Contacts(pts(100.0)));
+            hf.engine.event(Event::Contacts(pts(125.0)));
+            hf.engine.event(Event::Contacts(pts(155.0)));
+            hf.engine.event(Event::Contacts(pts(185.0)));
+            hf.engine.event(Event::Contacts(vec![]));
+            hf.settle();
+            assert_eq!(hf.engine.strips[&kf].focus, 1, "fitting 3-col strip: fling -1 advances 2 -> 1");
+        }
+        // Fling -1: 1 -> 0.
+        hf.engine.event(Event::Contacts(pts(100.0)));
+        hf.engine.event(Event::Contacts(pts(125.0)));
+        hf.engine.event(Event::Contacts(pts(155.0)));
+        hf.engine.event(Event::Contacts(pts(185.0)));
+        hf.engine.event(Event::Contacts(vec![]));
+        hf.settle();
+        assert_eq!(hf.engine.strips[&kf].focus, 0, "fitting {n_cols}-col strip: fling -1 advances 1 -> 0");
+        hf.stop_clean();
+    }
+}
+
+#[test]
+fn touchpad_scroll_matches_external_reference_across_dpis_and_preserves_drag() {
+    // Repro of #47 (bundle 001541529) + Round 2 Findings #4, #5, #6:
+    // - 2560px @ 96 DPI matches previous external-monitor feel 1:1 (384 px / inch at gain=4.0 = 15% viewport/inch).
+    // - 1920px @ 144 DPI laptop (and 3840px @ 192 DPI 4K) traverses the exact same 15% of viewport per inch.
+    // - Raw-unit digitizer (`contact_dpi = None`) does not divide by cursor_dpi.
+    // - Group roll normalizes to physical inches across DPIs/heights.
+    // - Physical fling/inertia thresholds make the same decision at 96, 144, and 192 DPI.
+    // - Captured DPI persists across pointer crossing monitors during inertia.
+    use crate::daemon::{fling_advance_direction, group_roll_delta, strip_scroll_px};
+
+    let ext_px = strip_scroll_px(96.0 * 4.0, 2560, Some(96.0));
+    let lap_px = strip_scroll_px(144.0 * 4.0, 1920, Some(144.0));
+    let lap_cursor_on_ext_px = strip_scroll_px(96.0 * 4.0, 1920, Some(96.0));
+    let uhd_px = strip_scroll_px(192.0 * 4.0, 3840, Some(192.0));
+    let raw_px = strip_scroll_px(96.0 * 4.0, 2560, None);
+    assert!((ext_px - 384.0).abs() < 1e-6, "2560px @ 96 DPI preserves 384 px/in external feel (got {ext_px})");
+    assert!((ext_px / 2560.0 - 0.15).abs() < 1e-6);
+    assert!((lap_px / 1920.0 - 0.15).abs() < 1e-6, "1920px @ 144 DPI matches 15% viewport/in");
+    assert!((lap_cursor_on_ext_px / 1920.0 - 0.15).abs() < 1e-6, "cursor monitor DPI must not skew laptop scroll");
+    assert!((uhd_px / 3840.0 - 0.15).abs() < 1e-6, "universal across arbitrary resolutions/DPIs (4K @ 200%)");
+    assert!((raw_px - 384.0).abs() < 1e-6, "raw-unit digitizer (None) is independent of cursor DPI");
+
+    // Round 2 Finding #5: group roll normalized to physical inches across DPIs.
+    let roll_96 = group_roll_delta(96.0 * 4.0, Some(96.0));
+    let roll_144 = group_roll_delta(144.0 * 4.0, Some(144.0));
+    let roll_192 = group_roll_delta(192.0 * 4.0, Some(192.0));
+    assert!((roll_96 - roll_144).abs() < 1e-9 && (roll_96 - roll_192).abs() < 1e-9, "group roll identical across DPIs");
+    assert!((roll_96 - 0.552).abs() < 0.002, "matches external landscape reference (~0.552 steps/in)");
+
+    // Round 2 Finding #4: same physical flick (in/s and inches) makes the exact same fling decision at 96/144/192 DPI.
+    for dpi in [96.0, 144.0, 192.0] {
+        // Below threshold: 2.0 in/s, 0.25 in -> None at every DPI.
+        let slow_speed = 2.0 * dpi;
+        let travel = 0.25 * dpi;
+        assert_eq!(
+            fling_advance_direction(slow_speed / dpi, travel / dpi, true, 250.0 / 96.0, 18.0 / 96.0),
+            None,
+            "2.0 in/s must not fling at {dpi} DPI"
+        );
+        // Above threshold: 3.0 in/s, 0.25 in -> Some(-1) at every DPI.
+        let fast_speed = 3.0 * dpi;
+        assert_eq!(
+            fling_advance_direction(fast_speed / dpi, travel / dpi, true, 250.0 / 96.0, 18.0 / 96.0),
+            Some(-1),
+            "3.0 in/s must fling identically at {dpi} DPI"
+        );
+    }
+
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(4.0);
+
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    let k0 = (h.engine.desktop.unwrap(), "MON0".to_string());
+    let k1 = (h.engine.desktop.unwrap(), "MON1".to_string());
+    to_start(&mut h, "MON0");
+    to_start(&mut h, "MON1");
+
+    // 0.5-inch physical swipe on 144 DPI laptop (MON0, 1920px): input.rs emits 72 units.
+    focus(&mut h, 101);
+    h.desktop.0.lock().unwrap().contact_dpi = Some(144.0);
+    let pts = |x: f64| vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)];
+    h.engine.event(Event::Contacts(pts(300.0)));
+    h.engine.event(Event::Contacts(pts(276.0))); // -24
+    h.engine.event(Event::Contacts(pts(228.0))); // -48
+    let frac0 = h.engine.strips[&k0].offset as f64 / h.engine.strips[&k0].area.w as f64;
+    h.engine.event(Event::Contacts(vec![]));
+    settle_now(&mut h);
+
+    // Identical 0.5-inch physical swipe on 96 DPI external landscape (MON1, 2560px): input.rs emits 48 units.
+    focus(&mut h, 201);
+    h.desktop.0.lock().unwrap().contact_dpi = Some(96.0);
+    h.engine.event(Event::Contacts(pts(300.0)));
+    h.engine.event(Event::Contacts(pts(284.0))); // -16
+    h.engine.event(Event::Contacts(pts(252.0))); // -32
+    let frac1 = h.engine.strips[&k1].offset as f64 / h.engine.strips[&k1].area.w as f64;
+    h.engine.event(Event::Contacts(vec![]));
+    settle_now(&mut h);
+
+    assert!(frac0 > 0.05 && frac1 > 0.05);
+    assert!(
+        (frac0 - frac1).abs() < 0.015,
+        "same physical swipe scrolls same viewport fraction on 144 DPI laptop ({frac0:.4}) and 96 DPI external ({frac1:.4})"
+    );
+
+    // Round 2 Finding #6: pointer crossing monitors (changing backend.contact_dpi) during inertia
+    // must keep the captured DPI for the entire coast.
+    to_start(&mut h, "MON0");
+    focus(&mut h, 101);
+    h.engine.inertia = Some((false, -600.0, Instant::now() - Duration::from_millis(16), Some(144.0)));
+    h.desktop.0.lock().unwrap().contact_dpi = Some(96.0); // pointer crossed to 96 DPI monitor mid-coast
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.inertia.map(|i| i.3),
+        Some(Some(144.0)),
+        "inertia must retain captured gesture DPI even if pointer crosses monitors mid-coast"
+    );
+    h.engine.inertia = None;
+
+    // 4-finger drag on 144 DPI laptop still enters pad drag normally.
+    focus(&mut h, 101);
+    h.desktop.0.lock().unwrap().contact_dpi = Some(144.0);
+    h.engine.event(Event::Contacts(vec![(200.0, 200.0); 4]));
+    h.engine.event(Event::Contacts(vec![(230.0, 200.0); 4]));
+    assert!(h.engine.pad.is_some(), "4-finger drag must still trigger normally at 144 DPI");
+    h.engine.event(Event::Contacts(vec![]));
+    settle_now(&mut h);
+    h.stop_clean();
+}
+
+#[test]
+fn round2_blocking_regressions_half_roll_settle_group_flings_and_wheel_mode_expiry() {
+    // Round 2 Finding #1: cancelling a pending scroll (focus key, inertia, or wheel) must settle half-rolled frac to 0.
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    let k0 = (h.engine.desktop.unwrap(), "MON0".to_string());
+    let k1 = (h.engine.desktop.unwrap(), "MON1".to_string());
+    focus(&mut h, 101);
+    h.cmd(Command::Key { name: "stack_toggle".into() });
+    h.settle();
+    focus(&mut h, 103);
+    h.cmd(Command::Key { name: "stack_toggle".into() });
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[0].members.len(), 3);
+
+    // 1a. Half-rolled (frac = 0.4) with settle pending -> focus key clears settle AND settles frac to 0.
+    h.engine.strips.get_mut(&k0).unwrap().columns[0].frac = 0.4;
+    h.engine.settle = Some(Instant::now() + Duration::from_millis(200));
+    h.cmd(Command::Key { name: "focus_right".into() });
+    h.settle();
+    assert!(
+        h.engine.strips[&k0].columns.iter().all(|c| c.frac == 0.0),
+        "focus key during pending settle must settle half-rolled frac to 0"
+    );
+
+    // 1b. Half-rolled during active inertia -> focus key settles frac to 0.
+    focus(&mut h, 101);
+    h.engine.strips.get_mut(&k0).unwrap().columns[0].frac = 0.4;
+    h.engine.inertia = Some((true, 300.0, Instant::now() - Duration::from_millis(16), Some(96.0)));
+    h.cmd(Command::Key { name: "focus_right".into() });
+    h.settle();
+    assert!(
+        h.engine.strips[&k0].columns.iter().all(|c| c.frac == 0.0),
+        "focus key during inertia must settle half-rolled frac to 0"
+    );
+
+    // 1c. Half-rolled with settle pending -> Win+wheel settles frac to 0.
+    focus(&mut h, 101);
+    h.engine.strips.get_mut(&k0).unwrap().columns[0].frac = 0.4;
+    h.engine.settle = Some(Instant::now() + Duration::from_millis(200));
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: true, x: 500, y: 500 });
+    h.settle();
+    assert!(
+        h.engine.strips[&k0].columns.iter().all(|c| c.frac == 0.0),
+        "Win+wheel during pending settle must settle half-rolled frac to 0"
+    );
+    settle_now(&mut h);
+
+    // Round 2 Finding #2a: Wrapping 3-deck fling at frac = 0.7 forward & backward must land on exact
+    // adjacent member (never double-skip a member!).
+    let m0 = h.engine.strips[&k0].columns[0].members[0];
+    let vpts = |y: f64| vec![(200.0, y), (220.0, y), (240.0, y)];
+    // Forward (+1) from member 0 with enough live travel to reach frac ≈ 0.7 (> 0.5) before lift:
+    focus(&mut h, m0);
+    h.engine.event(Event::Contacts(vpts(400.0)));
+    h.engine.event(Event::Contacts(vpts(360.0)));
+    h.engine.event(Event::Contacts(vpts(315.0)));
+    h.engine.event(Event::Contacts(vpts(275.0))); // -125 -> ~0.72 steps (> 0.5)
+    assert!(h.engine.strips[&k0].columns[0].frac > 0.5, "live roll crossed 0.5 before lift");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 1, "3-deck forward fling at frac>0.5 lands on 1 (no skip to 2)");
+    assert_eq!(h.engine.strips[&k0].columns[0].frac, 0.0);
+
+    // Backward (-1) from member 1 with live travel reaching frac < -0.5 before lift -> lands on 0 (no skip to 2):
+    h.engine.event(Event::Contacts(vpts(200.0)));
+    h.engine.event(Event::Contacts(vpts(240.0)));
+    h.engine.event(Event::Contacts(vpts(285.0)));
+    h.engine.event(Event::Contacts(vpts(325.0)));
+    assert!(h.engine.strips[&k0].columns[0].frac < -0.5, "live backward roll crossed -0.5 before lift");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[0].active, 0, "3-deck backward fling at frac<-0.5 lands on 0 (no skip to 2)");
+    assert_eq!(h.engine.strips[&k0].columns[0].frac, 0.0);
+
+    // Round 2 Finding #2b: 2-member pair fling 0->1 and 1->0, both under 50% and over 50%.
+    h.cmd(Command::Key { name: "stack_toggle".into() }); // ungroup m0 -> remaining 2-member pair in col 0
+    h.settle();
+    let pair_col = h.engine.strips[&k0].columns.iter().position(|c| c.members.len() == 2).unwrap();
+    let p0 = h.engine.strips[&k0].columns[pair_col].members[0];
+    let p1 = h.engine.strips[&k0].columns[pair_col].members[1];
+    // Pair 0 -> 1 under 50%:
+    focus(&mut h, p0);
+    h.engine.event(Event::Contacts(vpts(300.0)));
+    h.engine.event(Event::Contacts(vpts(280.0)));
+    h.engine.event(Event::Contacts(vpts(255.0)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[pair_col].active, 1, "pair 0->1 under 50% flings to 1");
+    // Pair 1 -> 0 under 50% (backward roll sets active=0, frac~0.75 before lift; must still fling cleanly to 0!):
+    focus(&mut h, p1);
+    h.engine.event(Event::Contacts(vpts(200.0)));
+    h.engine.event(Event::Contacts(vpts(220.0)));
+    h.engine.event(Event::Contacts(vpts(245.0)));
+    assert!(h.engine.strips[&k0].columns[pair_col].frac > 0.5, "pair backward roll under 50% has frac > 0.5");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[pair_col].active, 0, "pair 1->0 under 50% flings cleanly to 0");
+    assert!(h.engine.inertia.is_none(), "pair 1->0 fling is one motion, no inertia fallback");
+    // Pair 0 -> 1 over 50%:
+    h.engine.event(Event::Contacts(vpts(400.0)));
+    h.engine.event(Event::Contacts(vpts(355.0)));
+    h.engine.event(Event::Contacts(vpts(305.0)));
+    h.engine.event(Event::Contacts(vpts(265.0)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[pair_col].active, 1, "pair 0->1 over 50% lands on 1");
+    // Pair 1 -> 0 over 50%:
+    h.engine.event(Event::Contacts(vpts(200.0)));
+    h.engine.event(Event::Contacts(vpts(245.0)));
+    h.engine.event(Event::Contacts(vpts(295.0)));
+    h.engine.event(Event::Contacts(vpts(335.0)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert_eq!(h.engine.strips[&k0].columns[pair_col].active, 0, "pair 1->0 over 50% lands on 0");
+
+    // Round 2 Finding #3: wheel_mode must not go stale across monitors, after pair ends, or on Shift+wheel ungrouped.
+    // 3a. Hit pair end on MON0, then immediately wheel over MON1 (ungrouped): MON1 must scroll!
+    focus(&mut h, p0);
+    h.engine.event(Event::Wheel { delta: 120, tilt: false, shift: false, x: 500, y: 500 }); // clamped at pair start 0
+    to_start(&mut h, "MON1");
+    let mon1_before = h.engine.strips[&k1].offset;
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 2500, y: 500 });
+    h.settle();
+    assert!(
+        h.engine.strips[&k1].offset > mon1_before,
+        "wheel over MON1 after hitting pair end on MON0 must scroll MON1 strip, not stay stuck in roll mode"
+    );
+    settle_now(&mut h);
+
+    // 3b. Shift+wheel on an ungrouped column must not leave a stale roll mode behind.
+    to_start(&mut h, "MON1");
+    let mon1_before2 = h.engine.strips[&k1].offset;
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: true, x: 2500, y: 500 }); // ungrouped Shift+wheel
+    assert!(h.engine.wheel_mode.is_none(), "inapplicable roll mode must not be stored");
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 2500, y: 500 });
+    h.settle();
+    assert!(h.engine.strips[&k1].offset > mon1_before2, "subsequent plain wheel scrolls MON1");
+    settle_now(&mut h);
+
+    // 3c. Pair end on MON0, wait past 260ms window, switch focus to ungrouped col without FOREGROUND -> plain wheel scrolls.
+    focus(&mut h, p0);
+    h.engine.event(Event::Wheel { delta: 120, tilt: false, shift: false, x: 500, y: 500 });
+    if let Some((_, ref mut at, _, _)) = h.engine.wheel_mode {
+        *at = Instant::now() - Duration::from_millis(300);
+    }
+    let ungrouped_col = h.engine.strips[&k0].columns.iter().position(|c| c.members.len() == 1).unwrap();
+    h.engine.strips.get_mut(&k0).unwrap().focus = ungrouped_col;
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 500, y: 500 });
+    assert_eq!(
+        h.engine.wheel_mode.as_ref().map(|m| m.3),
+        Some(false),
+        "after 260ms window expires, wheel starts fresh burst in strip-scroll mode"
+    );
     h.stop_clean();
 }
 

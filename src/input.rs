@@ -28,9 +28,14 @@ pub fn bindings(hwnd: HWND, cfg: &toml::Value) -> Vec<String> {
                 }
             }
         }
-        if vk != 0 && unsafe { RegisterHotKey(hwnd, out.len() as i32 + 1, mods, vk) } != 0 {
+        if vk != 0
+            && mods != MOD_NOREPEAT
+            && unsafe { RegisterHotKey(hwnd, out.len() as i32 + 1, mods, vk) } != 0
+        {
             out.push(name.clone())
         } else {
+            // A modifier-less binding would swallow that key in every app; refuse it even if it
+            // reached the config through a hand edit.
             eprintln!("hotkey unavailable: {name}")
         }
     }
@@ -40,7 +45,7 @@ pub fn bindings(hwnd: HWND, cfg: &toml::Value) -> Vec<String> {
 /// contact of every report; WindowFromPoint can wait on the window under the cursor (a heavy browser
 /// mid-move), which stalled this thread and, through the mouse hook, all input. A monitor lookup never
 /// talks to another process.
-fn cursor_dpi() -> f64 {
+pub(crate) fn cursor_dpi() -> f64 {
     use windows_sys::Win32::{Graphics::Gdi::MonitorFromPoint, UI::HiDpi::GetDpiForMonitor};
     unsafe {
         let mut pt = POINT::default();
@@ -53,6 +58,14 @@ fn cursor_dpi() -> f64 {
 }
 /// While a gesture recording runs: pass 1-, 2- and 5-finger frames too (normally only 3 and 4 fingers reach the daemon).
 pub static RECORD_ALL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Physical DPI used to scale the most recent HID contact frame (`0` when the digitizer reported
+/// raw units with no physical cm/inch descriptor, so the daemon must not divide by `cursor_dpi`).
+static LAST_CONTACTS_DPI: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(96);
+
+pub(crate) fn last_contacts_dpi() -> Option<f64> {
+    let v = LAST_CONTACTS_DPI.load(std::sync::atomic::Ordering::Relaxed);
+    (v > 0).then_some(v as f64)
+}
 thread_local!{static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
 pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::InputContacts);
@@ -133,7 +146,40 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                         && usages[..used as usize].contains(&0x42)
                         && let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31))
                     {
-                        let scale=|usage|{let mut c=HIDP_VALUE_CAPS::default();let mut n=1;if HidP_GetSpecificValueCaps(HidP_Input,1,link,usage,&mut c,&mut n,prep)<0||c.LogicalMax<=c.LogicalMin||c.PhysicalMax<=c.PhysicalMin{return 1.}let exponent=(c.UnitsExp as i32&15)<<28>>28;let units=match c.Units{0x11=>dpi/2.54,0x13=>dpi,_=>return 1.};(c.PhysicalMax-c.PhysicalMin) as f64/(c.LogicalMax-c.LogicalMin) as f64*10f64.powi(exponent)*units};points.push((get(13,link,0x51).unwrap_or(link as u32),(x as f64*scale(0x30),y as f64*scale(0x31))))
+                        let mut has_physical_units = false;
+                        let mut scale = |usage| {
+                            let mut c = HIDP_VALUE_CAPS::default();
+                            let mut n = 1;
+                            if HidP_GetSpecificValueCaps(HidP_Input, 1, link, usage, &mut c, &mut n, prep) < 0
+                                || c.LogicalMax <= c.LogicalMin
+                                || c.PhysicalMax <= c.PhysicalMin
+                            {
+                                return 1.;
+                            }
+                            let exponent = (c.UnitsExp as i32 & 15) << 28 >> 28;
+                            let units = match c.Units {
+                                0x11 => {
+                                    has_physical_units = true;
+                                    dpi / 2.54
+                                }
+                                0x13 => {
+                                    has_physical_units = true;
+                                    dpi
+                                }
+                                _ => return 1.,
+                            };
+                            (c.PhysicalMax - c.PhysicalMin) as f64
+                                / (c.LogicalMax - c.LogicalMin) as f64
+                                * 10f64.powi(exponent)
+                                * units
+                        };
+                        let sx = scale(0x30);
+                        let sy = scale(0x31);
+                        LAST_CONTACTS_DPI.store(
+                            if has_physical_units { dpi.round().max(1.0) as u32 } else { 0 },
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                        points.push((get(13, link, 0x51).unwrap_or(link as u32), (x as f64 * sx, y as f64 * sy)));
                     }
                 }
             }
