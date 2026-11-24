@@ -126,7 +126,6 @@ unsafe extern "system" fn keyboard(code: i32, w: usize, l: isize) -> isize {
                 || KeyboardAndMouse::GetAsyncKeyState(0x5C) < 0
         };
         if k.vkCode == 0x57 && win {
-            diag::trace("Win+W seen by the keyboard hook");
             crate::note::open();
             // Pressing Win and releasing it with nothing in between opens the Start menu; a keystroke
             // that maps to nothing in between cancels that.
@@ -199,6 +198,7 @@ pub fn events(
     let test_mode = crate::test_mode();
     std::thread::spawn(move || unsafe {
         crate::perf::register_thread("events");
+        crate::priority::thread_above_normal();
         SetConsoleCtrlHandler(Some(ctrl), 1);
         let name = wide("Planor.Events");
         let inst = GetModuleHandleW(null());
@@ -272,6 +272,9 @@ pub fn events(
             // can block (touchpad parsing, window events).
             std::thread::spawn(move || {
                 crate::perf::register_thread("hooks");
+                // A low-level hook whose thread is preempted past the OS timeout is silently removed;
+                // HIGHEST keeps the callback ahead of ordinary app threads.
+                crate::priority::thread_highest();
                 let install = || {
                     let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
                     let keys = if note_hotkey {
@@ -448,6 +451,91 @@ pub fn class_of(id: isize) -> String {
     let mut class = [0u16; 128];
     let n = unsafe { GetClassNameW(id as HWND, class.as_mut_ptr(), 128) }.max(0) as usize;
     String::from_utf16_lossy(&class[..n])
+}
+pub fn is_cloaked(id: isize) -> bool {
+    unsafe {
+        let mut cloaked = 0u32;
+        DwmGetWindowAttribute(
+            id as HWND,
+            DWMWA_CLOAKED as _,
+            (&mut cloaked as *mut u32).cast(),
+            size_of::<u32>() as _,
+        ) >= 0
+            && cloaked != 0
+    }
+}
+pub fn is_hung(id: isize) -> bool {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn IsHungAppWindow(hwnd: HWND) -> i32;
+    }
+    unsafe { IsHungAppWindow(id as HWND) != 0 }
+}
+/// Returns `Some(true)` if the window's UI thread is responsive and currently in a move/size modal
+/// loop (`GUI_INMOVESIZE`), `Some(false)` if responsive and not in move/size, or `None` if the
+/// thread is hung/unresponsive or cannot be queried.
+pub fn in_movesize(id: isize) -> Option<bool> {
+    if is_hung(id) {
+        return None;
+    }
+    unsafe {
+        let tid = GetWindowThreadProcessId(id as HWND, null_mut());
+        if tid == 0 {
+            return None;
+        }
+        let mut info = GUITHREADINFO {
+            cbSize: size_of::<GUITHREADINFO>() as u32,
+            ..Default::default()
+        };
+        if GetGUIThreadInfo(tid, &mut info) == 0 {
+            return None;
+        }
+        Some((info.flags & GUI_INMOVESIZE) != 0)
+    }
+}
+/// Classes of top-level system flyouts and Planor's own floating UI that the focus-border overlay
+/// must never paint over when visible and uncloaked (Start menu, Search, Quick Settings, tray
+/// overflow, Win+W note box, Settings, Gesture Guide).
+pub fn is_overlay_occluder_class(class: &str) -> bool {
+    matches!(
+        class,
+        "Windows.UI.Core.CoreWindow"
+            | "XamlExplorerHostIslandWindow"
+            | "TopLevelWindowForOverflowXamlIsland"
+            | "Shell_InputSwitchTopLevelWindow"
+            | "NotifyIconOverflowWindow"
+            | "#32768"
+            | "Planor.Note"
+            | "PlanorSettings"
+            | "Planor.Guide"
+    )
+}
+/// True if `id` is an unmanaged window, system flyout, or Planor floating UI window that the
+/// overlay must stay clear of when it sits above managed tiles in Z-order.
+pub fn overlay_occluder(id: isize) -> bool {
+    if external(id) {
+        return true;
+    }
+    unsafe {
+        let h = id as HWND;
+        if h.is_null() || IsWindowVisible(h) == 0 || IsIconic(h) != 0 {
+            return false;
+        }
+        let mut cloaked = 0u32;
+        DwmGetWindowAttribute(h, DWMWA_CLOAKED as _, (&mut cloaked as *mut u32).cast(), 4);
+        if cloaked != 0 {
+            return false;
+        }
+        let mut size = RECT::default();
+        if GetWindowRect(h, &mut size) == 0
+            || size.right - size.left < 40
+            || size.bottom - size.top < 40
+        {
+            return false;
+        }
+        let class = class_of(id);
+        is_overlay_occluder_class(&class)
+    }
 }
 /// A normal top-level app window Planor does not manage (an elevated Task Manager, a rule-ignored app).
 /// The overlay must sit below it and the focus border must not stay on the previously focused tile.
@@ -892,7 +980,7 @@ pub fn never_tiled_class(class: &str, real_daemon: bool) -> bool {
 
 #[cfg(test)]
 mod class_tests {
-    use super::never_tiled_class;
+    use super::{is_overlay_occluder_class, never_tiled_class};
 
     #[test]
     fn settings_window_floats_and_sentinels_belong_to_their_test_daemon() {
@@ -901,5 +989,20 @@ mod class_tests {
         assert!(never_tiled_class("PlanorSentinel_p42", true));
         assert!(!never_tiled_class("PlanorSentinel_p42", false), "an isolated test daemon manages its own sentinels");
         assert!(!never_tiled_class("Notepad", true));
+    }
+
+    #[test]
+    fn overlay_occluder_classes_cover_system_flyouts_and_planor_ui() {
+        assert!(is_overlay_occluder_class("Windows.UI.Core.CoreWindow"));
+        assert!(is_overlay_occluder_class("XamlExplorerHostIslandWindow"));
+        assert!(is_overlay_occluder_class("TopLevelWindowForOverflowXamlIsland"));
+        assert!(is_overlay_occluder_class("Planor.Note"));
+        assert!(is_overlay_occluder_class("PlanorSettings"));
+        assert!(is_overlay_occluder_class("Planor.Guide"));
+        assert!(!is_overlay_occluder_class("Planor.Composition"));
+        assert!(!is_overlay_occluder_class("Shell_TrayWnd"));
+        assert!(!is_overlay_occluder_class("Progman"));
+        assert!(!is_overlay_occluder_class("WorkerW"));
+        assert!(!is_overlay_occluder_class("Notepad"));
     }
 }

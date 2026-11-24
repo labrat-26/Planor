@@ -296,6 +296,12 @@ pub(crate) struct DragSession {
     pub target: Option<isize>,
     pub mode: planor::Drag,
     pub destination: Option<Key>,
+    pub resizing: bool,
+    pub moved: bool,
+    pub pad_drag: bool,
+    pub saw_lbutton_down: bool,
+    pub lbutton_up_since: Option<Instant>,
+    pub visuals_cleared: bool,
 }
 /// A window being carried by a four-finger touchpad swipe. Planor moves it itself (there is no OS move
 /// loop without a mouse button) and moves the cursor with it, so the normal drag logic sees an
@@ -344,11 +350,17 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub deadline: Option<Instant>,
     pub dirty: bool,
     pub instant: bool,
+    pub force_place: bool,
     pub flung: bool,
     pub spawn_hint: Option<String>,
     pub quick: bool,
     pub last_holes: Vec<Rect>,
     pub last_holes_arc: Arc<[Rect]>,
+    pub last_tile_geometry: Vec<(isize, Rect, String, bool, bool, bool, bool, Rect)>,
+    pub last_had_zones: bool,
+    pub overlay_seq: u64,
+    pub last_foreground: isize,
+    pub null_fg_ticks: u8,
     pub holes_checked: Instant,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
@@ -414,11 +426,17 @@ impl<B: WindowBackend> Engine<B> {
             deadline: None,
             dirty: false,
             instant: false,
+            force_place: false,
             flung: false,
             spawn_hint: None,
             quick: false,
             last_holes: vec![],
             last_holes_arc: Arc::from([]),
+            last_tile_geometry: vec![],
+            last_had_zones: false,
+            overlay_seq: 0,
+            last_foreground: 0,
+            null_fg_ticks: 0,
             holes_checked: Instant::now(),
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
@@ -461,6 +479,22 @@ impl<B: WindowBackend> Engine<B> {
             .iter()
             .find(|(_, s)| s.locate(id).is_some())
             .map(|(k, _)| k.clone())
+    }
+    /// Returns the managed tile HWND corresponding to `fg` (either `fg` itself or its `GA_ROOTOWNER`
+    /// when `fg` is a dialog/popup owned by a managed tile), or `None` for unmanaged foregrounds.
+    fn managed_foreground_id(&self, fg: isize) -> Option<isize> {
+        if fg == 0 {
+            return None;
+        }
+        if self.owning(fg).is_some() {
+            return Some(fg);
+        }
+        let root = self.backend.root_owner(fg);
+        if root != 0 && root != fg && self.owning(root).is_some() {
+            Some(root)
+        } else {
+            None
+        }
     }
     fn blocked(&self) -> bool {
         self.paused || self.locked || self.deadline.is_some() || self.desktop.is_none()
@@ -554,6 +588,7 @@ impl<B: WindowBackend> Engine<B> {
                 diag::trace(format!("NEWBORN {id} moved itself to {r:?}, back to {want:?} (#{n})"));
             }
             self.instant = true;
+            self.force_place = true;
             self.dirty = true;
         }
     }
@@ -654,6 +689,7 @@ impl<B: WindowBackend> Engine<B> {
                 for s in self.strips.values_mut() {
                     s.gap = self.hot.gap_px;
                 }
+                self.force_place = true;
                 self.reveal()
             }
             Command::Pause => {
@@ -838,11 +874,13 @@ impl<B: WindowBackend> Engine<B> {
                     || rect.y + rect.h > bound.y + bound.h;
                 let parked = hidden || preview || clipped;
                 let os_rect = self.backend.frame(id);
+                let foreground = self.backend.foreground();
+                let focused_id = self.managed_foreground_id(foreground);
                 let color = if fullscreen {
                     None
                 } else if strip.columns[ci].members.len() > 1 && !preview {
                     self.cfg["borders"]["stacked_color"].as_str()
-                } else if name == &self.active && strip.active() == Some(id) {
+                } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                     self.cfg["borders"]["focused_color"].as_str()
                 } else {
                     None
@@ -986,22 +1024,76 @@ impl<B: WindowBackend> Engine<B> {
         let Some(only) = self.backend.holes_class_filter() else {
             return vec![];
         };
-        self.backend
-            .windows()
-            .into_iter()
-            .filter(|&w| self.owning(w).is_none() && self.backend.external(w))
-            .filter(|&w| only.as_ref().is_none_or(|c| self.backend.class_of(w) == *c))
-            .filter_map(|w| self.backend.frame(w))
-            .filter(|r| {
-                self.displays.iter().any(|m| {
-                    r.x < m.2.x + m.2.w && r.x + r.w > m.2.x && r.y < m.2.y + m.2.h && r.y + r.h > m.2.y
-                })
-            })
-            .collect()
+        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let mut managed_above: Vec<Rect> = Vec::new();
+        let mut out: Vec<Rect> = Vec::new();
+        // `windows()` yields top-to-bottom Z-order. Only the portion of an unmanaged window / system
+        // flyout NOT occluded by managed tiles above it should punch a hole in the overlay; an
+        // unmanaged app sitting behind managed tiles must not erase their focus borders.
+        for w in self.backend.windows() {
+            let is_managed = self.owning(w).is_some_and(|k| Some(k.0) == self.desktop)
+                || (self.pinned.contains(&w) && self.backend.on_current_desktop(w));
+            if is_managed {
+                if self.backend.is_visible(w)
+                    && !self.backend.is_iconic(w)
+                    && !self.backend.is_cloaked(w)
+                    && let Some(r) = self.backend.frame(w)
+                    && r.x < park_x - 2
+                {
+                    managed_above.push(r);
+                }
+                continue;
+            }
+            if self.owning(w).is_some() || self.pinned.contains(&w) {
+                continue;
+            }
+            if !self.backend.overlay_occluder(w) {
+                continue;
+            }
+            if !only.as_ref().is_none_or(|c| self.backend.class_of(w) == *c) {
+                continue;
+            }
+            let Some(r) = self.backend.frame(w) else {
+                continue;
+            };
+            for piece in subtract_rects(r, &managed_above) {
+                if self.displays.iter().any(|m| {
+                    piece.x < m.2.x + m.2.w
+                        && piece.x + piece.w > m.2.x
+                        && piece.y < m.2.y + m.2.h
+                        && piece.y + piece.h > m.2.y
+                }) {
+                    out.push(piece);
+                }
+            }
+        }
+        out
     }
     pub(crate) fn tick(&mut self) -> Result<()> {
         if self.locked {
             return Ok(());
+        }
+        // Own-process windows (Win+W note box, Settings) are skipped by WINEVENT_SKIPOWNPROCESS,
+        // so poll foreground changes here to remove/restore the focus highlight promptly.
+        // Debounce transient NULL foregrounds (common during window activation) for 2 ticks so
+        // the focus border does not blink off and back on.
+        if !self.pad_scrolling && self.settle.is_none() && self.pad.is_none() {
+            let fg = self.backend.foreground();
+            if fg == 0 {
+                if self.last_foreground != 0 {
+                    self.null_fg_ticks = self.null_fg_ticks.saturating_add(1);
+                    if self.null_fg_ticks >= 2 {
+                        self.last_foreground = 0;
+                        self.dirty = true;
+                    }
+                }
+            } else {
+                self.null_fg_ticks = 0;
+                if fg != self.last_foreground {
+                    self.last_foreground = fg;
+                    self.dirty = true;
+                }
+            }
         }
         // An unmanaged window appearing, moving or closing changes what the overlay must stay clear of.
         if self.holes_checked.elapsed() >= Duration::from_millis(200) {
@@ -1198,6 +1290,8 @@ impl<B: WindowBackend> Engine<B> {
                 .unwrap_or_default()
         }
         self.placed.clear();
+        self.last_tile_geometry.clear();
+        self.force_place = true;
         self.dirty = true;
         // Building the overlay windows and their GPU surfaces takes ~100 ms each; start now, in parallel
         // with the window scan, so the first placement does not wait for it.
@@ -1245,7 +1339,6 @@ impl<B: WindowBackend> Engine<B> {
         let t = Instant::now();
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
         self.dirty = false;
-        self.seq += 1;
         self.covering.retain(|_, covered_at| covered_at.elapsed() < Duration::from_millis(500));
         for s in self.strips.values_mut() {
             s.fill_gaps()
@@ -1275,11 +1368,19 @@ impl<B: WindowBackend> Engine<B> {
         }
         let cap: usize = self.strips.values().map(|s| s.columns.len()).sum::<usize>() + self.pinned.len();
         let mut tiles = Vec::with_capacity(cap);
-        let foreground = self.backend.foreground();
-        let external = self.owning(foreground).is_none() && self.backend.external(foreground);
-        // Unmanaged app windows (an elevated Task Manager, a rule-ignored app): the overlay must never be
-        // painted over them, whatever the z-order does. They become holes in the overlay (a window region),
-        // so borders and peeks stop at their edge and clicks reach them.
+        let raw_fg = self.backend.foreground();
+        if raw_fg != 0 {
+            self.null_fg_ticks = 0;
+            self.last_foreground = raw_fg;
+        } else if self.last_foreground == 0 || self.null_fg_ticks >= 2 {
+            self.last_foreground = 0;
+        }
+        let focused_id = self.managed_foreground_id(self.last_foreground);
+        // Unmanaged app windows (an elevated Task Manager, a rule-ignored app) and system flyouts:
+        // the overlay must never paint over them when they sit in front of managed tiles. `holes()`
+        // subtracts managed/pinned windows above them in Z-order; the renderer masks them directly
+        // in Direct2D (`D2D1_PRIMITIVE_BLEND_COPY`) and only uses `SetWindowRgn(..., 0)` where an
+        // active DWM thumbnail overlaps a hole.
         // Test daemons share the desktop with the developer's own windows, which they treat as unmanaged;
         // carving those out would hide every border they draw, so isolated instances skip it unless a test
         // asks for it with PLANOR_HOLES.
@@ -1298,6 +1399,9 @@ impl<B: WindowBackend> Engine<B> {
         // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
         let mut zones = vec![];
         if let Some(d) = &self.drag
+            && d.moved
+            && !d.resizing
+            && !d.visuals_cleared
             && let (Some(k), Some(c)) = (&d.destination, hot.drop_target_color)
             && let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop)
         {
@@ -1334,13 +1438,20 @@ impl<B: WindowBackend> Engine<B> {
                     let c = if fullscreen {
                         None
                     } else if self.drag.as_ref().is_some_and(|d| {
-                        d.target == Some(id) && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
+                        d.moved
+                            && !d.resizing
+                            && !d.visuals_cleared
+                            && d.target == Some(id)
+                            && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
                     }) {
                         // The window a drop would swap with (or pull out beside).
                         hot.drop_target_color
                     } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
-                        d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
+                        d.moved
+                            && !d.resizing
+                            && !d.visuals_cleared
+                            && d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
                             && d.target.is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
                             && strip.columns[i].members.len() > 1
                             && strip.columns[i].members[strip.columns[i].active] == id
@@ -1350,7 +1461,7 @@ impl<B: WindowBackend> Engine<B> {
                         && strip.columns[i].members[strip.columns[i].active] == id
                     {
                         hot.stacked_color
-                    } else if !external && name == &self.active && strip.active() == Some(id) {
+                    } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                         hot.focused_color
                     } else {
                         None
@@ -1378,7 +1489,6 @@ impl<B: WindowBackend> Engine<B> {
                             None
                         },
                     });
-                    self.placed.insert(id, (self.seq, rect));
                 }
             }
         }
@@ -1403,12 +1513,63 @@ impl<B: WindowBackend> Engine<B> {
                 })
             }
         }
+        // Consume the action for this scene so subsequent hole-only or focus-only refreshes carry a
+        // neutral action (`"idle"`, zero duration) instead of re-running `"open_close"` handoffs.
+        let action = std::mem::replace(&mut self.action, "idle");
+        let force_place = std::mem::take(&mut self.force_place);
+        let geom: Vec<(isize, Rect, String, bool, bool, bool, bool, Rect)> = tiles
+            .iter()
+            .map(|t| {
+                (
+                    t.id,
+                    t.rect,
+                    t.monitor.clone(),
+                    t.pinned,
+                    t.fullscreen,
+                    t.preview,
+                    t.hidden,
+                    t.bound,
+                )
+            })
+            .collect();
+        let had_zones = self.last_had_zones;
+        self.last_had_zones = !zones.is_empty();
+        // A holes/colour-only refresh with unchanged tile geometry must NEVER supersede an active
+        // animation or open/close handoff with a new scene epoch; patch holes and tile colours
+        // directly on the renderer instead.
+        let overlay_only = action == "idle"
+            && !force_place
+            && !live
+            && zones.is_empty()
+            && !had_zones
+            && !self.instant
+            && !self.quick
+            && !self.last_tile_geometry.is_empty()
+            && self.last_tile_geometry == geom;
+        if overlay_only {
+            self.overlay_seq += 1;
+            let colors = tiles.iter().map(|t| (t.id, t.color)).collect();
+            self.renderer.send(render::Message::OverlayUpdate {
+                update_id: self.overlay_seq,
+                holes: Arc::clone(&self.last_holes_arc),
+                colors,
+            })?;
+            slow("layout", t);
+            return Ok(());
+        }
+        self.seq += 1;
+        for tile in &tiles {
+            if !tile.pinned {
+                self.placed.insert(tile.id, (self.seq, tile.rect));
+            }
+        }
+        self.last_tile_geometry = geom;
         // The real animation time of this scene (0 when placed at once: under the fingers, a monitor
-        // crossing, a fullscreen switch). The EXPECT lines carry the same value, so the recorder's lag check
-        // waits for what is actually on screen.
+        // crossing, a fullscreen switch, or a neutral hole/focus refresh). The EXPECT lines carry
+        // the same value, so the recorder's lag check waits for what is actually on screen.
         let duration = if !std::mem::take(&mut self.instant)
             && hot.anim_enabled
-            && hot.anim_action_enabled(self.action)
+            && hot.anim_action_enabled(action)
         {
             // Live touchpad scrolling re-targets every few milliseconds; a short ease per update
             // smooths it without the strip trailing the fingers.
@@ -1466,8 +1627,9 @@ impl<B: WindowBackend> Engine<B> {
             radius: hot.border_radius_px,
             holes: Arc::clone(&self.last_holes_arc),
             zones,
-            action: self.action,
+            action,
             live,
+            force_place,
         }))?;
         if self.diag.enabled {
             diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, self.last_holes.len()));
@@ -1513,7 +1675,9 @@ impl<B: WindowBackend> Engine<B> {
         }
         match swipe {
             Swipe::DragStart => {
-                diag::trace(format!("PAD drag start, window {:?}", self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active())));
+                if self.diag.enabled {
+                    diag::trace(format!("PAD drag start, window {:?}", self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active())));
+                }
                 self.pad_begin();
             }
             Swipe::DragMove(dx, dy) => self.pad_move(dx, dy),
@@ -1541,7 +1705,9 @@ impl<B: WindowBackend> Engine<B> {
             Swipe::None => (),
         }
     }
-    fn clear(&self) -> Result<()> {
+    fn clear(&mut self) -> Result<()> {
+        self.last_tile_geometry.clear();
+        self.last_had_zones = false;
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.renderer.send(render::Message::Clear(tx))?;
         rx.recv()?;
@@ -1678,6 +1844,8 @@ impl<B: WindowBackend> Engine<B> {
             && let Some(original) = self.backend.frame(id)
         {
             let point = self.backend.cursor_pos();
+            let pad_drag = self.pad.is_some();
+            let saw_lbutton_down = !pad_drag && self.backend.key_down(0x01);
             self.drag = Some(DragSession {
                 id,
                 key,
@@ -1688,8 +1856,18 @@ impl<B: WindowBackend> Engine<B> {
                 target: None,
                 mode: planor::Drag::None,
                 destination: None,
+                resizing: false,
+                moved: pad_drag,
+                pad_drag,
+                saw_lbutton_down,
+                lbutton_up_since: None,
+                visuals_cleared: false,
             });
             self.dirty = true
+        } else if self.drag.take().is_some() {
+            // Starting a move/size on an unmanaged window (e.g. a torn-off browser tab) clears any
+            // stray drag session left behind on an earlier window.
+            self.dirty = true;
         }
     }
     /// Three fingers sideways: the strip follows the fingers live (no animation) and the focus moves to
@@ -1899,9 +2077,12 @@ impl<B: WindowBackend> Engine<B> {
             return;
         };
         self.drag_begin(id);
-        if self.drag.is_none() {
+        let Some(d) = self.drag.as_mut() else {
             return;
-        }
+        };
+        d.pad_drag = true;
+        d.moved = true;
+        d.saw_lbutton_down = false;
         // Grab the window at its centre so the cursor and the window stay together.
         let (cx, cy) = (frame.x + frame.w / 2, frame.y + frame.h / 2);
         self.backend.set_cursor_pos(cx, cy);
@@ -1979,6 +2160,7 @@ impl<B: WindowBackend> Engine<B> {
             self.drag = None;
             self.flung = false;
             self.instant = true;
+            self.force_place = true;
             self.dirty = true;
         }
     }
@@ -2032,7 +2214,75 @@ impl<B: WindowBackend> Engine<B> {
         self.drag_end(p.id)
     }
     fn drag_update(&mut self) {
+        let Some((drag_id, drag_key)) = self.drag.as_ref().map(|d| (d.id, d.key.clone())) else {
+            return;
+        };
+        if !self.backend.is_window(drag_id)
+            || !self.backend.is_visible(drag_id)
+            || self.backend.is_iconic(drag_id)
+            || self.owning(drag_id) != Some(drag_key)
+        {
+            self.drag = None;
+            self.dirty = true;
+            return;
+        }
         let Some(d) = self.drag.as_mut() else { return };
+        if !d.pad_drag {
+            if self.backend.key_down(0x01) {
+                d.saw_lbutton_down = true;
+                d.lbutton_up_since = None;
+                if d.visuals_cleared {
+                    d.visuals_cleared = false;
+                    self.dirty = true;
+                }
+            } else if d.saw_lbutton_down {
+                let since = *d.lbutton_up_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= Duration::from_millis(250) {
+                    // Clear drop visuals promptly on release, but keep the session alive so a slow
+                    // app finishing a cross-DPI relayout can still deliver its late MOVESIZEEND.
+                    // Drop the session once GetGUIThreadInfo confirms the thread is responsive and
+                    // out of GUI_INMOVESIZE, or after a 5 s hard cap.
+                    if self.backend.in_movesize(drag_id) == Some(false)
+                        || since.elapsed() >= Duration::from_secs(5)
+                    {
+                        self.drag = None;
+                        self.dirty = true;
+                        return;
+                    }
+                    if !d.visuals_cleared {
+                        d.visuals_cleared = true;
+                        self.dirty = true;
+                    }
+                    return;
+                }
+            }
+        }
+        // Latch the first classification (edge resize vs title-bar move) so a later WM_DPICHANGED
+        // or drag-restore size change during a move never flips `resizing` and clears `destination`.
+        if !d.pad_drag
+            && !d.resizing
+            && !d.moved
+            && let Some(cur) = self.backend.frame(d.id)
+        {
+            if is_edge_resize(d.original, cur) {
+                d.resizing = true;
+            } else if (cur.x - d.original.x).abs() > 2
+                || (cur.y - d.original.y).abs() > 2
+                || (cur.w - d.original.w).abs() > 2
+                || (cur.h - d.original.h).abs() > 2
+            {
+                d.moved = true;
+            }
+        }
+        if d.resizing || !d.moved {
+            if d.target.is_some() || d.mode != planor::Drag::None || d.destination.is_some() {
+                d.target = None;
+                d.mode = planor::Drag::None;
+                d.destination = None;
+                self.dirty = true;
+            }
+            return;
+        }
         let p = self.backend.cursor_pos();
         let elapsed = d.sampled.elapsed().as_secs_f64().max(0.001);
         let velocity = ((p.0 - d.point.0) as f64).hypot((p.1 - d.point.1) as f64) / elapsed;
@@ -2128,7 +2378,17 @@ impl<B: WindowBackend> Engine<B> {
     }
     fn drag_end(&mut self, id: isize) {
         let flung = std::mem::take(&mut self.flung);
-        self.drag_update();let Some(mut d) = self.drag.take() else { return };
+        if self.drag.as_ref().is_some_and(|d| d.id != id) {
+            // MOVESIZEEND arrived for a different window (e.g. a torn-off browser tab): end the
+            // stale drag session cleanly without applying a drop to the source window.
+            self.drag = None;
+            self.force_place = true;
+            self.dirty = true;
+            return;
+        }
+        self.drag_update();
+        let Some(mut d) = self.drag.take() else { return };
+        self.force_place = true;
         if let Some(rec) = self.gesture_rec.as_mut() {
             // What the drop was about to do, so a recording shows Planor's answer to each gesture.
             rec.push(serde_json::json!({
@@ -2156,18 +2416,17 @@ impl<B: WindowBackend> Engine<B> {
         if r==d.original&&!flung{return}
         // A resize keeps one edge where it was (a move changes both). Dragging an edge far beyond the monitor
         // puts the cursor on another monitor; that is still a resize, not a transfer.
-        let moved = |a: i32, b: i32| (a - b).abs() > 2;
-        // and it still sits mostly on the monitor it started on (a move to another monitor does not).
+        // Pad drags, flings, and cross-DPI / drag-restore moves never classify as resizes.
         let home = self.displays.iter().find(|m| m.0 == d.key.1).map(|m| m.2);
         let on_home = home.is_some_and(|b| {
             let w = (r.x + r.w).min(b.x + b.w) - r.x.max(b.x);
             let h = (r.y + r.h).min(b.y + b.h) - r.y.max(b.y);
             w > 0 && h > 0 && (w as i64 * h as i64) * 2 >= r.w as i64 * r.h as i64
         });
-        let resized = on_home && !flung
-            && ((moved(r.w, d.original.w) && (r.x == d.original.x || r.x + r.w == d.original.x + d.original.w))
-                || (moved(r.h, d.original.h) && (r.y == d.original.y || r.y + r.h == d.original.y + d.original.h)));
-        if resized || (d.destination.as_ref().is_none_or(|k|k==&d.key)&&(d.original.w!=r.w||d.original.h!=r.h)){
+        let resized = !flung
+            && !d.pad_drag
+            && (d.resizing || (on_home && !d.moved && is_edge_resize(d.original, r)));
+        if resized {
             let horizontal = s.area.horizontal();
             let leading = if horizontal {
                 r.x != d.original.x
@@ -2244,6 +2503,7 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         s.select(id);
+        self.action = "drag_reflow";
         self.reveal()
     }
     fn transfer_dialogs(&mut self, id: isize, owner: Rect, area: Rect) -> bool {
@@ -2304,6 +2564,7 @@ impl<B: WindowBackend> Engine<B> {
     pub(crate) fn event(&mut self, e: Event) {
         match e {
             Event::Peek(id) if !self.blocked() => {
+                self.action = "scroll";
                 self.select(id);
                 self.reveal();
                 self.backend.activate(id)
@@ -2318,6 +2579,7 @@ impl<B: WindowBackend> Engine<B> {
                         let length = if s.area.horizontal() { r.w } else { r.h };
                         if length > s.columns[i].length {
                             s.resize(i, length, false);
+                            self.force_place = true;
                             self.dirty = true
                         }
                     }
@@ -2377,24 +2639,29 @@ impl<B: WindowBackend> Engine<B> {
                 // "reveal the focused window" reaction would fight it (and snap the view back).
                 EVENT_SYSTEM_FOREGROUND if self.pad_scrolling || self.settle.is_some() || self.pad.is_some() => (),
                 EVENT_SYSTEM_FOREGROUND => {
-                    if self.diag.enabled {
-                        diag::trace(format!("FG {id} managed={} external={} pad={}", self.owning(id).is_some(), self.backend.external(id), self.pad_scrolling));
+                    if id != 0 {
+                        self.null_fg_ticks = 0;
                     }
-                    let changed = self
+                    let target = self.managed_foreground_id(id);
+                    if self.diag.enabled {
+                        diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
+                    }
+                    let active_id = self
                         .key()
                         .and_then(|k| self.strips.get(&k))
-                        .and_then(|s| s.active())
-                        != Some(id);
+                        .and_then(|s| s.active());
                     // Focus moving to or from an unmanaged window changes the border and the overlay order.
                     self.dirty = true;
-                    if changed && self.owning(id).is_some() {
-                        // A window focused by any route (taskbar, Alt+Tab, click, app request) must
-                        // be visible: otherwise focus lands on a parked, off-screen window.
-                        self.select(id);
+                    if let Some(managed_id) = target
+                        && active_id != Some(managed_id)
+                    {
+                        // A window (or its owned dialog) focused by any route must be selected and
+                        // visible: otherwise focus lands on a parked window or highlights the wrong tile.
+                        self.select(managed_id);
                         let visible = self
-                            .owning(id)
+                            .owning(managed_id)
                             .and_then(|k| self.strips.get(&k))
-                            .is_some_and(|s| s.in_view(id));
+                            .is_some_and(|s| s.in_view(managed_id));
                         if visible {
                             // Already on screen (e.g. a click on a visible tile): only move the border.
                             self.dirty = true
@@ -2411,6 +2678,10 @@ impl<B: WindowBackend> Engine<B> {
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none() => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
+                    if self.drag.as_ref().is_some_and(|d| d.id == id) {
+                        self.drag = None;
+                        self.dirty = true;
+                    }
                     self.covering.remove(&id);
                     if !self.orphans.contains(&id) {
                         if let Some(k) = self.owning(id) {
@@ -2472,6 +2743,61 @@ fn clip(a: Rect, b: Rect) -> Option<Rect> {
 fn contains(r: Rect, p: (i32, i32)) -> bool {
     p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
 }
+/// True if `cur` differs from `orig` by resizing one or more edges (at least one axis changed size
+/// while BOTH axes keep at least one edge anchored within 2 px), as opposed to a translation,
+/// DPI rescale, or drag-restore of a snapped window where both horizontal edges shift.
+pub(crate) fn is_edge_resize(orig: Rect, cur: Rect) -> bool {
+    let changed = |a: i32, b: i32| (a - b).abs() > 2;
+    let same = |a: i32, b: i32| (a - b).abs() <= 2;
+    let x_anchored = same(cur.x, orig.x) || same(cur.x + cur.w, orig.x + orig.w);
+    let y_anchored = same(cur.y, orig.y) || same(cur.y + cur.h, orig.y + orig.h);
+    (changed(cur.w, orig.w) || changed(cur.h, orig.h)) && x_anchored && y_anchored
+}
+/// Subtract every rectangle in `blockers` from `r`, returning the remaining non-empty
+/// non-overlapping pieces. Used for Z-order-aware overlay hole occlusion.
+pub(crate) fn subtract_rects(r: Rect, blockers: &[Rect]) -> Vec<Rect> {
+    if r.w <= 0 || r.h <= 0 {
+        return Vec::new();
+    }
+    let mut pieces = vec![r];
+    for &b in blockers {
+        if b.w <= 0 || b.h <= 0 {
+            continue;
+        }
+        let mut next = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            let Some(ov) = clip(p, b) else {
+                next.push(p);
+                continue;
+            };
+            // Top strip
+            if ov.y > p.y {
+                next.push(Rect { x: p.x, y: p.y, w: p.w, h: ov.y - p.y });
+            }
+            // Bottom strip
+            let p_bot = p.y + p.h;
+            let ov_bot = ov.y + ov.h;
+            if p_bot > ov_bot {
+                next.push(Rect { x: p.x, y: ov_bot, w: p.w, h: p_bot - ov_bot });
+            }
+            // Left middle strip
+            if ov.x > p.x {
+                next.push(Rect { x: p.x, y: ov.y, w: ov.x - p.x, h: ov.h });
+            }
+            // Right middle strip
+            let p_right = p.x + p.w;
+            let ov_right = ov.x + ov.w;
+            if p_right > ov_right {
+                next.push(Rect { x: ov_right, y: ov.y, w: p_right - ov_right, h: ov.h });
+            }
+        }
+        pieces = next;
+        if pieces.is_empty() {
+            break;
+        }
+    }
+    pieces
+}
 /// The stack drop zones of a strip while `dragged` is carried: one small box in the middle of the visible
 /// part of every column's active window (not the dragged window's own column). (window, visible rect, zone)
 pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec<(isize, Rect, Rect)> {
@@ -2505,6 +2831,7 @@ pub fn run() -> Result<()> {
         return Err("daemon already running or unavailable".into());
     }
     let _mutex = unsafe { File::from_raw_handle(mutex) };
+    crate::priority::process();
     let backend = Win32Backend;
     let mut server = PipeServer::new(&pipe_name())?;
     let mut journal = Journal::open(folder("LOCALAPPDATA")?.join("recovery.json"))?;
@@ -2521,6 +2848,7 @@ pub fn run() -> Result<()> {
     let diag = diag::Telemetry::new(cfg["diagnostics"]["enabled"].as_bool().unwrap());
     perf::init(diag.enabled);
     perf::register_thread("daemon");
+    crate::priority::thread_highest();
     let _watchdog = watchdog::Watchdog::start(diag.enabled, crate::test_mode());
     if diag.enabled && !crate::test_mode() {
         record_input();
@@ -2557,11 +2885,17 @@ pub fn run() -> Result<()> {
         deadline: None,
         dirty: false,
         instant: false,
+        force_place: false,
         flung: false,
         spawn_hint: None,
         quick: false,
         last_holes: vec![],
         last_holes_arc: Arc::from([]),
+        last_tile_geometry: vec![],
+        last_had_zones: false,
+        overlay_seq: 0,
+        last_foreground: 0,
+        null_fg_ticks: 0,
         holes_checked: Instant::now(),
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),

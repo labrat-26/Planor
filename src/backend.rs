@@ -39,16 +39,20 @@ pub(crate) trait WindowBackend {
     fn windows(&self) -> Vec<isize>;
     fn eligible(&self, id: isize, cfg: &toml::Value) -> bool;
     fn external(&self, id: isize) -> bool;
+    fn overlay_occluder(&self, id: isize) -> bool;
     fn class_of(&self, id: isize) -> String;
     fn frame(&self, id: isize) -> Option<Rect>;
     fn window_rect(&self, id: isize) -> Option<Rect>;
     fn minimum(&self, id: isize, horizontal: bool) -> i32;
     fn owner(&self, id: isize) -> isize;
+    fn root_owner(&self, id: isize) -> isize;
     fn foreground(&self) -> isize;
     fn is_window(&self, id: isize) -> bool;
     fn is_visible(&self, id: isize) -> bool;
     fn is_iconic(&self, id: isize) -> bool;
+    fn is_cloaked(&self, id: isize) -> bool;
     fn is_zoomed(&self, id: isize) -> bool;
+    fn in_movesize(&self, id: isize) -> Option<bool>;
     fn has_caption(&self, id: isize) -> bool;
     fn window_at_point(&self, x: i32, y: i32) -> isize;
 
@@ -208,6 +212,10 @@ impl WindowBackend for Win32Backend {
         win32::external(id)
     }
 
+    fn overlay_occluder(&self, id: isize) -> bool {
+        win32::overlay_occluder(id)
+    }
+
     fn class_of(&self, id: isize) -> String {
         win32::class_of(id)
     }
@@ -233,6 +241,11 @@ impl WindowBackend for Win32Backend {
         unsafe { GetWindow(id as _, GW_OWNER) as isize }
     }
 
+    fn root_owner(&self, id: isize) -> isize {
+        let root = unsafe { GetAncestor(id as _, GA_ROOTOWNER) as isize };
+        if root != 0 { root } else { id }
+    }
+
     fn foreground(&self) -> isize {
         unsafe { GetForegroundWindow() as isize }
     }
@@ -249,8 +262,16 @@ impl WindowBackend for Win32Backend {
         unsafe { IsIconic(id as _) != 0 }
     }
 
+    fn is_cloaked(&self, id: isize) -> bool {
+        win32::is_cloaked(id)
+    }
+
     fn is_zoomed(&self, id: isize) -> bool {
         unsafe { IsZoomed(id as _) != 0 }
+    }
+
+    fn in_movesize(&self, id: isize) -> Option<bool> {
+        win32::in_movesize(id)
     }
 
     fn has_caption(&self, id: isize) -> bool {
@@ -377,6 +398,7 @@ pub(crate) mod sim {
         pub owner: isize,
         pub cookie: usize,
         pub elevated: bool,
+        pub in_movesize: Option<bool>,
     }
 
     impl SimWindow {
@@ -405,6 +427,7 @@ pub(crate) mod sim {
                 owner: 0,
                 cookie: 0,
                 elevated: false,
+                in_movesize: None,
             }
         }
     }
@@ -413,9 +436,12 @@ pub(crate) mod sim {
     pub(crate) struct SimSceneSummary {
         pub epoch: u64,
         pub tiles_len: usize,
+        pub action: &'static str,
+        pub duration: u64,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
         pub covered: Vec<isize>,
+        pub tile_colors: Vec<(isize, Option<u32>)>,
     }
 
     pub(crate) struct SimDesktop {
@@ -430,6 +456,7 @@ pub(crate) mod sim {
         pub config: toml::Value,
         pub holes_filter: Option<Option<String>>,
         pub scenes: Vec<SimSceneSummary>,
+        pub overlay_updates: usize,
         pub peeks: Vec<(Rect, isize)>,
         pub next_id: isize,
     }
@@ -448,6 +475,7 @@ pub(crate) mod sim {
                 config,
                 holes_filter: Some(None),
                 scenes: Vec::new(),
+                overlay_updates: 0,
                 peeks: Vec::new(),
                 next_id: 100,
             }
@@ -538,6 +566,8 @@ pub(crate) mod sim {
             self.scenes.push(SimSceneSummary {
                 epoch: scene.epoch,
                 tiles_len: scene.tiles.len(),
+                action: scene.action,
+                duration: scene.duration,
                 holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
                 covered: scene
@@ -546,6 +576,7 @@ pub(crate) mod sim {
                     .filter(|t| t.cover.is_some())
                     .map(|t| t.id)
                     .collect(),
+                tile_colors: scene.tiles.iter().map(|t| (t.id, t.color)).collect(),
             });
             rejected
         }
@@ -740,6 +771,20 @@ pub(crate) mod sim {
             ) && !w.class.starts_with("Planor")
         }
 
+        fn overlay_occluder(&self, id: isize) -> bool {
+            if self.external(id) {
+                return true;
+            }
+            let g = self.0.lock().unwrap();
+            let Some(w) = g.windows.get(&id) else {
+                return false;
+            };
+            if !w.visible || w.iconic || w.cloaked || w.rect.w < 40 || w.rect.h < 40 {
+                return false;
+            }
+            win32::is_overlay_occluder_class(&w.class)
+        }
+
         fn class_of(&self, id: isize) -> String {
             self.0
                 .lock()
@@ -778,6 +823,18 @@ pub(crate) mod sim {
                 .unwrap_or(0)
         }
 
+        fn root_owner(&self, id: isize) -> isize {
+            let g = self.0.lock().unwrap();
+            let mut cur = id;
+            for _ in 0..16 {
+                let Some(next) = g.windows.get(&cur).map(|w| w.owner).filter(|&o| o != 0 && o != cur) else {
+                    break;
+                };
+                cur = next;
+            }
+            cur
+        }
+
         fn foreground(&self) -> isize {
             self.0.lock().unwrap().foreground
         }
@@ -804,6 +861,15 @@ pub(crate) mod sim {
                 .is_some_and(|w| w.iconic)
         }
 
+        fn is_cloaked(&self, id: isize) -> bool {
+            self.0
+                .lock()
+                .unwrap()
+                .windows
+                .get(&id)
+                .is_some_and(|w| w.cloaked)
+        }
+
         fn is_zoomed(&self, id: isize) -> bool {
             self.0
                 .lock()
@@ -811,6 +877,15 @@ pub(crate) mod sim {
                 .windows
                 .get(&id)
                 .is_some_and(|w| w.zoomed)
+        }
+
+        fn in_movesize(&self, id: isize) -> Option<bool> {
+            self.0
+                .lock()
+                .unwrap()
+                .windows
+                .get(&id)
+                .and_then(|w| w.in_movesize)
         }
 
         fn has_caption(&self, id: isize) -> bool {

@@ -27,8 +27,8 @@ flowchart LR
   end
 
   subgraph RENDER["Render Thread (COINIT_APARTMENTTHREADED)"]
-    HOSTS["Host (Planor.Composition) + SetWindowRgn"]
-    SURF["D3D11 + DirectComposition + Direct2D Surface"]
+    HOSTS["Host (Planor.Composition) + D2D hole mask / thumb SetWindowRgn"]
+    SURF["D3D11 + DirectComposition + Direct2D Surface (device-lost recovery)"]
     WGC["Windows Graphics Capture Source + DWM Thumbnails"]
     PLACE["win32::place + DwmFlush + 250 ms verify"]
   end
@@ -70,8 +70,9 @@ flowchart LR
    - Maintains one `Host` (`Planor.Composition` popup window, `WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE`) per monitor bounds `m.2`.
    - `WS_EX_TRANSPARENT` makes every pixel click-through to the taskbar and underlying apps; `WM_NCHITTEST` cannot forward cross-process clicks on Windows.
    - Owns D3D11 + DirectComposition + Direct2D `Surface` (with cached RGB `ID2D1SolidColorBrush` instances) for drawing borders and WGC (`GraphicsCaptureItem`) backing bitmaps (`Source`), plus `DwmRegisterThumbnail` handles for DWM stand-in thumbnails. Caches failing WGC `Source::new` keys for a **5 s** cooldown (`failed_sources`) so un-capturable windows do not stall subsequent warm scenes.
-   - Uses adaptive `recv_timeout` (`0 ms` animating, `33 ms` idle with active sources/verify, `50 ms` idle otherwise), animates active `Scene` at monitor refresh cadence (`DwmFlush()`), and preempts immediately whenever `render::EPOCH` advances.
-   - Schedules post-settle `verify` **250 ms** after `t >= 1.0` (up to **2** corrective passes) for windows whose DWM extended frame transiently mismatched on uncloak/desktop switch.
+   - **GPU device-lost recovery**: tracks a monotonic shared-device generation across `SHARED` (`ID3D11Device` / `IDCompositionDevice` / `ID2D1Device`). On `DXGI_ERROR_DEVICE_REMOVED` / `DEVICE_HUNG` / `DEVICE_RESET` / `DRIVER_INTERNAL_ERROR` / `D2DERR_RECREATE_TARGET` (or a throttled idle `GetDeviceRemovedReason` poll), resets `SHARED` at most once per dead generation, invalidates every host on that generation (bumping `host.generation` so in-flight WGC worker deliveries from the dead device are dropped), and retries recreation with bounded exponential backoff (`SurfaceRecovery`: 250 ms → 500 ms → 1000 ms → 2000 ms, reset only after a full normal draw succeeds).
+   - Uses adaptive `recv_timeout` (`0 ms` animating, `33 ms` idle with active sources/verify, `250 ms` during surface recovery, `50 ms` idle otherwise), animates active `Scene` at monitor refresh cadence (`DwmFlush()`), and preempts immediately whenever `render::EPOCH` advances.
+   - Schedules post-settle `verify` **250 ms** after `t >= 1.0` (up to **2** corrective passes, tagged with the scene's `epoch`) for windows whose DWM extended frame transiently mismatched on uncloak/desktop switch; only emits `Event::Rejected` for responsive, size-stable constraints matching the verified epoch.
 5. **Watchdog Thread** (`src/watchdog.rs`):
    - Polls atomic QPC heartbeats for `daemon` and `render` every **50 ms**; emits `STALL <thread> <ms> span=<span_name>` if no progress occurs for **>= 300 ms** (configurable via `PLANOR_STALL_MS`), and triggers a stall capture bundle (plus `planor-rec dump` if ring recorder is running).
    - Samples process/thread CPU, working set, GDI/USER object counts, and OS handles every **250 ms** for `perf`.
@@ -93,11 +94,13 @@ flowchart LR
   - **DWM thumbnail (`Host::thumbnail`)**: live DWM composition thumbnail cropped to `clip`, hidden during motion when a WGC bitmap exists so the bitmap and thumbnail do not double-draw.
 - **`SetPeeks`**: whenever `proxy && !moving && !full`, the clipped rectangle is published to `win32::PEEKS` so the `WH_MOUSE_LL` hook turns clicks on peek slivers into `Event::Peek(hwnd)`.
 
-## Overlay Holes (`SetWindowRgn`, 200 ms poll)
+## Overlay Holes (D2D Masking + Z-Order Subtraction + UIPI)
 
-- Unmanaged visible top-level windows (`win32::external(w)` true and `self.owning(w).is_none()`, e.g., Task Manager or `action = "ignore"` rules) must never be covered by Planor's topmost overlay.
-- `Engine::holes()` enumerates unmanaged windows intersecting any monitor bounds; `Engine::tick()` polls `self.holes()` every **200 ms** and marks `self.dirty = true` if the list changed.
-- In `render.rs`, each `Host` cuts matching monitor-intersected rectangles out of its overlay HWND via `CreateRectRgn` + `CombineRgn(..., RGN_DIFF)` + `SetWindowRgn(host.h, whole, 1)` (only re-applied when the host's hole list changes).
+- Unmanaged visible top-level windows (`win32::overlay_occluder(w)` true and not managed/pinned, e.g., Task Manager, `action = "ignore"` rules, system flyouts, or Planor's own floating UI) must never be covered by Planor's topmost overlay when they sit above managed tiles.
+- **Z-order subtraction (`Engine::holes`)**: walks `windows()` top-to-bottom. Visible, uncloaked, non-iconic managed and pinned windows on the current virtual desktop are accumulated in `managed_above`; each unmanaged occluder has `managed_above` subtracted (`subtract_rects`) so an unmanaged window sitting *behind* managed tiles never erases their focus borders. `Engine::tick()` polls `self.holes()` every **200 ms** and marks `self.dirty = true` if the list changed.
+- **Direct2D hole masking (`Surface::draw`)**: borders, drop zones, and cover cards are masked directly in Direct2D using `D2D1_PRIMITIVE_BLEND_COPY` with a transparent brush, avoiding `SetWindowRgn` mutations during normal desktop use (which caused DWM black flashes while moving Task Manager).
+- **Thumbnail-only `SetWindowRgn`**: `Host` only applies `CreateRectRgn` + `CombineRgn(..., RGN_DIFF)` + `SetWindowRgn(host.h, whole, 0)` (`bRedraw = 0`) for holes that actually intersect an active DWM thumbnail (`holes_intersecting_rects`), and always draws/commits and updates the region *before* calling `ShowWindow(SW_SHOWNOACTIVATE)`.
+- **Windows UIPI & elevated apps (e.g., Task Manager)**: Planor runs unprivileged (standard user integrity), so Windows User Interface Privilege Isolation (UIPI) prevents Planor from reordering elevated windows or forcing them above/below its topmost overlay via `SetWindowPos`. Instead, Planor leaves elevated windows unmanaged, removes the focus highlight when an elevated window (or its owned dialog) holds foreground, and punches Z-order-aware holes in the overlay wherever the elevated window is visible in front of managed tiles. Users who want Task Manager to stay above all non-elevated windows can enable Task Manager's own **Settings → Always on top** option.
 - In isolated instances (`!PLANOR_INSTANCE.is_empty()`), `Engine::holes()` skips general desktop apps unless `PLANOR_HOLES=<ClassName>` is set, avoiding false cut-outs from the developer's background windows.
 
 ## Touchpad Gesture Pipeline

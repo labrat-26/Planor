@@ -60,6 +60,7 @@ struct SimHarness {
     reload_tx: Sender<toml::Value>,
     event_rx: Receiver<Event>,
     rendered_epoch: Arc<AtomicU64>,
+    rendered_overlay: Arc<AtomicU64>,
     renderer_join: Option<JoinHandle<()>>,
     dir: PathBuf,
     stopped: bool,
@@ -90,9 +91,11 @@ impl SimHarness {
         let (event_tx, event_rx) = crossbeam_channel::unbounded();
         let (reload_tx, reload_rx) = crossbeam_channel::unbounded();
         let rendered_epoch = Arc::new(AtomicU64::new(0));
+        let rendered_overlay = Arc::new(AtomicU64::new(0));
 
         let desktop_render = backend.clone();
         let epoch_render = rendered_epoch.clone();
+        let overlay_render = rendered_overlay.clone();
         let event_render = event_tx.clone();
         let renderer_join = thread::spawn(move || {
             while let Ok(msg) = render_rx.recv() {
@@ -106,6 +109,16 @@ impl SimHarness {
                         let _ = ack.send(());
                     }
                     render::Message::Warm(_) => {}
+                    render::Message::OverlayUpdate { update_id, holes, colors } => {
+                        let mut g = desktop_render.0.lock().unwrap();
+                        g.overlay_updates += 1;
+                        if let Some(last) = g.scenes.last_mut() {
+                            last.holes = holes.to_vec();
+                            last.tile_colors = colors;
+                        }
+                        drop(g);
+                        overlay_render.store(update_id, Ordering::Release);
+                    }
                     render::Message::Scene(scene) => {
                         let rejected = desktop_render.0.lock().unwrap().apply_scene(&scene);
                         if !rejected.is_empty() {
@@ -135,6 +148,7 @@ impl SimHarness {
             reload_tx,
             event_rx,
             rendered_epoch,
+            rendered_overlay,
             renderer_join: Some(renderer_join),
             dir,
             stopped: false,
@@ -167,12 +181,21 @@ impl SimHarness {
             let mut progressed = false;
             if self.engine.dirty {
                 let prev = self.engine.seq;
+                let prev_ov = self.engine.overlay_seq;
                 self.engine.layout().unwrap();
                 if self.engine.seq > prev {
                     let target = self.engine.seq;
                     let until = Instant::now() + Duration::from_secs(2);
                     while self.rendered_epoch.load(Ordering::Acquire) < target {
                         assert!(Instant::now() < until, "sim renderer timed out at seq {target}");
+                        thread::yield_now();
+                    }
+                }
+                if self.engine.overlay_seq > prev_ov {
+                    let target = self.engine.overlay_seq;
+                    let until = Instant::now() + Duration::from_secs(2);
+                    while self.rendered_overlay.load(Ordering::Acquire) < target {
+                        assert!(Instant::now() < until, "sim renderer timed out at overlay {target}");
                         thread::yield_now();
                     }
                 }
@@ -539,7 +562,7 @@ fn scn_display_offline_then_kill_recover() {
                     render::Message::Clear(ack) => {
                         let _ = ack.send(());
                     }
-                    render::Message::Warm(_) => {}
+                    render::Message::Warm(_) | render::Message::OverlayUpdate { .. } => {}
                     render::Message::Scene(s) => {
                         desktop_r.0.lock().unwrap().apply_scene(&s);
                         epoch_w.store(s.epoch, Ordering::Release);
@@ -1797,4 +1820,880 @@ fn config_reload_bumps_version_and_applies_gap() {
     assert_eq!(h.engine.config_version, before + 1, "one reload, one version bump");
     assert_eq!(h.engine.hot.gap_px, 11);
     h.stop_clean();
+}
+
+fn tile_color(h: &SimHarness, id: isize) -> Option<u32> {
+    h.desktop
+        .0
+        .lock()
+        .unwrap()
+        .scenes
+        .last()
+        .and_then(|s| s.tile_colors.iter().find(|(tid, _)| *tid == id).and_then(|(_, c)| *c))
+}
+
+#[test]
+fn issue_48_focus_highlight_removed_when_focus_on_unmanaged_app_dialog_or_system_ui() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 10, y: 10, w: 800, h: 600 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 900, y: 10, w: 800, h: 600 }));
+        // Elevated Task Manager (unmanaged external)
+        let mut tm = SimWindow::new(901, Rect { x: 200, y: 200, w: 600, h: 500 });
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+        // Owned floating dialog (external() == false, not managed)
+        let mut dlg = SimWindow::new(902, Rect { x: 300, y: 300, w: 400, h: 300 });
+        dlg.owner = 901;
+        sim.add_window(dlg);
+        // Planor.Note (Win+W note box: toolwindow + Planor class, external() == false)
+        let mut note = SimWindow::new(903, Rect { x: 400, y: 200, w: 560, h: 112 });
+        note.class = "Planor.Note".into();
+        note.toolwindow = true;
+        note.topmost = true;
+        sim.add_window(note);
+        // Start menu (Windows.UI.Core.CoreWindow, external() == false)
+        let mut start = SimWindow::new(904, Rect { x: 600, y: 400, w: 600, h: 600 });
+        start.class = "Windows.UI.Core.CoreWindow".into();
+        start.topmost = true;
+        sim.add_window(start);
+        sim.foreground = 101;
+    });
+
+    assert_eq!(tile_color(&h, 101), Some(0x3B82F6), "managed foreground tile shows focus highlight");
+    assert_eq!(tile_color(&h, 102), None);
+
+    // Focus each unmanaged window: focus highlight must disappear in every case.
+    for (fg, label) in [
+        (901, "elevated Task Manager"),
+        (902, "owned dialog"),
+        (903, "Win+W note box (polled via tick)"),
+        (904, "Start menu"),
+    ] {
+        h.desktop.0.lock().unwrap().foreground = fg;
+        if fg == 903 {
+            // Simulate WINEVENT_SKIPOWNPROCESS: no EVENT_SYSTEM_FOREGROUND, detected by tick().
+            h.engine.tick().unwrap();
+            h.settle_quiet();
+        } else {
+            h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, fg));
+            h.settle_quiet();
+        }
+        assert_eq!(tile_color(&h, 101), None, "{label}: focus highlight must be removed");
+        assert_eq!(tile_color(&h, 102), None, "{label}: no other tile should gain highlight");
+    }
+
+    // Focus back on managed tile 102 -> highlight returns on 102.
+    h.desktop.0.lock().unwrap().foreground = 102;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 102));
+    h.settle_quiet();
+    assert_eq!(tile_color(&h, 102), Some(0x3B82F6), "highlight restores when managed tile regains focus");
+    assert_eq!(tile_color(&h, 101), None);
+    h.stop_clean();
+}
+
+#[test]
+fn issue_52_task_manager_behind_managed_windows_does_not_erase_highlight() {
+    let tm_rect = Rect { x: 200, y: 150, w: 1200, h: 700 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        // Put Task Manager BEHIND both managed windows in Z-order.
+        let mut tm = SimWindow::new(901, tm_rect);
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.foreground = 101;
+    });
+
+    // Refresh holes after the initial layout places 101 and 102 into their tiled slots.
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    // Managed windows 101 and 102 sit above Task Manager and tile the monitor -> Task Manager
+    // is completely behind them (except the 6px gap between 101 and 102), so neither
+    // 101 nor 102's area is punched out of the overlay!
+    let r101 = h.rect(101);
+    let r102 = h.rect(102);
+    let holes_behind = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    for hole in &holes_behind {
+        let ov1 = (hole.x + hole.w).min(r101.x + r101.w) - hole.x.max(r101.x);
+        let ov2 = (hole.x + hole.w).min(r102.x + r102.w) - hole.x.max(r102.x);
+        assert!(ov1 <= 0, "Task Manager behind 101 must not punch a hole over 101: hole={hole:?} r101={r101:?}");
+        assert!(ov2 <= 0, "Task Manager behind 102 must not punch a hole over 102: hole={hole:?} r102={r102:?}");
+    }
+    assert_eq!(tile_color(&h, 101), Some(0x3B82F6), "focus highlight remains intact on 101");
+
+    // Raise Task Manager in front of both managed windows -> full rect is now carved as a hole.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.z_order.retain(|&id| id != 901);
+        g.z_order.insert(0, 901);
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let holes_front = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert_eq!(holes_front, vec![tm_rect], "Task Manager in front of managed tiles cuts its full rect");
+    h.stop_clean();
+}
+
+#[test]
+fn issue_17_system_flyouts_and_note_box_punch_holes_only_when_visible_and_uncloaked() {
+    let start_rect = Rect { x: 640, y: 300, w: 640, h: 700 };
+    let note_rect = Rect { x: 680, y: 340, w: 560, h: 112 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        let mut start = SimWindow::new(910, start_rect);
+        start.class = "Windows.UI.Core.CoreWindow".into();
+        start.topmost = true;
+        start.cloaked = true; // closed Start menu is cloaked by DWM
+        sim.add_window(start);
+        let mut note = SimWindow::new(911, note_rect);
+        note.class = "Planor.Note".into();
+        note.toolwindow = true;
+        note.topmost = true;
+        note.visible = false;
+        sim.add_window(note);
+        sim.foreground = 101;
+    });
+
+    assert!(
+        h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.is_empty(),
+        "cloaked Start menu and hidden note box must not punch holes"
+    );
+
+    // Open Start menu (uncloak) + show Win+W note box -> both punch holes.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&910).unwrap().cloaked = false;
+        g.windows.get_mut(&911).unwrap().visible = true;
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert!(holes.contains(&start_rect), "visible Start menu must punch a hole: {holes:?}");
+    assert!(holes.contains(&note_rect), "visible Win+W note box must punch a hole: {holes:?}");
+
+    // Close both -> holes vanish.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&910).unwrap().cloaked = true;
+        g.windows.get_mut(&911).unwrap().visible = false;
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(
+        h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.is_empty(),
+        "holes must clear when Start menu and note box close"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_17_edge_resize_does_not_show_green_drop_target_border_or_zones() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.foreground = 101;
+    });
+
+    let r1 = h.rect(101);
+    let r2 = h.rect(102);
+    // Start edge resize of 101 (Windows sends EVENT_SYSTEM_MOVESIZESTART for resizes too).
+    h.desktop.0.lock().unwrap().cursor = (r1.x + r1.w, r1.y + r1.h / 2);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    h.settle_quiet();
+
+    // Drag right edge of 101 into 102's area (width grows from r1.w to r1.w + 200).
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&101).unwrap().rect.w = r1.w + 200;
+        g.cursor = (r2.x + 150, r2.y + r2.h / 2);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    assert!(zones(&h).is_empty(), "edge resize must not show green stack drop zones");
+    assert_ne!(
+        tile_color(&h, 102),
+        h.engine.hot.drop_target_color,
+        "edge resize must not draw green drop-target border on neighbor"
+    );
+    assert_eq!(h.engine.drag.as_ref().map(|d| d.resizing), Some(true));
+
+    // Finish resize -> column resizes normally.
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle_quiet();
+    assert_eq!(h.rect(101).w, r1.w + 200);
+    h.stop_clean();
+}
+
+#[test]
+fn issue_50_51_moving_unmanaged_window_after_open_close_sends_neutral_zero_duration_scene() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        let mut tm = SimWindow::new(901, Rect { x: 200, y: 200, w: 500, h: 400 });
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+        sim.foreground = 101;
+    });
+
+    // Open a new window -> triggers an `open_close` scene.
+    let w2 = h
+        .desktop
+        .0
+        .lock()
+        .unwrap()
+        .add_window(SimWindow::new(102, Rect { x: 100, y: 100, w: 800, h: 600 }));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, w2));
+    h.settle();
+    let open_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert_eq!(open_scene.action, "open_close");
+
+    // Move Task Manager -> hole refresh must send an `OverlayUpdate` (NOT a new Scene epoch or
+    // animated `"open_close"` handoff!).
+    let seq_before = h.engine.seq;
+    let ov_before = h.desktop.0.lock().unwrap().overlay_updates;
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.z_order.retain(|&id| id != 901);
+        g.z_order.insert(0, 901);
+        g.windows.get_mut(&901).unwrap().rect = Rect { x: 320, y: 240, w: 500, h: 400 };
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(h.engine.seq, seq_before, "hole refresh must not supersede scene epoch");
+    assert_eq!(h.desktop.0.lock().unwrap().overlay_updates, ov_before + 1);
+    let hole_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert_eq!(hole_scene.holes, vec![Rect { x: 320, y: 240, w: 500, h: 400 }]);
+    h.stop_clean();
+}
+
+#[test]
+fn issue_50_51_focus_open_and_hole_change_mid_animation_preserve_motion() {
+    let mut cfg = note_cfg();
+    cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    cfg["animation"]["duration_ms"] = toml::Value::Integer(180);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 1920, y: 0, w: 900, h: 1000 }));
+        let mut tm = SimWindow::new(901, Rect { x: 200, y: 200, w: 500, h: 400 });
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+        sim.foreground = 101;
+    });
+
+    // 1. Focus key -> 180 ms scroll scene, followed immediately by EVENT_SYSTEM_FOREGROUND:
+    //    must NOT bump scene epoch or shorten the 180 ms scroll animation!
+    h.cmd(Command::Key { name: "focus_right".into() });
+    h.settle();
+    let scroll_seq = h.engine.seq;
+    let scroll_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert_eq!(scroll_scene.action, "scroll");
+    assert_eq!(scroll_scene.duration, 180);
+
+    let fg = h.desktop.0.lock().unwrap().foreground;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, fg));
+    h.settle_quiet();
+    assert_eq!(h.engine.seq, scroll_seq, "FOREGROUND after focus key must not cut scroll animation short");
+
+    // 2. Open new window -> 180 ms open_close scene, followed by FOREGROUND:
+    //    must NOT bump scene epoch or drop open_close handoff!
+    let w4 = h
+        .desktop
+        .0
+        .lock()
+        .unwrap()
+        .add_window(SimWindow::new(104, Rect { x: 100, y: 100, w: 800, h: 600 }));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, w4));
+    h.settle();
+    let open_seq = h.engine.seq;
+    let open_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert_eq!(open_scene.action, "open_close");
+    assert_eq!(open_scene.duration, 180);
+
+    h.desktop.0.lock().unwrap().foreground = w4;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, w4));
+    h.settle_quiet();
+    assert_eq!(h.engine.seq, open_seq, "FOREGROUND after open must not drop open_close animation/handoff");
+
+    // 3. Hole change mid-animation (e.g. Task Manager exposed by parked tile) -> OverlayUpdate,
+    //    NOT a new Scene epoch!
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.z_order.retain(|&id| id != 901);
+        g.z_order.insert(0, 901);
+        g.windows.get_mut(&901).unwrap().rect = Rect { x: 250, y: 250, w: 500, h: 400 };
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(h.engine.seq, open_seq, "hole change mid-animation must not supersede active scene");
+    assert_eq!(
+        h.desktop.0.lock().unwrap().scenes.last().unwrap().holes,
+        vec![Rect { x: 250, y: 250, w: 500, h: 400 }]
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_52_two_desktop_cloaked_managed_window_does_not_occlude_holes() {
+    let tm_rect = Rect { x: 200, y: 150, w: 600, h: 500 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        // Managed window 101 on desktop 1.
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 1920, h: 1140 }));
+        sim.foreground = 101;
+    });
+
+    // Switch to virtual desktop 2: desktop 1's window 101 becomes cloaked (still visible=true
+    // with its on-screen rect, sitting above desktop 2's Task Manager in Z-order).
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.current_desktop = Some(2);
+        g.windows.get_mut(&101).unwrap().cloaked = true;
+        let mut tm = SimWindow::new(901, tm_rect);
+        tm.desktop = 2;
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        g.add_window(tm);
+        // Put desktop-1 cloaked window 101 ABOVE Task Manager 901 in Z-order.
+        g.z_order.retain(|&id| id != 101);
+        g.z_order.insert(0, 101);
+        // Add a managed window 201 on desktop 2 behind Task Manager.
+        let mut w201 = SimWindow::new(201, Rect { x: 0, y: 0, w: 900, h: 1000 });
+        w201.desktop = 2;
+        g.windows.insert(201, w201);
+        g.z_order.push(201);
+        g.foreground = 201;
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert_eq!(
+        holes,
+        vec![tm_rect],
+        "cloaked window on desktop 1 must not occlude Task Manager hole on desktop 2"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_52_pinned_window_never_punches_hole_and_occludes_unmanaged_behind_it() {
+    let tm_rect = Rect { x: 200, y: 200, w: 500, h: 400 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.foreground = 102;
+    });
+
+    // Pin 102 and position it directly over Task Manager 901.
+    h.cmd(Command::Key { name: "toggle_pin".into() });
+    h.settle();
+    assert!(h.engine.pinned.contains(&102));
+
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&102).unwrap().rect = tm_rect;
+        let mut tm = SimWindow::new(901, tm_rect);
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        g.add_window(tm);
+        // Z-order: pinned 102 in front of Task Manager 901 in front of tile 101.
+        g.z_order = vec![102, 901, 101];
+    }
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert!(
+        holes.is_empty(),
+        "pinned window must not punch a hole for itself and must occlude Task Manager behind it: {holes:?}"
+    );
+    assert_eq!(
+        tile_color(&h, 102),
+        h.engine.hot.pinned_color,
+        "pinned window keeps its orange border"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_48_managed_owned_dialog_keeps_highlight_while_unmanaged_owned_dialog_removes_it() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        // Save As dialog owned by managed tile 101.
+        let mut managed_dlg = SimWindow::new(801, Rect { x: 200, y: 200, w: 500, h: 400 });
+        managed_dlg.owner = 101;
+        sim.add_window(managed_dlg);
+        // Elevated Task Manager + dialog owned by Task Manager.
+        let mut tm = SimWindow::new(901, Rect { x: 250, y: 250, w: 600, h: 500 });
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+        let mut unmanaged_dlg = SimWindow::new(902, Rect { x: 300, y: 300, w: 400, h: 300 });
+        unmanaged_dlg.owner = 901;
+        sim.add_window(unmanaged_dlg);
+        sim.foreground = 101;
+    });
+
+    assert_eq!(tile_color(&h, 101), Some(0x3B82F6));
+
+    // Focus dialog owned by managed tile 101 -> 101 keeps its focus highlight!
+    h.desktop.0.lock().unwrap().foreground = 801;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 801));
+    h.settle_quiet();
+    assert_eq!(
+        tile_color(&h, 101),
+        Some(0x3B82F6),
+        "dialog owned by managed window must keep its focus highlight"
+    );
+
+    // Focus dialog owned by unmanaged Task Manager 901 -> focus highlight is removed!
+    h.desktop.0.lock().unwrap().foreground = 902;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 902));
+    h.settle_quiet();
+    assert_eq!(
+        tile_color(&h, 101),
+        None,
+        "dialog owned by unmanaged window must remove focus highlight"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_48_transient_null_foreground_debounced_while_sustained_null_removes_highlight() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.foreground = 101;
+    });
+
+    assert_eq!(tile_color(&h, 101), Some(0x3B82F6));
+
+    // Transient NULL for 1 tick (X -> 0 -> Y): highlight must NOT blink off.
+    h.desktop.0.lock().unwrap().foreground = 0;
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(
+        tile_color(&h, 101),
+        Some(0x3B82F6),
+        "single-tick transient NULL foreground must not blink off highlight"
+    );
+
+    // Focus lands on 102 -> highlight moves to 102 cleanly.
+    h.desktop.0.lock().unwrap().foreground = 102;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 102));
+    h.settle_quiet();
+    assert_eq!(tile_color(&h, 102), Some(0x3B82F6));
+    assert_eq!(tile_color(&h, 101), None);
+
+    // Sustained NULL for 2 ticks (Y -> 0 -> 0): highlight is removed.
+    h.desktop.0.lock().unwrap().foreground = 0;
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(tile_color(&h, 102), Some(0x3B82F6), "tick 1 still debounced");
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(tile_color(&h, 102), None, "sustained NULL foreground removes highlight");
+    h.stop_clean();
+}
+
+#[test]
+fn issue_17_dpi_change_drag_restore_pad_drag_fling_and_corner_resizes() {
+    // 1. Cross-DPI drag: window moves first, then WM_DPICHANGED resizes it mid-drag -> must
+    //    stay classified as a move and transfer to MON1 (not snap back as a resize).
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        to_start(&mut h, "MON0");
+        to_start(&mut h, "MON1");
+        let r1 = h.rect(101);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + r1.w / 2, r1.y + 15);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        // Move title bar first -> latches `moved = true`.
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect = Rect { x: r1.x + 120, y: r1.y + 40, ..r1 };
+            g.cursor = (r1.x + r1.w / 2 + 120, r1.y + 55);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(h.engine.drag.as_ref().map(|d| (d.moved, d.resizing)), Some((true, false)));
+        // Cross onto MON1 and simulate WM_DPICHANGED changing window width/height!
+        let r201 = h.rect(201);
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect =
+                Rect { x: r201.x + 50, y: r201.y + 50, w: r1.w + 240, h: r1.h + 180 };
+            g.cursor = (r201.x + r201.w / 8, r201.y + r201.h / 8);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(
+            h.engine.drag.as_ref().map(|d| (d.moved, d.resizing)),
+            Some((true, false)),
+            "WM_DPICHANGED mid-drag must not flip resizing"
+        );
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+        h.settle();
+        assert!(
+            h.engine.strips[&(1, "MON1".into())].locate(101).is_some(),
+            "cross-DPI drag must transfer 101 to MON1"
+        );
+        h.stop_clean();
+    }
+
+    // 2. Drag-restore: window shrinks AND moves both edges on first report -> classified as move,
+    //    swaps with neighbor on drop instead of resizing.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 101;
+        });
+        let r1 = h.rect(101);
+        let r2 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + r1.w / 2, r1.y + 15);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        // Both left & right edges shift and size shrinks (drag-restore from snapped/maximized).
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect =
+                Rect { x: r2.x + 40, y: r2.y + 40, w: r1.w - 150, h: r1.h - 200 };
+            g.cursor = (r2.x + r2.w / 8, r2.y + r2.h / 8);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(h.engine.drag.as_ref().map(|d| (d.moved, d.resizing)), Some((true, false)));
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+        h.settle();
+        assert_eq!(
+            h.engine.strips[&(1, "MON0".into())].columns[0].members,
+            vec![102],
+            "drag-restore dropped on 102 must swap instead of resizing"
+        );
+        h.stop_clean();
+    }
+
+    // 3. Pad drag and fling with a size change: `pad_drag` stays true after `pad.take()` in
+    //    `pad_end`, so a size change during pad drag/fling never turns into a resize.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        focus(&mut h, 101);
+        // Start 4-finger pad drag.
+        h.engine.event(Event::Contacts(vec![(200., 200.); 4]));
+        h.engine.event(Event::Contacts(vec![(225., 200.); 4]));
+        h.settle_quiet();
+        assert!(h.engine.pad.is_some());
+        assert_eq!(h.engine.drag.as_ref().map(|d| d.pad_drag), Some(true));
+        // Simulate window size changing during pad drag (e.g. DPI or app relayout) and fling right.
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect.w += 180;
+        }
+        h.engine.event(Event::Contacts(vec![(500., 200.); 4]));
+        h.settle_quiet();
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle();
+        assert!(
+            h.engine.strips[&(1, "MON1".into())].locate(101).is_some(),
+            "pad fling with size change must still transfer to MON1"
+        );
+        h.stop_clean();
+    }
+
+    // 4. Top, left, and top-left corner resizes all latch `resizing = true` (no drop zones).
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 102;
+        });
+        let r2 = h.rect(102);
+        for (label, next_rect) in [
+            ("top edge", Rect { y: r2.y + 40, h: r2.h - 40, ..r2 }),
+            ("left edge", Rect { x: r2.x + 60, w: r2.w - 60, ..r2 }),
+            ("top-left corner", Rect { x: r2.x + 60, y: r2.y + 40, w: r2.w - 60, h: r2.h - 40 }),
+        ] {
+            let cur_r2 = h.rect(102);
+            h.desktop.0.lock().unwrap().cursor = (cur_r2.x, cur_r2.y);
+            h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 102));
+            h.settle_quiet();
+            {
+                let mut g = h.desktop.0.lock().unwrap();
+                g.windows.get_mut(&102).unwrap().rect = Rect {
+                    x: next_rect.x - r2.x + cur_r2.x,
+                    y: next_rect.y - r2.y + cur_r2.y,
+                    w: next_rect.w - r2.w + cur_r2.w,
+                    h: next_rect.h - r2.h + cur_r2.h,
+                };
+                g.cursor = (cur_r2.x - 100, cur_r2.y + 200);
+            }
+            h.engine.tick().unwrap();
+            h.settle_quiet();
+            assert_eq!(
+                h.engine.drag.as_ref().map(|d| d.resizing),
+                Some(true),
+                "{label}: must latch resizing=true"
+            );
+            assert!(zones(&h).is_empty(), "{label}: must not show green drop zones");
+            h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
+            h.settle_quiet();
+        }
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn issue_17_tab_tearoff_and_unended_drag_clear_drag_session() {
+    // 1. Tab tear-off: MOVESIZESTART on source window 101, MOVESIZEEND on new window 201.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 101;
+        });
+        let r1 = h.rect(101);
+        let r2 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + 100, r1.y + 15);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect = Rect { x: r1.x + 40, y: r1.y + 20, ..r1 };
+            g.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert!(h.engine.drag.is_some());
+
+        // New torn-off window 201 receives MOVESIZEEND instead of source 101.
+        let new_id = h
+            .desktop
+            .0
+            .lock()
+            .unwrap()
+            .add_window(SimWindow::new(201, Rect { x: 400, y: 200, w: 800, h: 600 }));
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, new_id));
+        h.settle_quiet();
+        assert!(h.engine.drag.is_none(), "MOVESIZEEND on torn-off window must clear source drag");
+        assert!(zones(&h).is_empty(), "green drop zones must clear after mismatched MOVESIZEEND");
+        assert_ne!(tile_color(&h, 102), h.engine.hot.drop_target_color);
+        h.stop_clean();
+    }
+
+    // 2. Unended drag: mouse button pressed during drag and released without MOVESIZEEND.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 101;
+        });
+        let r1 = h.rect(101);
+        let r2 = h.rect(102);
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.keys_down.insert(0x01); // VK_LBUTTON down
+            g.cursor = (r1.x + 100, r1.y + 15);
+        }
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect = Rect { x: r1.x + 80, y: r1.y + 20, ..r1 };
+            g.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert!(h.engine.drag.is_some());
+        assert!(!zones(&h).is_empty());
+
+        // Release VK_LBUTTON without ever delivering EVENT_SYSTEM_MOVESIZEEND.
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+        h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().in_movesize = Some(false);
+        h.engine.tick().unwrap();
+        // Fast-forward the release timestamp past the 250 ms grace period.
+        if let Some(d) = h.engine.drag.as_mut() {
+            d.lbutton_up_since = Some(Instant::now() - Duration::from_millis(300));
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert!(h.engine.drag.is_none(), "unended drag must clear once GetGUIThreadInfo confirms not in movesize");
+        assert!(zones(&h).is_empty(), "green drop zones must clear on unended drag recovery");
+        h.stop_clean();
+    }
+
+    // 3. Dragged window hidden/destroyed mid-drag clears drag session immediately.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 101;
+        });
+        let r1 = h.rect(101);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + 100, r1.y + 15);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        assert!(h.engine.drag.is_some());
+        h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().visible = false;
+        h.engine.event(Event::Window(EVENT_OBJECT_DESTROY, 101));
+        h.settle_quiet();
+        assert!(h.engine.drag.is_none(), "destroying dragged window must clear drag session");
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn issue_17_late_movesizeend_after_release_preserves_cross_monitor_transfer() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    to_start(&mut h, "MON0");
+    to_start(&mut h, "MON1");
+    let r1 = h.rect(101);
+    let r201 = h.rect(201);
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.keys_down.insert(0x01); // VK_LBUTTON down
+        g.cursor = (r1.x + r1.w / 2, r1.y + 15);
+    }
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    h.settle_quiet();
+    // Drag 101 onto MON1.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&101).unwrap().rect = Rect { x: r201.x + 60, y: r201.y + 60, ..r1 };
+        g.cursor = (r201.x + r201.w / 8, r201.y + r201.h / 8);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(!zones(&h).is_empty(), "drop zones visible while holding mouse button");
+
+    // Release mouse button, while browser thread is busy doing DPI relayout (`in_movesize == None`).
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.engine.tick().unwrap();
+    // Simulate 1 second elapsed after release without MOVESIZEEND yet.
+    if let Some(d) = h.engine.drag.as_mut() {
+        d.lbutton_up_since = Some(Instant::now() - Duration::from_secs(1));
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(zones(&h).is_empty(), "drop visuals must clear promptly after release");
+    assert!(h.engine.drag.is_some(), "drag session must stay alive for late MOVESIZEEND");
+
+    // Late MOVESIZEEND arrives 1 s after release -> cross-monitor transfer still completes!
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+    assert!(
+        h.engine.strips[&(1, "MON1".into())].locate(101).is_some(),
+        "late MOVESIZEEND 1 s after release must still complete transfer to MON1"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn issue_48_dialog_owned_by_other_managed_window_highlights_owner_not_previous_active() {
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        // Dialog owned by managed window 102 (NOT the currently active 101).
+        let mut dlg = SimWindow::new(802, Rect { x: 1000, y: 200, w: 400, h: 300 });
+        dlg.owner = 102;
+        sim.add_window(dlg);
+        sim.foreground = 101;
+    });
+
+    assert_eq!(tile_color(&h, 101), Some(0x3B82F6));
+    assert_eq!(tile_color(&h, 102), None);
+
+    // Dialog owned by 102 gains focus -> 102 gets the highlight, NOT 101!
+    h.desktop.0.lock().unwrap().foreground = 802;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 802));
+    h.settle_quiet();
+    assert_eq!(tile_color(&h, 102), Some(0x3B82F6), "owner 102 must receive the focus highlight");
+    assert_eq!(tile_color(&h, 101), None, "previous active tile 101 must lose the focus highlight");
+    h.stop_clean();
+}
+
+#[test]
+fn issue_17_snapped_drag_restore_with_top_edge_anchored_and_off_monitor_latched_resize() {
+    // 1. Drag-restore of a snapped window sampled while top edge is still within 2 px of origin
+    //    (cur.y == orig.y, cur.h < orig.h, horizontal edges shifted): must classify as `moved`,
+    //    NOT `resizing`, and swap on drop!
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 101;
+        });
+        let r1 = h.rect(101);
+        let r2 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + r1.w / 2, r1.y + 15);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.settle_quiet();
+        // Top edge stays at r1.y + 1 (within 2 px!), height shrinks, AND both X edges shift.
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&101).unwrap().rect =
+                Rect { x: r1.x + 150, y: r1.y + 1, w: r1.w - 200, h: r1.h - 200 };
+            g.cursor = (r2.x + r2.w / 8, r2.y + r2.h / 8);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(
+            h.engine.drag.as_ref().map(|d| (d.moved, d.resizing)),
+            Some((true, false)),
+            "snapped drag-restore with top edge within 2 px must classify as move, not resize"
+        );
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+        h.settle();
+        assert_eq!(
+            h.engine.strips[&(1, "MON0".into())].columns[0].members,
+            vec![102],
+            "snapped drag-restore dropped on 102 must swap"
+        );
+        h.stop_clean();
+    }
+
+    // 2. Latched edge resize dragged mostly off the home monitor (`on_home == false`):
+    //    must still honor the resize instead of snapping back.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+            sim.foreground = 102;
+        });
+        let r2 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r2.x + r2.w, r2.y + r2.h / 2);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 102));
+        h.settle_quiet();
+        // Drag right edge far onto MON1 so >50% of the window's area sits past MON0's right edge (1920).
+        let huge_w = 2400;
+        {
+            let mut g = h.desktop.0.lock().unwrap();
+            g.windows.get_mut(&102).unwrap().rect = Rect { w: huge_w, ..r2 };
+            g.cursor = (r2.x + huge_w, r2.y + r2.h / 2);
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(h.engine.drag.as_ref().map(|d| d.resizing), Some(true));
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
+        h.settle();
+        assert!(
+            h.engine.strips[&(1, "MON0".into())].columns[1].length > r2.w,
+            "latched edge resize dragged mostly off home monitor must resize, not snap back"
+        );
+        h.stop_clean();
+    }
 }
