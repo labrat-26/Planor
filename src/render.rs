@@ -898,6 +898,51 @@ pub(crate) fn parked_target_rect(
     Rect { x: park, y: bound.y, ..tile_rect }
 }
 
+/// Partition on-screen landing placements into `(sync_landing, async_landing)`.
+/// Tiles whose cross-monitor/newborn placeholder cover timed out are still busy handling
+/// `WM_DPICHANGED` or initial resize; placing them via `SWP_ASYNCWINDOWPOS` avoids blocking the
+/// render thread synchronously on a slow app while the delayed `verify` pass handles any drift.
+pub(crate) fn partition_landing_placements(
+    placements: &[(isize, Rect)],
+    park: i32,
+    cover_timed_out_ids: &HashSet<isize>,
+    parking: &mut Vec<(isize, Rect)>,
+    sync_landing: &mut Vec<(isize, Rect)>,
+    async_landing: &mut Vec<(isize, Rect)>,
+) {
+    parking.clear();
+    sync_landing.clear();
+    async_landing.clear();
+    for &(id, rect) in placements {
+        if rect.x == park {
+            parking.push((id, rect));
+        } else if cover_timed_out_ids.contains(&id) {
+            async_landing.push((id, rect));
+        } else {
+            sync_landing.push((id, rect));
+        }
+    }
+}
+
+/// For an `"open_close"` scene at `t >= 1.0`, return the combined on-screen landing placements
+/// (`sync_landing` + `async_landing`) that should be placed asynchronously and tracked by
+/// `open_landing` until arrival (or the 350 ms handoff timeout). Returns `None` for non-open/close
+/// actions, mid-animation frames (`t < 1.0`), or when both landing lists are empty.
+pub(crate) fn open_landing_items(
+    action: &str,
+    t: f64,
+    sync_landing: &[Placement],
+    async_landing: &[Placement],
+) -> Option<Vec<Placement>> {
+    if action != "open_close" || t < 1. || (sync_landing.is_empty() && async_landing.is_empty()) {
+        return None;
+    }
+    let mut items = Vec::with_capacity(sync_landing.len() + async_landing.len());
+    items.extend_from_slice(sync_landing);
+    items.extend_from_slice(async_landing);
+    Some(items)
+}
+
 /// Recompute 1:1 thumbnail `(src, dst)` when a parked window's DWM thumbnail source size changes
 /// asynchronously after settling. Returns `None` when unchanged.
 pub(crate) fn refresh_thumb_props_if_resized(
@@ -972,6 +1017,7 @@ struct FrameScratch {
     next: HashMap<isize, Rect>,
     parking: Vec<Placement>,
     landing: Vec<Placement>,
+    async_landing: Vec<Placement>,
     rejected: Vec<Placement>,
     actuals: Vec<Placement>,
     verify_items: Vec<Placement>,
@@ -1726,15 +1772,14 @@ impl RenderState {
                     win32::place_async(&scratch.unsent_covers);
                 }
             }
-            scratch.parking.clear();
-            scratch.landing.clear();
-            for &(id, rect) in &scratch.placements {
-                if rect.x == park {
-                    scratch.parking.push((id, rect));
-                } else {
-                    scratch.landing.push((id, rect));
-                }
-            }
+            partition_landing_placements(
+                &scratch.placements,
+                park,
+                &self.cover_timed_out_ids,
+                &mut scratch.parking,
+                &mut scratch.landing,
+                &mut scratch.async_landing,
+            );
             let start = Instant::now();
             let mut retries = 0u32;
             let mut place_ok = false;
@@ -1752,18 +1797,23 @@ impl RenderState {
                 let placed_at = Instant::now();
                 // Parking never waits for the app. The last on-screen move of an open/close animation is
                 // asynchronous too: its thumbnail remains above it until `open_landed` confirms arrival.
-                let animated_open_landing = s.action == "open_close"
-                    && t >= 1.
-                    && !scratch.landing.is_empty();
-                if animated_open_landing
+                let open_items =
+                    open_landing_items(s.action, t, &scratch.landing, &scratch.async_landing);
+                let animated_open_landing = open_items.is_some();
+                let mut placed_async_landing = false;
+                if let Some(items) = open_items
                     && self.open_landed != Some(s.epoch)
                     && self.open_landing.as_ref().is_none_or(|(epoch, _, _)| *epoch != s.epoch)
                 {
-                    win32::place_async(&scratch.landing);
-                    self.open_landing = Some((s.epoch, Instant::now(), scratch.landing.clone()));
+                    win32::place_async(&items);
+                    self.open_landing = Some((s.epoch, Instant::now(), items));
+                    placed_async_landing = true;
                 }
                 if retries == 0 {
                     win32::place_async(&scratch.parking);
+                    if !placed_async_landing && !scratch.async_landing.is_empty() {
+                        win32::place_async(&scratch.async_landing);
+                    }
                 }
                 let result = if scratch.landing.is_empty() || (animated_open_landing && retries == 0) {
                     Ok(())
@@ -2088,10 +2138,12 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
 #[cfg(test)]
 mod tests {
     use super::{
-        choose_proxy_backing, is_capture_stale, parked_target_rect, proxy_blit_rects,
-        refresh_thumb_props_if_resized, should_draw_backing, wgc_capture_insets,
+        choose_proxy_backing, is_capture_stale, open_landing_items, parked_target_rect,
+        partition_landing_placements, proxy_blit_rects, refresh_thumb_props_if_resized,
+        should_draw_backing, wgc_capture_insets,
     };
     use planor::Rect;
+    use std::collections::HashSet;
 
     #[test]
     fn wgc_vs_dwm_origins_are_distinguished() {
@@ -2275,5 +2327,54 @@ mod tests {
         // At settle, parked target keeps bound.y as well (zero extra settle move, no mixed-DPI y drift).
         let settled = parked_target_rect(3584, frame2, bound, false);
         assert_eq!(settled, Rect { x: 3584, y: -1440, w: 1277, h: 1336 });
+    }
+
+    #[test]
+    fn partition_landing_placements_routes_timed_out_covers_to_async() {
+        // Repro of #44: a cross-monitor window whose placeholder cover timed out while handling
+        // WM_DPICHANGED must be placed asynchronously rather than blocking synchronous EndDeferWindowPos.
+        let park = 3584;
+        let placements = vec![
+            (10, Rect { x: park, y: -1440, w: 1277, h: 1392 }), // parked
+            (20, Rect { x: -1412, y: -1859, w: 1412, h: 2512 }), // cover timed out (cross-DPI)
+            (30, Rect { x: 0, y: -1440, w: 1277, h: 1392 }), // normal on-screen landing
+        ];
+        let mut timed_out = HashSet::new();
+        timed_out.insert(20);
+
+        let (mut parking, mut sync_landing, mut async_landing) = (vec![], vec![], vec![]);
+        partition_landing_placements(
+            &placements,
+            park,
+            &timed_out,
+            &mut parking,
+            &mut sync_landing,
+            &mut async_landing,
+        );
+        assert_eq!(parking, vec![placements[0]]);
+        assert_eq!(async_landing, vec![placements[1]]);
+        assert_eq!(sync_landing, vec![placements[2]]);
+    }
+
+    #[test]
+    fn open_landing_items_includes_timed_out_async_cover_even_when_sync_landing_is_empty() {
+        let newborn = (42, Rect { x: 0, y: 0, w: 960, h: 1140 });
+        let sibling = (43, Rect { x: 966, y: 0, w: 954, h: 1140 });
+
+        // Sole newborn whose cover timed out: sync_landing is empty, async_landing has newborn.
+        assert_eq!(
+            open_landing_items("open_close", 1.0, &[], &[newborn]),
+            Some(vec![newborn]),
+            "open_close handoff must still trigger when only async_landing is non-empty"
+        );
+        // Mixed sync + async landing: both are tracked together.
+        assert_eq!(
+            open_landing_items("open_close", 1.0, &[sibling], &[newborn]),
+            Some(vec![sibling, newborn])
+        );
+        // Mid-animation, non-open/close, or both empty -> None.
+        assert_eq!(open_landing_items("open_close", 0.5, &[], &[newborn]), None);
+        assert_eq!(open_landing_items("drag_reflow", 1.0, &[], &[newborn]), None);
+        assert_eq!(open_landing_items("open_close", 1.0, &[], &[]), None);
     }
 }

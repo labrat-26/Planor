@@ -312,7 +312,11 @@ pub(crate) struct PadDrag {
     pub cursor: (f64, f64),
     /// Union of all monitors (left, top, right, bottom): the cursor, and so the window, never leaves it.
     pub limits: (f64, f64, f64, f64),
+    /// Timestamp of the last non-zero `pad_move` sample, used for `dt` in acceleration.
     pub seen: Instant,
+    /// Timestamp of the last 3/4-finger contact frame (including stationary holds), used for the
+    /// fallback release timeout so stationary holds do not time out without corrupting `seen`'s `dt`.
+    pub last_contact: Instant,
     /// Smoothed finger speed (units/s) for the acceleration; a raw per-report speed is noisy, which made
     /// the same swipe move the window by different amounts.
     pub speed: f64,
@@ -1052,7 +1056,7 @@ impl<B: WindowBackend> Engine<B> {
         if self.gesture_rec.as_ref().is_some_and(|r| Instant::now() >= r.until) {
             self.write_gesture_recording();
         }
-        if self.pad.as_ref().is_some_and(|p| p.seen.elapsed() > Duration::from_millis(800)) {
+        if self.pad.as_ref().is_some_and(|p| p.last_contact.elapsed() > Duration::from_millis(800)) {
             self.pad_end()
         }
         // Momentum normally runs on `fast_tick`; this keeps it going if the fast timer is not wired (tests).
@@ -1554,6 +1558,13 @@ impl<B: WindowBackend> Engine<B> {
                     .join(";")
             };
             diag::trace(format!("PAD contacts n={} pts={pts}", p.len()));
+        }
+        if (p.len() == 3 || p.len() == 4)
+            && let Some(pad) = self.pad.as_mut()
+        {
+            // Keep the fallback timeout alive while fingers remain on the pad even when held still
+            // (without touching `pad.seen`, which `pad_move` uses for acceleration `dt`).
+            pad.last_contact = Instant::now();
         }
         let swipe = self.gesture.sample(
             &p,
@@ -2120,14 +2131,16 @@ impl<B: WindowBackend> Engine<B> {
             b.clone().map(|r| r.x + r.w).max().unwrap_or(1) as f64 - 1.,
             b.map(|r| r.y + r.h).max().unwrap_or(1) as f64 - 1.,
         );
+        let now = Instant::now();
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
             cursor: (cx as f64, cy as f64),
             limits,
-            seen: Instant::now(),
+            seen: now,
+            last_contact: now,
             speed: 0.,
-            moved: Instant::now(),
+            moved: now,
             samples: Default::default(),
         });
     }
@@ -2167,6 +2180,8 @@ impl<B: WindowBackend> Engine<B> {
         }
     }
     /// Five fingers while carrying a window: nothing is dropped, the layout puts the window back.
+    /// Do NOT reset `self.gesture` here: `Gesture::sample` already set `vetoed = true` so the
+    /// staged lift (5 -> 4 -> 3 -> 0) stays ignored until fewer than 3 fingers remain.
     fn pad_cancel(&mut self) {
         if self.pad.take().is_some() {
             self.drag = None;
@@ -2177,6 +2192,10 @@ impl<B: WindowBackend> Engine<B> {
     }
     fn pad_end(&mut self) {
         let Some(p) = self.pad.take() else { return };
+        // Always reset the gesture recogniser when ending a pad drag (including via the fallback
+        // timeout), so stale `dragging = true` state cannot suppress the next drag or emit a
+        // delayed bogus `PAD DragEnd` seconds later (#43, #44).
+        self.gesture = Default::default();
         // Fling: a fast flick at lift-off throws the window to the neighbouring screen in that direction.
         let now = Instant::now();
         let (mut vx, mut vy) = (0., 0.);
@@ -2407,10 +2426,15 @@ impl<B: WindowBackend> Engine<B> {
         {
             return;
         }
-        // The moves during a pad drag are asynchronous, so a flung window may not have moved yet.
+        // The moves during a pad drag are asynchronous, so a flung or freshly-released pad-dragged
+        // window may still report `d.original` from the OS before its async SetWindowPos lands.
         let Some(r) = (if flung { Some(d.original) } else { self.backend.frame(id) }) else { return };
         let s = self.strips.get_mut(&d.key).unwrap();
-        if r==d.original&&!flung{return}
+        if r == d.original && !flung && !d.pad_drag {
+            // Escape cancels the OS move loop and snaps the window back; a mouse drop that never
+            // moved the window must not reorder, stack or transfer anything.
+            return;
+        }
         // A resize keeps at least one horizontal edge and one vertical edge anchored (a move shifts
         // both edges on at least one axis). Dragging an edge far beyond the monitor puts the cursor on
         // another monitor; a latched resize still completes as a resize, not a transfer.
@@ -2439,11 +2463,6 @@ impl<B: WindowBackend> Engine<B> {
             self.reveal();
             return;
         }
-        if r == d.original && !flung {
-            // Escape cancels the OS move loop and snaps the window back; a drop that never moved the
-            // window must not reorder, stack or transfer anything.
-            return;
-        }
         let Some(dest) = d.destination else { return };
         if self.displays != self.backend.monitors() {
             self.deadline = Some(Instant::now() + Duration::from_millis(1500));
@@ -2468,8 +2487,9 @@ impl<B: WindowBackend> Engine<B> {
             return;
         }
         if dest != d.key {
-            if self.backend.minimum(id, true) > area.w
-                || self.backend.minimum(id, false) > area.h
+            let (min_w, min_h) = self.backend.minimum_size(id);
+            if min_w > area.w
+                || min_h > area.h
                 || !self.transfer_dialogs(id, d.original, area)
             {
                 return;
@@ -2480,7 +2500,7 @@ impl<B: WindowBackend> Engine<B> {
                 .strips
                 .entry(dest.clone())
                 .or_insert_with(|| Strip::new(area));
-            s.insert(id, self.backend.minimum(id, area.horizontal()))
+            s.insert(id, if area.horizontal() { min_w } else { min_h })
         }
         if dest != d.key {
             // Crossing monitors: snap into the new slot at once, behind a placeholder cover while
@@ -2522,7 +2542,7 @@ impl<B: WindowBackend> Engine<B> {
                 ))
             }
         }
-        moves.is_empty() || self.backend.place(&moves).is_ok()
+        moves.is_empty() || self.backend.place_async(&moves).is_ok()
     }
     fn window_state(&mut self, id: isize) {
         if self.drag.is_some() {

@@ -546,6 +546,11 @@ pub fn eligible(id: isize, cfg: &toml::Value) -> bool {
     }
 }
 pub fn minimum(id: isize, horizontal: bool) -> i32 {
+    let (w, h) = minimum_size(id);
+    if horizontal { w } else { h }
+}
+/// Query both minimum width and minimum height in a single `WM_GETMINMAXINFO` round-trip.
+pub fn minimum_size(id: isize) -> (i32, i32) {
     unsafe {
         let mut info = MINMAXINFO::default();
         let mut result = 0;
@@ -559,17 +564,16 @@ pub fn minimum(id: isize, horizontal: bool) -> i32 {
             &mut result,
         );
         if ok == 0 {
-            return 1;
+            return (1, 1);
         }
         let mut r = RECT::default();
         GetWindowRect(id as _, &mut r);
         let outer = rect(r);
         let visible = frame(id).unwrap_or(outer);
-        if horizontal {
-            (info.ptMinTrackSize.x - outer.w + visible.w).max(1)
-        } else {
-            (info.ptMinTrackSize.y - outer.h + visible.h).max(1)
-        }
+        (
+            (info.ptMinTrackSize.x - outer.w + visible.w).max(1),
+            (info.ptMinTrackSize.y - outer.h + visible.h).max(1),
+        )
     }
 }
 /// DWORD settings Planor forces to 0 while it runs: Snap assist / layouts / bar / joint resize, and the
@@ -730,29 +734,53 @@ pub fn activate(id: isize) {
 /// Move windows without waiting for their apps. Parking happens behind a stand-in, and the open/close
 /// animation's last frame is held until the asynchronous move reaches its target (or a bounded handoff
 /// timeout), then verified again after settling. A synchronous move waited up to 68 ms for apps still starting.
-pub fn place_async(items: &[(isize, Rect)]) {
-    unsafe {
-        for &(id, r) in items {
-            let mut outer = RECT::default();
-            if GetWindowRect(id as _, &mut outer) == 0 {
-                continue;
-            }
-            let full = rect(outer);
-            let vis = frame(id).unwrap_or(full);
-            if r == vis {
-                continue;
-            }
-            SetWindowPos(
-                id as _,
-                null_mut(),
-                r.x + full.x - vis.x,
-                r.y + full.y - vis.y,
-                r.w + full.w - vis.w,
-                r.h + full.h - vis.h,
-                SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
-            );
+/// Run `apply` for every item in `items` without short-circuiting on failure, returning the first
+/// error encountered (if any) once all items have been attempted.
+fn place_batch_continue(
+    items: &[(isize, Rect)],
+    mut apply: impl FnMut(isize, Rect) -> Result<()>,
+) -> Result<()> {
+    let mut first_err = None;
+    for &(id, r) in items {
+        if let Err(e) = apply(id, r)
+            && first_err.is_none()
+        {
+            first_err = Some(e);
         }
     }
+    match first_err {
+        Some(e) => Err(e),
+        None => Ok(()),
+    }
+}
+pub fn place_async(items: &[(isize, Rect)]) {
+    let _ = place_async_checked(items);
+}
+pub fn place_async_checked(items: &[(isize, Rect)]) -> Result<()> {
+    place_batch_continue(items, |id, r| unsafe {
+        let mut outer = RECT::default();
+        if GetWindowRect(id as _, &mut outer) == 0 {
+            return Ok(());
+        }
+        let full = rect(outer);
+        let vis = frame(id).unwrap_or(full);
+        if r == vis {
+            return Ok(());
+        }
+        if SetWindowPos(
+            id as _,
+            null_mut(),
+            r.x + full.x - vis.x,
+            r.y + full.y - vis.y,
+            r.w + full.w - vis.w,
+            r.h + full.h - vis.h,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_ASYNCWINDOWPOS,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error().into());
+        }
+        Ok(())
+    })
 }
 pub fn place(items: &[(isize, Rect)]) -> Result<()> {
     unsafe {
@@ -892,7 +920,8 @@ pub fn never_tiled_class(class: &str, real_daemon: bool) -> bool {
 
 #[cfg(test)]
 mod class_tests {
-    use super::never_tiled_class;
+    use super::{never_tiled_class, place_batch_continue};
+    use planor::Rect;
 
     #[test]
     fn settings_window_floats_and_sentinels_belong_to_their_test_daemon() {
@@ -901,5 +930,34 @@ mod class_tests {
         assert!(never_tiled_class("PlanorSentinel_p42", true));
         assert!(!never_tiled_class("PlanorSentinel_p42", false), "an isolated test daemon manages its own sentinels");
         assert!(!never_tiled_class("Notepad", true));
+    }
+
+    #[test]
+    fn place_batch_continue_attempts_all_items_and_returns_first_error() {
+        let items = vec![
+            (1, Rect { x: 0, y: 0, w: 100, h: 100 }),
+            (2, Rect { x: 100, y: 0, w: 100, h: 100 }),
+            (3, Rect { x: 200, y: 0, w: 100, h: 100 }),
+        ];
+        let mut attempted = Vec::new();
+        let res = place_batch_continue(&items, |id, _| {
+            attempted.push(id);
+            if id == 2 {
+                Err("access denied on 2".into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(attempted, vec![1, 2, 3], "all items must be attempted after middle failure");
+        assert_eq!(res.unwrap_err().to_string(), "access denied on 2");
+
+        // All-succeed case returns Ok(()).
+        let mut ok_attempted = Vec::new();
+        let ok_res = place_batch_continue(&items, |id, _| {
+            ok_attempted.push(id);
+            Ok(())
+        });
+        assert!(ok_res.is_ok());
+        assert_eq!(ok_attempted, vec![1, 2, 3]);
     }
 }

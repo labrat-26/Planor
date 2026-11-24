@@ -2909,3 +2909,240 @@ fn same_monitor_drop_animates_and_release_near_edge_does_not_scroll() {
         h.stop_clean();
     }
 }
+
+#[test]
+fn sim_pad_drag_releases_immediately_on_tip_up_lift_and_resets_gesture_after_timeout() {
+    // Regression test for #43 (bundle 001248110-releasing-the-drag-did-not-initially):
+    // 1) A 4-finger tip-up lift (ContactFrame::packet(4, [])) must release the drag immediately
+    //    instead of hanging for the 800 ms fallback timeout.
+    // 2) Holding 4 fingers still on the pad must refresh `pad.seen` so stationary holds do not
+    //    falsely time out.
+    // 3) If the fallback timeout ever fires `pad_end()`, `self.gesture` must reset so the next
+    //    4-finger drag starts cleanly instead of being swallowed by stale `dragging = true`.
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["axis_lock_deadzone"] = toml::Value::Integer(12);
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+    });
+    focus(&mut h, 101);
+
+    let mut cf = planor::ContactFrame::default();
+    let feed = |h: &mut SimHarness, cf: &mut planor::ContactFrame, count: u32, pts: &[(u32, (f64, f64))]| {
+        if let Some(frame) = cf.packet_with_slots(count, 5, pts.iter().copied()) {
+            h.engine.event(Event::Contacts(frame));
+        }
+    };
+
+    // Start 4-finger drag on window 101 (frame 2 emits DragStart; frame 3 consumes the dead-zone
+    // travel with DragMove; frame 4 with identical coordinates is a true stationary hold).
+    feed(&mut h, &mut cf, 4, &[(1, (100.0, 100.0)), (2, (120.0, 100.0)), (3, (140.0, 100.0)), (4, (160.0, 100.0))]);
+    feed(&mut h, &mut cf, 4, &[(1, (130.0, 100.0)), (2, (150.0, 100.0)), (3, (170.0, 100.0)), (4, (190.0, 100.0))]);
+    feed(&mut h, &mut cf, 4, &[(1, (130.0, 100.0)), (2, (150.0, 100.0)), (3, (170.0, 100.0)), (4, (190.0, 100.0))]);
+    assert!(h.engine.pad.is_some(), "4-finger drag should have started");
+    assert!(h.engine.drag.is_some());
+
+    // Stationary 4-finger hold: backdate `last_contact` and `seen`, send identical coordinates ->
+    // `last_contact` refreshes (preventing false timeout) while `seen` stays untouched for acceleration dt.
+    let stale_seen = Instant::now() - Duration::from_millis(750);
+    {
+        let pad = h.engine.pad.as_mut().unwrap();
+        pad.last_contact = stale_seen;
+        pad.seen = stale_seen;
+    }
+    feed(&mut h, &mut cf, 4, &[(1, (130.0, 100.0)), (2, (150.0, 100.0)), (3, (170.0, 100.0)), (4, (190.0, 100.0))]);
+    assert!(
+        h.engine.pad.as_ref().unwrap().last_contact.elapsed() < Duration::from_millis(200),
+        "stationary 4-finger contacts must refresh pad.last_contact"
+    );
+    assert_eq!(
+        h.engine.pad.as_ref().unwrap().seen, stale_seen,
+        "stationary 4-finger contacts must not overwrite pad.seen"
+    );
+
+    // Release all 4 fingers simultaneously (Precision Touchpad HID: count=4, 5 slots, 0 tip-down).
+    feed(&mut h, &mut cf, 4, &[]);
+    assert!(h.engine.pad.is_none(), "tip-up lift must immediately clear pad drag");
+    assert!(h.engine.drag.is_none(), "tip-up lift must immediately clear drag session");
+    h.settle();
+
+    // Now test timeout recovery: start a second 4-finger drag, let fallback timeout fire without a lift.
+    feed(&mut h, &mut cf, 4, &[(1, (100.0, 100.0)), (2, (120.0, 100.0)), (3, (140.0, 100.0)), (4, (160.0, 100.0))]);
+    feed(&mut h, &mut cf, 4, &[(1, (130.0, 100.0)), (2, (150.0, 100.0)), (3, (170.0, 100.0)), (4, (190.0, 100.0))]);
+    assert!(h.engine.pad.is_some());
+    h.engine.pad.as_mut().unwrap().last_contact = Instant::now() - Duration::from_secs(1);
+    h.engine.tick().unwrap();
+    assert!(h.engine.pad.is_none(), "fallback timeout must end pad drag");
+    assert!(h.engine.drag.is_none(), "fallback timeout must end drag session");
+    h.settle();
+
+    // Immediately start a THIRD 4-finger drag without an intervening 1-finger touch:
+    // because `self.gesture` was reset on timeout, this must start cleanly.
+    feed(&mut h, &mut cf, 4, &[(1, (200.0, 100.0)), (2, (220.0, 100.0)), (3, (240.0, 100.0)), (4, (260.0, 100.0))]);
+    feed(&mut h, &mut cf, 4, &[(1, (230.0, 100.0)), (2, (250.0, 100.0)), (3, (270.0, 100.0)), (4, (290.0, 100.0))]);
+    assert!(
+        h.engine.pad.is_some() && h.engine.drag.is_some(),
+        "new 4-finger drag after timeout must start immediately without stale gesture state"
+    );
+    feed(&mut h, &mut cf, 4, &[]);
+    assert!(h.engine.pad.is_none() && h.engine.drag.is_none());
+    h.settle();
+    h.stop_clean();
+}
+
+#[test]
+fn sim_five_finger_cancel_preserves_veto_through_staged_lift() {
+    // Regression test for Round 1 Blocking #1:
+    // 4-finger drag -> ONE 5-finger frame -> moving 4- and 3-finger frames during staged lift
+    // must keep `pad`, `drag`, and `pad_scrolling` all off until fewer than 3 fingers remain.
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["axis_lock_deadzone"] = toml::Value::Integer(12);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+    });
+    focus(&mut h, 101);
+
+    // Start 4-finger drag.
+    h.engine.event(Event::Contacts(vec![(100., 100.), (120., 100.), (140., 100.), (160., 100.)]));
+    h.engine.event(Event::Contacts(vec![(130., 100.), (150., 100.), (170., 100.), (190., 100.)]));
+    assert!(h.engine.pad.is_some() && h.engine.drag.is_some());
+
+    // ONE 5-finger frame cancels the drag and engages the gesture veto.
+    h.engine.event(Event::Contacts(vec![(130., 100.), (150., 100.), (170., 100.), (190., 100.), (210., 100.)]));
+    assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling);
+
+    // Staged lift: moving 4-finger frames, then moving 3-finger frames -> MUST stay vetoed!
+    for step in 1..=4 {
+        let o = step as f64 * 25.0;
+        h.engine.event(Event::Contacts(vec![(130. + o, 100.), (150. + o, 100.), (170. + o, 100.), (190. + o, 100.)]));
+        assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "4-finger staged lift frame {step} must stay vetoed");
+    }
+    for step in 1..=4 {
+        let o = step as f64 * 25.0;
+        h.engine.event(Event::Contacts(vec![(230. + o, 100.), (250. + o, 100.), (270. + o, 100.)]));
+        assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "3-finger staged lift frame {step} must stay vetoed");
+    }
+
+    // Lift clears veto; a subsequent 4-finger drag works again.
+    h.engine.event(Event::Contacts(vec![]));
+    h.engine.event(Event::Contacts(vec![(100., 100.), (120., 100.), (140., 100.), (160., 100.)]));
+    h.engine.event(Event::Contacts(vec![(130., 100.), (150., 100.), (170., 100.), (190., 100.)]));
+    assert!(h.engine.pad.is_some() && h.engine.drag.is_some(), "new drag after full lift must work");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    h.stop_clean();
+}
+
+#[test]
+fn sim_pad_drag_acceleration_preserves_dt_across_50ms_gap() {
+    // Regression test for Round 1 Blocking #2:
+    // Refreshing `last_contact` before `pad_move` must not overwrite `pad.seen` (which computes `dt`).
+    // A 50 ms gap before a 10-unit move must produce speed ≈ 10 / 0.05 = 200 -> smoothed ≈ 40,
+    // NOT the 0.008 s clamped speed (10 / 0.008 = 1250 -> smoothed = 250).
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["axis_lock_deadzone"] = toml::Value::Integer(12);
+    cfg["touchpad"]["swipe_drag_gain"] = toml::Value::Float(1.0);
+    cfg["touchpad"]["swipe_drag_accel"] = toml::Value::Float(1.0);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+    });
+    focus(&mut h, 101);
+
+    // Start drag and consume the initial dead-zone DragMove so `gesture.last` is at (160, 100).
+    h.engine.event(Event::Contacts(vec![(100., 100.), (120., 100.), (140., 100.), (160., 100.)]));
+    h.engine.event(Event::Contacts(vec![(130., 100.), (150., 100.), (170., 100.), (190., 100.)]));
+    h.engine.event(Event::Contacts(vec![(130., 100.), (150., 100.), (170., 100.), (190., 100.)]));
+    assert!(h.engine.pad.is_some());
+
+    // Backdate `pad.seen` by 50 ms and reset `speed` to 0, then move by +10 units.
+    {
+        let pad = h.engine.pad.as_mut().unwrap();
+        pad.seen = Instant::now() - Duration::from_millis(50);
+        pad.speed = 0.0;
+    }
+    let x_before = h.engine.pad.as_ref().unwrap().cursor.0;
+    h.engine.event(Event::Contacts(vec![(140., 100.), (160., 100.), (180., 100.), (200., 100.)]));
+    let pad = h.engine.pad.as_ref().unwrap();
+    // 10 / 0.05 * 0.2 = 40.0 (with minor scheduling jitter, well below 100; 0.008 clamp would be 250).
+    assert!(
+        pad.speed > 15.0 && pad.speed < 100.0,
+        "expected dt-based smoothed speed ~40 for 50ms gap, got {}",
+        pad.speed
+    );
+    let travel = pad.cursor.0 - x_before;
+    assert!(
+        travel < 11.2,
+        "cursor travel with 50ms dt should be ~10.4 (not 12.5 from 8ms clamp), got {travel}"
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    h.stop_clean();
+}
+
+#[test]
+fn sim_pad_drag_cross_monitor_release_commits_immediately_even_before_async_move_lands() {
+    // Regression test for #44 (bundle 001309628-still-freesez-when-release-on-anothe):
+    // Releasing a 4-finger cross-monitor drag via a tip-up HID packet must:
+    // 1) Release immediately (no 800 ms stall).
+    // 2) Transfer the window to the destination monitor even if the target app has not yet
+    //    processed the asynchronous `SetWindowPos` (window frame still reads `d.original`).
+    // 3) Mark placeholder cover (`covering`) on the transferred tile so cross-DPI resize happens
+    //    asynchronously without blocking the render thread.
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["axis_lock_deadzone"] = toml::Value::Integer(12);
+    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_drag_gain"] = toml::Value::Float(4.0);
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["animation"]["placeholder"] = toml::Value::Boolean(true);
+
+    // MON0 (0..1920), MON1 (1920..4480), MON2 (-1440..0 portrait).
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+        sim.add_window(SimWindow::new(201, Rect { x: -1440, y: 0, w: 1440, h: 2512 }));
+    });
+    focus(&mut h, 101);
+    let orig_101 = h.rect(101);
+
+    let mut cf = planor::ContactFrame::default();
+    let feed = |h: &mut SimHarness, cf: &mut planor::ContactFrame, count: u32, pts: &[(u32, (f64, f64))]| {
+        if let Some(frame) = cf.packet_with_slots(count, 5, pts.iter().copied()) {
+            h.engine.event(Event::Contacts(frame));
+        }
+    };
+
+    // Start 4-finger drag on MON0 (window 101) and carry cursor left onto portrait MON2 (x < 0).
+    feed(&mut h, &mut cf, 4, &[(1, (500.0, 100.0)), (2, (520.0, 100.0)), (3, (540.0, 100.0)), (4, (560.0, 100.0))]);
+    feed(&mut h, &mut cf, 4, &[(1, (480.0, 100.0)), (2, (500.0, 100.0)), (3, (520.0, 100.0)), (4, (540.0, 100.0))]);
+    assert!(h.engine.pad.is_some());
+    // Move far enough left to land in MON2 (-1440..0).
+    feed(&mut h, &mut cf, 4, &[(1, (100.0, 100.0)), (2, (120.0, 100.0)), (3, (140.0, 100.0)), (4, (160.0, 100.0))]);
+    assert!(h.desktop.cursor_pos().0 < 0, "cursor should have crossed onto MON2");
+
+    // Simulate a slow cross-DPI app whose OS frame has not yet moved from `orig_101`.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().rect = orig_101;
+
+    // Release all 4 fingers simultaneously (count=4, 0 tip-down).
+    feed(&mut h, &mut cf, 4, &[]);
+    assert!(h.engine.pad.is_none(), "cross-monitor tip-up lift must release immediately");
+    assert!(h.engine.drag.is_none(), "cross-monitor drag session must end immediately");
+    assert!(
+        h.engine.covering.contains_key(&101),
+        "cross-monitor drop must engage placeholder cover while app handles WM_DPICHANGED"
+    );
+    h.settle();
+
+    let desk = h.engine.desktop.unwrap();
+    let mon2_strip = &h.engine.strips[&(desk, "MON2".to_string())];
+    assert!(
+        mon2_strip.locate(101).is_some(),
+        "window 101 must be transferred to MON2 even if async OS move had not landed yet"
+    );
+    h.stop_clean();
+}

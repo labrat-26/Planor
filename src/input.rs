@@ -129,8 +129,15 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                     .then_some(v)
             };
             let mut points = vec![];
+            let mut slots = 0usize;
             let all=RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);let count=get(13,0,0x54).unwrap_or(0);if count>=3||count==0||(all&&count>=1) {
                 for link in 1..caps.NumberLinkCollectionNodes {
+                    let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31)) else {
+                        continue;
+                    };
+                    // Count every finger contact collection in this report (tip-down and tip-up)
+                    // so ContactFrame knows when a parallel or hybrid multi-report frame is complete.
+                    slots += 1;
                     let mut usages = [0u16; 32];
                     let mut used = 32;
                     if HidP_GetUsages(
@@ -144,7 +151,6 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                         size as u32,
                     ) >= 0
                         && usages[..used as usize].contains(&0x42)
-                        && let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31))
                     {
                         let mut has_physical_units = false;
                         let mut scale = |usage| {
@@ -183,7 +189,7 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                     }
                 }
             }
-            if let Some(frame)=PARTS.with(|v|{let mut m=v.borrow_mut();let f=m.entry(head.hDevice as usize).or_default();f.all=all;f.packet(count,points)}){frames.push(frame)}
+            if let Some(frame)=PARTS.with(|v|{let mut m=v.borrow_mut();let f=m.entry(head.hDevice as usize).or_default();f.all=all;f.packet_with_slots(count,slots,points)}){frames.push(frame)}
         }
     }
     frames

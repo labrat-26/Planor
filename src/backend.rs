@@ -43,6 +43,9 @@ pub(crate) trait WindowBackend {
     fn frame(&self, id: isize) -> Option<Rect>;
     fn window_rect(&self, id: isize) -> Option<Rect>;
     fn minimum(&self, id: isize, horizontal: bool) -> i32;
+    fn minimum_size(&self, id: isize) -> (i32, i32) {
+        (self.minimum(id, true), self.minimum(id, false))
+    }
     fn owner(&self, id: isize) -> isize;
     fn foreground(&self) -> isize;
     fn is_window(&self, id: isize) -> bool;
@@ -54,6 +57,9 @@ pub(crate) trait WindowBackend {
 
     fn activate(&self, id: isize);
     fn place(&self, items: &[(isize, Rect)]) -> Result<()>;
+    fn place_async(&self, items: &[(isize, Rect)]) -> Result<()> {
+        self.place(items)
+    }
     fn show_no_activate(&self, id: isize);
     fn minimize_no_activate(&self, id: isize);
     fn restore_window(&self, id: isize);
@@ -232,6 +238,10 @@ impl WindowBackend for Win32Backend {
         win32::minimum(id, horizontal)
     }
 
+    fn minimum_size(&self, id: isize) -> (i32, i32) {
+        win32::minimum_size(id)
+    }
+
     fn owner(&self, id: isize) -> isize {
         unsafe { GetWindow(id as _, GW_OWNER) as isize }
     }
@@ -270,6 +280,10 @@ impl WindowBackend for Win32Backend {
 
     fn place(&self, items: &[(isize, Rect)]) -> Result<()> {
         win32::place(items)
+    }
+
+    fn place_async(&self, items: &[(isize, Rect)]) -> Result<()> {
+        win32::place_async_checked(items)
     }
 
     fn show_no_activate(&self, id: isize) {

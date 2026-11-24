@@ -695,6 +695,7 @@ pub struct ContactFrame {
     pub all: bool,
     waiting: bool,
     target: usize,
+    seen_slots: usize,
     points: std::collections::BTreeMap<u32, (f64, f64)>,
 }
 impl ContactFrame {
@@ -703,8 +704,29 @@ impl ContactFrame {
         count: u32,
         contacts: impl IntoIterator<Item = (u32, (f64, f64))>,
     ) -> Option<Vec<(f64, f64)>> {
+        let contacts: Vec<_> = contacts.into_iter().collect();
+        let slots = if self.all && count != 0 && contacts.is_empty() {
+            // Recording compatibility: an opening frame with no tip-down contacts is a lift.
+            count as usize
+        } else {
+            contacts.len()
+        };
+        self.packet_with_slots(count, slots, contacts)
+    }
+    /// Assemble one HID contact frame from one or more reports. `slots` is the number of finger
+    /// contact slots present in this report (tip-down AND tip-up combined), so hybrid multi-report
+    /// digitizers wait until all `count` contacts have been reported before deciding whether a
+    /// frame is a lift, while parallel digitizers (and the final report of a hybrid frame) emit an
+    /// immediate lift when all reported contacts are tip-up (#43, #44).
+    pub fn packet_with_slots(
+        &mut self,
+        count: u32,
+        slots: usize,
+        contacts: impl IntoIterator<Item = (u32, (f64, f64))>,
+    ) -> Option<Vec<(f64, f64)>> {
         if count != 0 {
             self.points.clear();
+            self.seen_slots = 0;
             self.waiting = count >= 3 || (self.all && count >= 1);
             self.target = count as usize;
         }
@@ -713,18 +735,19 @@ impl ContactFrame {
         }
         let before = self.points.len();
         self.points.extend(contacts);
-        if self.all && count != 0 && self.points.len() == before {
-            // Recording: a frame that opens with no finger touching is the lift (the lifting contacts are
-            // still counted, tip up, so it would otherwise never complete and recordings had no lifts).
-            self.waiting = false;
-            self.points.clear();
-            return Some(vec![]);
-        }
-        if self.points.len() < self.target {
+        let added = self.points.len() - before;
+        self.seen_slots = self.seen_slots.saturating_add(slots.max(added));
+        if self.seen_slots < self.target {
             return None;
         }
         self.waiting = false;
-        Some(std::mem::take(&mut self.points).into_values().collect())
+        self.seen_slots = 0;
+        let pts: Vec<(f64, f64)> = std::mem::take(&mut self.points).into_values().collect();
+        if !self.all && pts.len() < 3 {
+            Some(vec![])
+        } else {
+            Some(pts)
+        }
     }
 }
 
@@ -1258,5 +1281,87 @@ pub mod pacing {
             max_refresh_ms: max_refresh / 1000.0,
             effective_hz: if p50_us > 0 { 1e6 / p50_us as f64 } else { 0.0 },
         }
+    }
+}
+
+#[cfg(test)]
+mod contact_frame_tests {
+    use super::ContactFrame;
+
+    #[test]
+    fn contact_frame_parallel_and_hybrid_lifts_are_accurate() {
+        // (a) Parallel digitizer (5 slots/report, normal mode all=false):
+        //     3-, 4-, and 5-finger full tip-up lifts emit an immediate empty lift frame (#43, #44).
+        let mut f = ContactFrame::default();
+        assert!(!f.all);
+        for n in [3u32, 4, 5] {
+            let pts: Vec<_> = (1..=n).map(|i| (i, (i as f64 * 10.0, 10.0))).collect();
+            let frame = f.packet_with_slots(n, 5, pts).expect("parallel touch completes");
+            assert_eq!(frame.len(), n as usize);
+            assert_eq!(
+                f.packet_with_slots(n, 5, []),
+                Some(vec![]),
+                "parallel {n}-finger tip-up lift must emit lift immediately"
+            );
+        }
+        // Parallel partial tip-up: 4 counted, 2 down -> immediate lift; 4 counted, 3 down -> 3 pts.
+        assert_eq!(
+            f.packet_with_slots(4, 5, [(1, (1.0, 1.0)), (2, (2.0, 1.0))]),
+            Some(vec![]),
+            "parallel 4-counted with only 2 tip-down completes as lift"
+        );
+        let three = f
+            .packet_with_slots(4, 5, [(1, (1.0, 1.0)), (2, (2.0, 1.0)), (3, (3.0, 1.0))])
+            .expect("parallel 4-counted with 3 tip-down completes immediately");
+        assert_eq!(three.len(), 3);
+
+        // (b) Hybrid 1-per-report: first report tip-up, next 3 tip-down => NO false lift.
+        let mut h1 = ContactFrame::default();
+        assert_eq!(h1.packet_with_slots(4, 1, []), None, "hybrid 1/report must wait for continuations");
+        assert_eq!(h1.packet_with_slots(0, 1, [(2, (2.0, 1.0))]), None);
+        assert_eq!(h1.packet_with_slots(0, 1, [(3, (3.0, 1.0))]), None);
+        let h1_done = h1
+            .packet_with_slots(0, 1, [(4, (4.0, 1.0))])
+            .expect("hybrid 1/report completes on 4th slot");
+        assert_eq!(h1_done.len(), 3, "3 remaining tip-down contacts emitted without false lift");
+
+        // Hybrid 2-per-report: first report all tip-up, second report 2 tip-down => NO early lift on report 1.
+        let mut h2 = ContactFrame::default();
+        assert_eq!(h2.packet_with_slots(4, 2, []), None, "hybrid 2/report must wait for continuation");
+        assert_eq!(
+            h2.packet_with_slots(0, 2, [(3, (3.0, 1.0)), (4, (4.0, 1.0))]),
+            Some(vec![]),
+            "hybrid 2/report completes with 2 tip-down (<3 in normal mode => lift)"
+        );
+        // Hybrid 2-per-report: first report 1 tip-up + 1 tip-down, second 2 tip-down => 3 pts.
+        assert_eq!(h2.packet_with_slots(4, 2, [(2, (2.0, 1.0))]), None);
+        let h2_three = h2
+            .packet_with_slots(0, 2, [(3, (3.0, 1.0)), (4, (4.0, 1.0))])
+            .expect("hybrid 2/report completes with 3 tip-down");
+        assert_eq!(h2_three.len(), 3);
+
+        // (c) Hybrid full lift across reports => None on opening report, Some([]) once complete.
+        let mut hl = ContactFrame::default();
+        assert_eq!(hl.packet_with_slots(4, 2, []), None);
+        assert_eq!(hl.packet_with_slots(0, 2, []), Some(vec![]), "hybrid full lift emits once");
+        // Hybrid odd count=3 across 2-slot reports (padding slot in report 2) does not bleed into next frame.
+        assert_eq!(hl.packet_with_slots(3, 2, []), None);
+        assert_eq!(hl.packet_with_slots(0, 2, []), Some(vec![]));
+        assert_eq!(
+            hl.packet_with_slots(3, 2, [(1, (1.0, 1.0)), (2, (2.0, 1.0))]),
+            None,
+            "padding slot from previous frame must not bleed into next frame"
+        );
+        assert_eq!(
+            hl.packet_with_slots(0, 2, [(3, (3.0, 1.0))]).unwrap().len(),
+            3
+        );
+
+        // (d) Recording mode (`all = true`) behaviour unchanged.
+        let mut rec = ContactFrame { all: true, ..ContactFrame::default() };
+        assert_eq!(rec.packet(1, [(1, (5.0, 5.0))]), Some(vec![(5.0, 5.0)]));
+        assert_eq!(rec.packet(2, [(1, (5.0, 5.0))]), None);
+        assert_eq!(rec.packet(0, [(2, (9.0, 5.0))]).unwrap().len(), 2);
+        assert_eq!(rec.packet(1, []), Some(vec![]));
     }
 }
