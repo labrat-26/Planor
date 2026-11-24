@@ -358,6 +358,7 @@ Fullscreen apps are handled for you: the strip steps aside while they are fullsc
 | **Task view or "Show desktop" pops up when I swipe** | Windows' own gestures are still on. See [Recommended Windows settings](#-recommended-windows-settings-five-minutes-once), step 1 |
 | **The layout picker shows when I hover maximize** | Snap is back on. Turn it off in **Settings → System → Multitasking**, or restart Planor |
 | **Gestures do nothing** | They need a *precision touchpad*. Make sure `three_finger_enabled = true`. The keyboard and mouse still work |
+| **Task Manager (or another admin app) sits behind tiles** | Planor runs without admin rights, so Windows UIPI prevents it from reordering elevated apps. In Task Manager, enable **Settings → Always on top** if you want it to stay above tiled windows |
 | **I want to see what's happening** | `planor.exe diag on`, reproduce the problem, then `planor.exe diag export <folder>` |
 | **It feels slow** | `planor.exe perf` prints timings you can share in an issue |
 
