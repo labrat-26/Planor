@@ -296,6 +296,11 @@ pub(crate) struct DragSession {
     pub target: Option<isize>,
     pub mode: planor::Drag,
     pub destination: Option<Key>,
+    pub resizing: bool,
+    pub moved: bool,
+    pub pad_drag: bool,
+    pub edge_scroll_at: Option<Instant>,
+    pub edge_scroll_frac: f64,
 }
 /// A window being carried by a four-finger touchpad swipe. Planor moves it itself (there is no OS move
 /// loop without a mouse button) and moves the cursor with it, so the normal drag logic sees an
@@ -1069,17 +1074,29 @@ impl<B: WindowBackend> Engine<B> {
             diag::trace(format!("GESTURES recorded {} events to {} ({result:?})", rec.events.len(), rec.out.display()));
         }
     }
-    /// True while the strip moves by itself and should be stepped at frame rate.
+    /// True while the strip moves by itself (momentum or drag edge-scroll) and should be stepped at frame rate.
     pub(crate) fn wants_fast_tick(&self) -> bool {
         self.inertia.is_some()
+            || self
+                .drag
+                .as_ref()
+                .is_some_and(|d| !d.resizing && d.moved && d.edge_scroll_at.is_some())
     }
-    /// One frame-rate step (about 8 ms): momentum after a swipe.
+    /// One frame-rate step (about 8 ms): momentum after a swipe or drag edge-scrolling.
     pub(crate) fn fast_tick(&mut self) {
         if self.locked {
             return;
         }
         if self.inertia.is_some() {
             self.pad_inertia()
+        }
+        if !self.blocked()
+            && self
+                .drag
+                .as_ref()
+                .is_some_and(|d| !d.resizing && d.moved && d.edge_scroll_at.is_some())
+        {
+            self.drag_update();
         }
     }
     fn refresh(&mut self) {
@@ -1298,6 +1315,8 @@ impl<B: WindowBackend> Engine<B> {
         // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
         let mut zones = vec![];
         if let Some(d) = &self.drag
+            && !d.resizing
+            && d.moved
             && let (Some(k), Some(c)) = (&d.destination, hot.drop_target_color)
             && let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop)
         {
@@ -1334,13 +1353,18 @@ impl<B: WindowBackend> Engine<B> {
                     let c = if fullscreen {
                         None
                     } else if self.drag.as_ref().is_some_and(|d| {
-                        d.target == Some(id) && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
+                        !d.resizing
+                            && d.moved
+                            && d.target == Some(id)
+                            && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
                     }) {
                         // The window a drop would swap with (or pull out beside).
                         hot.drop_target_color
                     } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
-                        d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
+                        !d.resizing
+                            && d.moved
+                            && d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
                             && d.target.is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
                             && strip.columns[i].members.len() > 1
                             && strip.columns[i].members[strip.columns[i].active] == id
@@ -1688,6 +1712,11 @@ impl<B: WindowBackend> Engine<B> {
                 target: None,
                 mode: planor::Drag::None,
                 destination: None,
+                resizing: false,
+                moved: false,
+                pad_drag: false,
+                edge_scroll_at: None,
+                edge_scroll_frac: 0.0,
             });
             self.dirty = true
         }
@@ -1899,9 +1928,11 @@ impl<B: WindowBackend> Engine<B> {
             return;
         };
         self.drag_begin(id);
-        if self.drag.is_none() {
+        let Some(d) = self.drag.as_mut() else {
             return;
-        }
+        };
+        d.pad_drag = true;
+        d.moved = true;
         // Grab the window at its centre so the cursor and the window stay together.
         let (cx, cy) = (frame.x + frame.w / 2, frame.y + frame.h / 2);
         self.backend.set_cursor_pos(cx, cy);
@@ -2032,7 +2063,36 @@ impl<B: WindowBackend> Engine<B> {
         self.drag_end(p.id)
     }
     fn drag_update(&mut self) {
+        self.drag_update_inner(true);
+    }
+    fn drag_update_inner(&mut self, allow_edge_scroll: bool) {
+        let (id, original, pad_drag, mut resizing, mut moved) = {
+            let Some(d) = self.drag.as_ref() else { return };
+            (d.id, d.original, d.pad_drag, d.resizing, d.moved)
+        };
+        if !pad_drag
+            && !resizing
+            && !moved
+            && let Some(cur) = self.backend.frame(id)
+        {
+            if is_edge_resize(original, cur) {
+                resizing = true;
+            } else if (cur.x - original.x).abs() > 2 || (cur.y - original.y).abs() > 2 {
+                moved = true;
+            }
+        }
         let Some(d) = self.drag.as_mut() else { return };
+        d.resizing = resizing;
+        d.moved = moved;
+        if d.resizing || !d.moved {
+            if d.destination.is_some() || d.target.is_some() || d.mode != planor::Drag::None {
+                d.destination = None;
+                d.target = None;
+                d.mode = planor::Drag::None;
+                self.dirty = true;
+            }
+            return;
+        }
         let p = self.backend.cursor_pos();
         let elapsed = d.sampled.elapsed().as_secs_f64().max(0.001);
         let velocity = ((p.0 - d.point.0) as f64).hypot((p.1 - d.point.1) as f64) / elapsed;
@@ -2046,14 +2106,21 @@ impl<B: WindowBackend> Engine<B> {
             d.target = None;
             d.mode = planor::Drag::None;
             d.destination = None;
+            d.edge_scroll_at = None;
+            d.edge_scroll_frac = 0.0;
             self.dirty = true;
             return;
         };
         let k = (d.key.0, monitor.clone());
-        d.destination = Some(k.clone());
-        // Dragging to the leading or trailing edge of the strip scrolls it, unless another monitor lies that
-        // way (then the drag is heading there instead).
-        if k == d.key {
+        if d.destination.as_ref() != Some(&k) {
+            d.destination = Some(k.clone());
+            self.instant = true;
+            self.dirty = true;
+        }
+        // Dragging to the leading or trailing edge of the strip scrolls it smoothly over time, unless
+        // another monitor lies that way (then the drag is heading there instead). Skipped on `drag_end`
+        // so releasing near the edge never shifts targets out from under the cursor.
+        if allow_edge_scroll && k == d.key {
             let bounds: Vec<Rect> = self.displays.iter().map(|m| m.2).collect();
             let at = self.displays.iter().position(|m| m.0 == k.1);
             if let Some(s) = self.strips.get_mut(&k) {
@@ -2074,10 +2141,33 @@ impl<B: WindowBackend> Engine<B> {
                     planor::adjacent(bounds[i], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir })
                 });
                 if dir != 0 && beyond.is_none() {
-                    s.scroll(dir * 28);
-                    self.dirty = true;
+                    let hz = self.max_refresh_hz.clamp(30.0, 240.0);
+                    let elapsed_s = d
+                        .edge_scroll_at
+                        .map(|t| t.elapsed().as_secs_f64())
+                        .unwrap_or(1.0 / hz);
+                    if let Some((px, rem)) =
+                        edge_scroll_step(elapsed_s, hz, dir, d.edge_scroll_frac)
+                    {
+                        d.edge_scroll_at = Some(Instant::now());
+                        d.edge_scroll_frac = rem;
+                        if px != 0 {
+                            let before = s.offset;
+                            s.scroll(px);
+                            if s.offset != before {
+                                self.instant = true;
+                                self.dirty = true;
+                            }
+                        }
+                    }
+                } else {
+                    d.edge_scroll_at = None;
+                    d.edge_scroll_frac = 0.0;
                 }
             }
+        } else if k != d.key {
+            d.edge_scroll_at = None;
+            d.edge_scroll_frac = 0.0;
         }
         let _ = velocity;
         let peek = self.hot.stack_peek_px.unwrap_or(96);
@@ -2103,6 +2193,7 @@ impl<B: WindowBackend> Engine<B> {
         });
         let id = target.map(|t| t.0);
         if id != d.target {
+            self.instant = true;
             self.dirty = true;
             d.hover = Instant::now();
             d.target = id
@@ -2123,12 +2214,16 @@ impl<B: WindowBackend> Engine<B> {
         if mode != d.mode {
             d.mode = mode;
             self.action = "drag_reflow";
+            self.instant = true;
             self.dirty = true
         }
     }
     fn drag_end(&mut self, id: isize) {
         let flung = std::mem::take(&mut self.flung);
-        self.drag_update();let Some(mut d) = self.drag.take() else { return };
+        let was_instant = self.instant;
+        self.drag_update_inner(false);
+        self.instant = was_instant;
+        let Some(mut d) = self.drag.take() else { return };
         if let Some(rec) = self.gesture_rec.as_mut() {
             // What the drop was about to do, so a recording shows Planor's answer to each gesture.
             rec.push(serde_json::json!({
@@ -2154,20 +2249,19 @@ impl<B: WindowBackend> Engine<B> {
         let Some(r) = (if flung { Some(d.original) } else { self.backend.frame(id) }) else { return };
         let s = self.strips.get_mut(&d.key).unwrap();
         if r==d.original&&!flung{return}
-        // A resize keeps one edge where it was (a move changes both). Dragging an edge far beyond the monitor
-        // puts the cursor on another monitor; that is still a resize, not a transfer.
-        let moved = |a: i32, b: i32| (a - b).abs() > 2;
-        // and it still sits mostly on the monitor it started on (a move to another monitor does not).
+        // A resize keeps at least one horizontal edge and one vertical edge anchored (a move shifts
+        // both edges on at least one axis). Dragging an edge far beyond the monitor puts the cursor on
+        // another monitor; a latched resize still completes as a resize, not a transfer.
         let home = self.displays.iter().find(|m| m.0 == d.key.1).map(|m| m.2);
         let on_home = home.is_some_and(|b| {
             let w = (r.x + r.w).min(b.x + b.w) - r.x.max(b.x);
             let h = (r.y + r.h).min(b.y + b.h) - r.y.max(b.y);
             w > 0 && h > 0 && (w as i64 * h as i64) * 2 >= r.w as i64 * r.h as i64
         });
-        let resized = on_home && !flung
-            && ((moved(r.w, d.original.w) && (r.x == d.original.x || r.x + r.w == d.original.x + d.original.w))
-                || (moved(r.h, d.original.h) && (r.y == d.original.y || r.y + r.h == d.original.y + d.original.h)));
-        if resized || (d.destination.as_ref().is_none_or(|k|k==&d.key)&&(d.original.w!=r.w||d.original.h!=r.h)){
+        let resized = !flung
+            && !d.pad_drag
+            && (d.resizing || (!d.moved && on_home && is_edge_resize(d.original, r)));
+        if resized {
             let horizontal = s.area.horizontal();
             let leading = if horizontal {
                 r.x != d.original.x
@@ -2472,6 +2566,45 @@ fn clip(a: Rect, b: Rect) -> Option<Rect> {
 fn contains(r: Rect, p: (i32, i32)) -> bool {
     p.0 >= r.x && p.0 < r.x + r.w && p.1 >= r.y && p.1 < r.y + r.h
 }
+/// Smooth time-based edge-scroll step during a drag: at most one step per display refresh,
+/// advancing at a steady pixel/second velocity with fractional carry and per-tick clamping.
+pub(crate) fn edge_scroll_step(
+    elapsed_s: f64,
+    refresh_hz: f64,
+    dir: i32,
+    carry: f64,
+) -> Option<(i32, f64)> {
+    const EDGE_SCROLL_PX_PER_SEC: f64 = 900.0;
+    if dir == 0 {
+        return None;
+    }
+    let hz = refresh_hz.clamp(30.0, 240.0);
+    let min_dt = 1.0 / hz;
+    if elapsed_s + 1e-6 < min_dt {
+        return None;
+    }
+    let dt = elapsed_s.min(0.05);
+    let raw = carry + dir as f64 * EDGE_SCROLL_PX_PER_SEC * dt;
+    let px = raw.trunc() as i32;
+    Some((px, raw - px as f64))
+}
+
+/// True when `current` looks like an edge or corner resize of `original`: width or height changed
+/// by more than 2 px while at least one horizontal edge AND at least one vertical edge stayed
+/// anchored within 2 px. Rejects cross-DPI moves and drag-restore of snapped windows (where both
+/// horizontal edges shift).
+pub(crate) fn is_edge_resize(original: Rect, current: Rect) -> bool {
+    let changed = |a: i32, b: i32| (a - b).abs() > 2;
+    let same = |a: i32, b: i32| (a - b).abs() <= 2;
+    let x_anchored = same(current.x, original.x)
+        || same(current.x + current.w, original.x + original.w);
+    let y_anchored = same(current.y, original.y)
+        || same(current.y + current.h, original.y + original.h);
+    (changed(current.w, original.w) || changed(current.h, original.h))
+        && x_anchored
+        && y_anchored
+}
+
 /// The stack drop zones of a strip while `dragged` is carried: one small box in the middle of the visible
 /// part of every column's active window (not the dragged window's own column). (window, visible rect, zone)
 pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec<(isize, Rect, Rect)> {

@@ -292,7 +292,7 @@ impl DrawSig {
     }
 }
 struct DrawFrame<'a> {
-    pictures: &'a [(Rect, ID2D1Bitmap1)],
+    pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
     fills: &'a [(Rect, u32, f32)],
     cards: &'a [CardDraw],
     lines: &'a [(Rect, u32)],
@@ -392,20 +392,25 @@ impl Surface {
                 let rt: &ID2D1RenderTarget = &self.context;
                 rt.BeginDraw();
                 rt.Clear(Some(&D2D1_COLOR_F::default()));
-                for (r, bitmap) in *pictures {
-                    let x = (r.x + off.x) as f32;
-                    let y = (r.y + off.y) as f32;
+                for (dst, src, bitmap) in *pictures {
+                    let x = (dst.x + off.x) as f32;
+                    let y = (dst.y + off.y) as f32;
                     rt.DrawBitmap(
                         bitmap,
                         Some(&D2D_RECT_F {
                             left: x,
                             top: y,
-                            right: x + r.w as f32,
-                            bottom: y + r.h as f32,
+                            right: x + dst.w as f32,
+                            bottom: y + dst.h as f32,
                         }),
                         1.,
                         D2D1_BITMAP_INTERPOLATION_MODE_LINEAR,
-                        None,
+                        Some(&D2D_RECT_F {
+                            left: src.x as f32,
+                            top: src.y as f32,
+                            right: (src.x + src.w) as f32,
+                            bottom: (src.y + src.h) as f32,
+                        }),
                     )
                 }
                 for &(r, c, alpha) in *fills {
@@ -524,12 +529,19 @@ impl Surface {
         }
     }
 }
+struct ThumbState {
+    handle: isize,
+    tile: Rect,
+    clip: Rect,
+    source_size: (i32, i32),
+    visible: bool,
+}
 struct Host {
     generation: u64,
     h: HWND,
     b: Rect,
     surface: Option<Surface>,
-    thumbs: HashMap<isize, isize>,
+    thumbs: HashMap<isize, ThumbState>,
     pictures: HashMap<(isize, usize), Source>,
     failed_sources: HashMap<(isize, usize), Instant>,
     pending_sources: HashSet<(isize, usize)>,
@@ -542,7 +554,7 @@ impl Drop for Host {
     fn drop(&mut self) {
         unsafe {
             for (_, t) in self.thumbs.drain() {
-                DwmUnregisterThumbnail(t);
+                DwmUnregisterThumbnail(t.handle);
             }
             DestroyWindow(self.h);
         }
@@ -625,14 +637,21 @@ impl Host {
     }
     fn thumbnail(&mut self, id: isize, r: Rect, clip: Rect) -> bool {
         unsafe {
-            let t = *self.thumbs.entry(id).or_insert_with(|| {
+            let state = self.thumbs.entry(id).or_insert_with(|| {
                 let mut t = 0;
                 let hr = DwmRegisterThumbnail(self.h, id as _, &mut t);
                 if hr < 0 {
                     eprintln!("DwmRegisterThumbnail: {hr:#x} at {}:{}", file!(), line!());
                 }
-                t
+                ThumbState {
+                    handle: t,
+                    tile: r,
+                    clip,
+                    source_size: (0, 0),
+                    visible: false,
+                }
             });
+            let t = state.handle;
             if t == 0 {
                 return false;
             }
@@ -644,30 +663,28 @@ impl Host {
             // (with its invisible resize borders), and a parked group member is often not exactly the tile
             // size yet. Scaling `clip` by source/tile size stretched peeks (title bars drawn elongated).
             // When the source is smaller than the clip, the destination shrinks with it instead.
-            let (ox, oy) = win32::insets(id).unwrap_or(((size.cx - r.w).max(0) / 2, 0));
-            let sx = ox + clip.x - r.x;
-            let sy = oy + clip.y - r.y;
-            let sw = clip.w.min(size.cx - sx).max(0);
-            let sh = clip.h.min(size.cy - sy).max(0);
-            if sw == 0 || sh == 0 {
+            let insets = win32::insets(id).unwrap_or(((size.cx - r.w).max(0) / 2, 0));
+            let Some((src, dst)) =
+                proxy_blit_rects(r, clip, (size.cx, size.cy), insets, (self.b.x, self.b.y))
+            else {
                 return false;
-            }
+            };
             let props = DWM_THUMBNAIL_PROPERTIES {
                 dwFlags: DWM_TNP_RECTDESTINATION
                     | DWM_TNP_RECTSOURCE
                     | DWM_TNP_VISIBLE
                     | DWM_TNP_OPACITY,
                 rcDestination: RECT {
-                    left: clip.x - self.b.x,
-                    top: clip.y - self.b.y,
-                    right: clip.x + sw - self.b.x,
-                    bottom: clip.y + sh - self.b.y,
+                    left: dst.x,
+                    top: dst.y,
+                    right: dst.x + dst.w,
+                    bottom: dst.y + dst.h,
                 },
                 rcSource: RECT {
-                    left: sx,
-                    top: sy,
-                    right: sx + sw,
-                    bottom: sy + sh,
+                    left: src.x,
+                    top: src.y,
+                    right: src.x + src.w,
+                    bottom: src.y + src.h,
                 },
                 opacity: 255,
                 fVisible: 1,
@@ -680,11 +697,208 @@ impl Host {
                     file!(),
                     line!()
                 );
+                return false;
             }
-            hr >= 0
+            state.tile = r;
+            state.clip = clip;
+            state.source_size = (size.cx, size.cy);
+            state.visible = true;
+            true
+        }
+    }
+    fn hide_thumbnail(&mut self, id: isize) {
+        if let Some(state) = self.thumbs.get_mut(&id) {
+            state.visible = false;
+            let p = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_VISIBLE,
+                fVisible: 0,
+                ..Default::default()
+            };
+            unsafe {
+                DwmUpdateThumbnailProperties(state.handle, &p);
+            }
+        }
+    }
+    fn refresh_resized_thumbnails(&mut self) {
+        let host_origin = (self.b.x, self.b.y);
+        for (&id, state) in &mut self.thumbs {
+            if !state.visible || state.handle == 0 {
+                continue;
+            }
+            let mut size = SIZE::default();
+            if unsafe { DwmQueryThumbnailSourceSize(state.handle, &mut size) } < 0 {
+                continue;
+            }
+            let new_size = (size.cx, size.cy);
+            let insets = win32::insets(id).unwrap_or(((size.cx - state.tile.w).max(0) / 2, 0));
+            if let Some((src, dst)) = refresh_thumb_props_if_resized(
+                state.tile,
+                state.clip,
+                state.source_size,
+                new_size,
+                insets,
+                host_origin,
+            ) {
+                let props = DWM_THUMBNAIL_PROPERTIES {
+                    dwFlags: DWM_TNP_RECTDESTINATION
+                        | DWM_TNP_RECTSOURCE
+                        | DWM_TNP_VISIBLE
+                        | DWM_TNP_OPACITY,
+                    rcDestination: RECT {
+                        left: dst.x,
+                        top: dst.y,
+                        right: dst.x + dst.w,
+                        bottom: dst.y + dst.h,
+                    },
+                    rcSource: RECT {
+                        left: src.x,
+                        top: src.y,
+                        right: src.x + src.w,
+                        bottom: src.y + src.h,
+                    },
+                    opacity: 255,
+                    fVisible: 1,
+                    fSourceClientAreaOnly: 0,
+                };
+                if unsafe { DwmUpdateThumbnailProperties(state.handle, &props) } >= 0 {
+                    state.source_size = new_size;
+                }
+            }
         }
     }
 }
+/// Compute strictly 1:1 (unscaled) `(source_rect, dest_rect)` for blitting a proxy window
+/// (either a DWM thumbnail or a WGC backing bitmap) clipped to `clip` in monitor-local coords.
+/// Never stretches a stale/smaller capture across a widened tile.
+pub(crate) fn proxy_blit_rects(
+    tile: Rect,
+    clip: Rect,
+    source_size: (i32, i32),
+    insets: (i32, i32),
+    host_origin: (i32, i32),
+) -> Option<(Rect, Rect)> {
+    let (src_w, src_h) = source_size;
+    let (ox, oy) = insets;
+    let sx = ox + clip.x - tile.x;
+    let sy = oy + clip.y - tile.y;
+    if sx >= src_w || sy >= src_h {
+        return None;
+    }
+    let (sx, dx_pad) = if sx < 0 { (0, -sx) } else { (sx, 0) };
+    let (sy, dy_pad) = if sy < 0 { (0, -sy) } else { (sy, 0) };
+    let sw = (clip.w - dx_pad).min(src_w - sx).max(0);
+    let sh = (clip.h - dy_pad).min(src_h - sy).max(0);
+    if sw == 0 || sh == 0 {
+        return None;
+    }
+    Some((
+        Rect { x: sx, y: sy, w: sw, h: sh },
+        Rect {
+            x: clip.x + dx_pad - host_origin.0,
+            y: clip.y + dy_pad - host_origin.1,
+            w: sw,
+            h: sh,
+        },
+    ))
+}
+
+/// Only paint a WGC backing bitmap on top of the host when actively gliding/scrolling/handing off,
+/// or as a fallback if the live DWM thumbnail is unavailable. Settled grouped/side peeks show the
+/// live 1:1 DWM thumbnail instead of a frozen pre-resize WGC frame.
+pub(crate) fn should_draw_backing(
+    moving: bool,
+    live_proxy: bool,
+    open_handoff: bool,
+    thumb_ok: bool,
+) -> bool {
+    moving || live_proxy || open_handoff || !thumb_ok
+}
+
+/// WGC window captures normally start at the visible frame (`(0, 0)`), whereas DWM thumbnails
+/// capture the full `GetWindowRect` (requiring `win32::insets`). Only apply `dwm_insets` to a
+/// WGC capture when the capture actually matches the larger `window_rect` rather than `frame_rect`.
+pub(crate) fn wgc_capture_insets(
+    capture_size: (i32, i32),
+    frame_rect: Rect,
+    window_rect: Option<Rect>,
+    dwm_insets: (i32, i32),
+) -> (i32, i32) {
+    if let Some(wr) = window_rect
+        && (wr.w > frame_rect.w + 2 || wr.h > frame_rect.h + 2)
+        && (capture_size.0 - wr.w).abs() <= 2
+        && (capture_size.1 - wr.h).abs() <= 2
+    {
+        dwm_insets
+    } else {
+        (0, 0)
+    }
+}
+
+/// Decide whether to draw a WGC backing bitmap for a proxy tile and compute its 1:1 `(src, dst)`.
+/// When `thumb_ok` is true, WGC backing is only used if it covers the entire `clip` rectangle;
+/// partial coverage keeps the live DWM thumbnail visible instead of leaving blank regions.
+/// When `thumb_ok` is false, partial backing is allowed as a fallback.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn choose_proxy_backing(
+    tile: Rect,
+    clip: Rect,
+    source_size: (i32, i32),
+    insets: (i32, i32),
+    host_origin: (i32, i32),
+    moving: bool,
+    live_proxy: bool,
+    open_handoff: bool,
+    thumb_ok: bool,
+) -> Option<(Rect, Rect)> {
+    if !should_draw_backing(moving, live_proxy, open_handoff, thumb_ok) {
+        return None;
+    }
+    let (src_r, dst_r) = proxy_blit_rects(tile, clip, source_size, insets, host_origin)?;
+    let covers_clip = dst_r.w == clip.w && dst_r.h == clip.h;
+    if thumb_ok && !covers_clip {
+        return None;
+    }
+    Some((src_r, dst_r))
+}
+
+/// True when a cached WGC capture bitmap should be dropped as stale.
+/// While `in_motion` (`moving || open_handoff`), the stand-in `rs` keeps the window's original
+/// size while the real OS window may already have been resized at `park`: judge the capture
+/// against `drawn_size` (`rs`) so a shrinking window keeps its full-coverage origin-size bitmap
+/// during the animation instead of dropping it and leaving part of the tile blank.
+/// When settled (`!in_motion`), judge against the OS frame (`os_frame`) so resized windows refresh.
+pub(crate) fn is_capture_stale(
+    capture_size: (i32, i32),
+    drawn_size: (i32, i32),
+    os_frame: Option<Rect>,
+    in_motion: bool,
+) -> bool {
+    let target = if in_motion {
+        drawn_size
+    } else if let Some(fr) = os_frame {
+        (fr.w, fr.h)
+    } else {
+        drawn_size
+    };
+    (capture_size.0 - target.0).abs() > 24 || (capture_size.1 - target.1).abs() > 24
+}
+
+/// Recompute 1:1 thumbnail `(src, dst)` when a parked window's DWM thumbnail source size changes
+/// asynchronously after settling. Returns `None` when unchanged.
+pub(crate) fn refresh_thumb_props_if_resized(
+    tile: Rect,
+    clip: Rect,
+    prev_source_size: (i32, i32),
+    new_source_size: (i32, i32),
+    insets: (i32, i32),
+    host_origin: (i32, i32),
+) -> Option<(Rect, Rect)> {
+    if new_source_size == prev_source_size {
+        return None;
+    }
+    proxy_blit_rects(tile, clip, new_source_size, insets, host_origin)
+}
+
 fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     let x = a.x.max(b.x);
     let y = a.y.max(b.y);
@@ -747,7 +961,7 @@ struct FrameScratch {
     actuals: Vec<Placement>,
     verify_items: Vec<Placement>,
     lines: Vec<(Rect, u32)>,
-    backing: Vec<(Rect, ID2D1Bitmap1)>,
+    backing: Vec<(Rect, Rect, ID2D1Bitmap1)>,
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
     host_hits: Vec<(Rect, isize)>,
@@ -773,6 +987,7 @@ struct RenderState {
     cover_timed_out_ids: HashSet<isize>,
     live_refresh_us: f64,
     refresh_checked: Instant,
+    last_thumb_refresh: Instant,
     source_tx: crossbeam_channel::Sender<SourceJob>,
     source_done: crossbeam_channel::Receiver<SourceDone>,
     scene: Option<Scene>,
@@ -816,6 +1031,7 @@ impl RenderState {
             cover_timed_out_ids: HashSet::new(),
             live_refresh_us: win32::dwm_refresh_period_us().unwrap_or(16_666.7),
             refresh_checked: begin,
+            last_thumb_refresh: begin,
             source_tx,
             source_done,
             scene: None,
@@ -846,7 +1062,7 @@ impl RenderState {
     fn has_active_sources(&self) -> bool {
         self.hosts
             .values()
-            .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty())
+            .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty() || !h.thumbs.is_empty())
     }
 
     fn clear_state(&mut self) {
@@ -1073,15 +1289,29 @@ impl RenderState {
     }
 
     fn update_idle_sources(&mut self) {
+        let refresh_thumbs = self.last_thumb_refresh.elapsed() >= Duration::from_millis(100);
+        if refresh_thumbs {
+            self.last_thumb_refresh = Instant::now();
+        }
         for host in self.hosts.values_mut() {
+            if refresh_thumbs {
+                host.refresh_resized_thumbnails();
+            }
             let Some(surface) = &host.surface else {
                 continue;
             };
             for (&(id, _), source) in &mut host.pictures {
-                if let Some(r) = win32::frame(id)
-                    && intersect(r, host.b) == Some(r)
-                {
-                    let _ = source.update(surface, self.settled);
+                if let Some(r) = win32::frame(id) {
+                    let stale = source.bitmap.as_ref().is_some_and(|bm| {
+                        let px = unsafe { bm.GetPixelSize() };
+                        is_capture_stale((px.width as i32, px.height as i32), (r.w, r.h), Some(r), false)
+                    });
+                    if stale {
+                        source.bitmap = None;
+                    }
+                    if intersect(r, host.b) == Some(r) {
+                        let _ = source.update(surface, if stale { 0 } else { self.settled });
+                    }
                 }
             }
         }
@@ -1224,41 +1454,62 @@ impl RenderState {
                     // still the visible tile rectangle (not the park column).
                     let proxy = park_window || (!tile.pinned && open_handoff);
                     if let Some(c) = clip {
+                        let thumb_ok = proxy && host.thumbnail(tile.id, rs, c);
+                        let mut drew_backing = false;
                         if proxy
+                            && should_draw_backing(moving, live_proxy, open_handoff, thumb_ok)
                             && let (Some(source), Some(surface)) = (
                                 host.pictures.get_mut(&(tile.id, tile.cookie)),
                                 host.surface.as_ref(),
                             )
                         {
+                            let cur_frame = win32::frame(tile.id);
+                            let in_motion = moving || open_handoff;
+                            if let Some(bm) = &source.bitmap {
+                                let px = bm.GetPixelSize();
+                                if is_capture_stale(
+                                    (px.width as i32, px.height as i32),
+                                    (rs.w, rs.h),
+                                    cur_frame,
+                                    in_motion,
+                                ) {
+                                    source.bitmap = None;
+                                }
+                            }
                             if source.bitmap.is_none()
                                 && let Err(e) = source.update(surface, 0)
                             {
                                 eprintln!("source frame: {e}")
                             }
                             if let Some(bitmap) = &source.bitmap {
-                                scratch.backing.push((
-                                    Rect {
-                                        x: rs.x - host.b.x,
-                                        y: rs.y - host.b.y,
-                                        ..rs
-                                    },
-                                    bitmap.clone(),
-                                ));
+                                let px = bitmap.GetPixelSize();
+                                let src_size = (px.width as i32, px.height as i32);
+                                let frame_rect = cur_frame.unwrap_or(rs);
+                                let mut wr = RECT::default();
+                                let window_rect = (GetWindowRect(tile.id as _, &mut wr) != 0)
+                                    .then(|| win32::rect(wr));
+                                let dwm_insets = win32::insets(tile.id).unwrap_or((0, 0));
+                                let wgc_insets =
+                                    wgc_capture_insets(src_size, frame_rect, window_rect, dwm_insets);
+                                if let Some((src_r, dst_r)) = choose_proxy_backing(
+                                    rs,
+                                    c,
+                                    src_size,
+                                    wgc_insets,
+                                    (host.b.x, host.b.y),
+                                    moving,
+                                    live_proxy,
+                                    open_handoff,
+                                    thumb_ok,
+                                ) {
+                                    scratch.backing.push((dst_r, src_r, bitmap.clone()));
+                                    drew_backing = true;
+                                }
                             }
                         }
-                        if proxy && host.thumbnail(tile.id, rs, c) {
-                            if moving
-                                && host
-                                    .pictures
-                                    .get(&(tile.id, tile.cookie))
-                                    .is_some_and(|src| src.bitmap.is_some())
-                            {
-                                let p = DWM_THUMBNAIL_PROPERTIES {
-                                    dwFlags: DWM_TNP_VISIBLE,
-                                    fVisible: 0,
-                                    ..Default::default()
-                                };
-                                DwmUpdateThumbnailProperties(host.thumbs[&tile.id], &p);
+                        if thumb_ok {
+                            if drew_backing {
+                                host.hide_thumbnail(tile.id);
                             }
                             scratch.keep.insert(tile.id);
                             if !moving {
@@ -1301,11 +1552,11 @@ impl RenderState {
                         }
                     }
                 }
-                host.thumbs.retain(|id, h| {
+                host.thumbs.retain(|id, t| {
                     if scratch.keep.contains(id) {
                         true
                     } else {
-                        DwmUnregisterThumbnail(*h);
+                        DwmUnregisterThumbnail(t.handle);
                         false
                     }
                 });
@@ -1820,4 +2071,182 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
         }
     });
     tx
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        choose_proxy_backing, is_capture_stale, proxy_blit_rects, refresh_thumb_props_if_resized,
+        should_draw_backing, wgc_capture_insets,
+    };
+    use planor::Rect;
+
+    #[test]
+    fn wgc_vs_dwm_origins_are_distinguished() {
+        let frame = Rect { x: 0, y: 0, w: 1280, h: 1364 };
+        let window = Rect { x: -8, y: 0, w: 1296, h: 1372 };
+        let dwm_insets = (8, 0);
+
+        // Normal WGC capture matches the visible frame -> origin is (0, 0), NOT (8, 0).
+        assert_eq!(wgc_capture_insets((1280, 1364), frame, Some(window), dwm_insets), (0, 0));
+        // If WGC actually captured the full GetWindowRect with invisible borders -> use dwm_insets.
+        assert_eq!(wgc_capture_insets((1296, 1372), frame, Some(window), dwm_insets), (8, 0));
+        // Without a window rect -> default to (0, 0).
+        assert_eq!(wgc_capture_insets((1280, 1364), frame, None, dwm_insets), (0, 0));
+
+        // Verify blitting with WGC (0, 0) vs DWM (8, 0) produces exact unshifted rects.
+        let clip = Rect { x: 0, y: 0, w: 1280, h: 1364 };
+        let (wgc_src, wgc_dst) = proxy_blit_rects(frame, clip, (1280, 1364), (0, 0), (0, 0)).unwrap();
+        let (dwm_src, dwm_dst) = proxy_blit_rects(frame, clip, (1296, 1372), (8, 0), (0, 0)).unwrap();
+        assert_eq!(wgc_src, Rect { x: 0, y: 0, w: 1280, h: 1364 });
+        assert_eq!(dwm_src, Rect { x: 8, y: 0, w: 1280, h: 1364 });
+        assert_eq!(wgc_dst, dwm_dst);
+    }
+
+    #[test]
+    fn choose_proxy_backing_requires_full_coverage_when_thumb_is_live() {
+        // Repro of #38 (bundle 000812248): group widened from 1157 -> 2560; bottom peek is 28px tall.
+        let tile = Rect { x: 0, y: 1364, w: 2560, h: 1364 };
+        let clip = Rect { x: 0, y: 1364, w: 2560, h: 28 };
+
+        // Partial capture (1157 < 2560) with live DWM thumbnail: must NOT draw backing or hide thumbnail.
+        assert_eq!(
+            choose_proxy_backing(tile, clip, (1157, 1364), (0, 0), (0, 0), true, false, false, true),
+            None,
+            "partial WGC capture must keep live DWM thumbnail visible during motion"
+        );
+        // Same partial capture when DWM thumbnail failed (thumb_ok == false): allow partial fallback, 1:1 unscaled.
+        let (src, dst) =
+            choose_proxy_backing(tile, clip, (1157, 1364), (0, 0), (0, 0), false, false, false, false)
+                .expect("partial fallback allowed when thumb_ok == false");
+        assert_eq!(src, Rect { x: 0, y: 0, w: 1157, h: 28 });
+        assert_eq!(dst, Rect { x: 0, y: 1364, w: 1157, h: 28 });
+
+        // Full-coverage capture (2560 >= 2560) during motion: allowed and 1:1.
+        let (full_src, full_dst) =
+            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), true, false, false, true)
+                .expect("full coverage during motion uses WGC backing");
+        assert_eq!(full_src, Rect { x: 0, y: 0, w: 2560, h: 28 });
+        assert_eq!(full_dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+
+        // Settled with live DWM thumbnail: never draw WGC backing over it.
+        assert_eq!(
+            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), false, false, false, true),
+            None
+        );
+    }
+
+    #[test]
+    fn proxy_blit_rects_keeps_top_and_bottom_peeks_unscaled_landscape_and_portrait() {
+        // Repro of #18 (bundle 144350042): 3-window group widened 1277 -> 2560 on monitor at y=-1440.
+        let host = (0, -1440);
+        let top_tile = Rect { x: 0, y: -2748, w: 2560, h: 1336 };
+        let top_clip = Rect { x: 0, y: -1440, w: 2560, h: 28 };
+        let (top_src, top_dst) =
+            proxy_blit_rects(top_tile, top_clip, (1293, 1344), (8, 0), host).unwrap();
+        assert_eq!(top_src.w, top_dst.w);
+        assert_eq!(top_src.h, top_dst.h);
+        assert_eq!(top_dst.y, 0);
+        assert_eq!(top_dst.h, 28);
+
+        let bot_tile = Rect { x: 0, y: -76, w: 2560, h: 1336 };
+        let bot_clip = Rect { x: 0, y: -76, w: 2560, h: 28 };
+        let (bot_src, bot_dst) =
+            proxy_blit_rects(bot_tile, bot_clip, (2576, 1344), (8, 0), host).unwrap();
+        assert_eq!(bot_src, Rect { x: 8, y: 0, w: 2560, h: 28 });
+        assert_eq!(bot_dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+
+        // Portrait monitor (-1440, 0, 1440, 2512): grouped peek on right edge (28px wide), negative host origin.
+        let p_host = (-1440, 0);
+        let p_tile = Rect { x: -28, y: 0, w: 1412, h: 1200 };
+        let p_clip = Rect { x: -28, y: 0, w: 28, h: 1200 };
+        let (p_src, p_dst) =
+            proxy_blit_rects(p_tile, p_clip, (1428, 1208), (8, 0), p_host).unwrap();
+        assert_eq!(p_src.w, p_dst.w);
+        assert_eq!(p_src.h, p_dst.h);
+        assert_eq!(p_dst, Rect { x: 1412, y: 0, w: 28, h: 1200 });
+    }
+
+    #[test]
+    fn proxy_blit_rects_handles_negative_offsets_and_left_scrolled_windows() {
+        // Repro of #55 (bundle 225940320): left window at x=-1455, w=1920, visible 0..465.
+        let tile = Rect { x: -1455, y: 0, w: 1920, h: 1140 };
+        let clip = Rect { x: 0, y: 0, w: 465, h: 1140 };
+        let (src, dst) = proxy_blit_rects(tile, clip, (1936, 1148), (8, 0), (0, 0)).unwrap();
+        assert_eq!(src, Rect { x: 1463, y: 0, w: 465, h: 1140 });
+        assert_eq!(dst, Rect { x: 0, y: 0, w: 465, h: 1140 });
+
+        // Negative sx (clip.x < tile.x) pads dst.x and clamps src.x to 0.
+        let (neg_src, neg_dst) = proxy_blit_rects(
+            Rect { x: 10, y: 0, w: 100, h: 100 },
+            Rect { x: 0, y: 0, w: 50, h: 100 },
+            (100, 100),
+            (0, 0),
+            (0, 0),
+        )
+        .unwrap();
+        assert_eq!(neg_src, Rect { x: 0, y: 0, w: 40, h: 100 });
+        assert_eq!(neg_dst, Rect { x: 10, y: 0, w: 40, h: 100 });
+
+        // Stale narrower capture returns None so caller keeps live DWM thumbnail.
+        assert_eq!(proxy_blit_rects(tile, clip, (957, 1140), (0, 0), (0, 0)), None);
+    }
+
+    #[test]
+    fn idle_thumbnail_refresh_updates_props_when_source_grows_after_settling() {
+        // Repro of #18 (144350042): parked peek 3016780 resized asynchronously 1277 -> 2560 after settle.
+        let tile = Rect { x: 0, y: -76, w: 2560, h: 1336 };
+        let clip = Rect { x: 0, y: -76, w: 2560, h: 28 };
+        let host = (0, -1440);
+
+        // Unchanged size -> no update needed.
+        assert_eq!(
+            refresh_thumb_props_if_resized(tile, clip, (1293, 1344), (1293, 1344), (8, 0), host),
+            None
+        );
+        // Once the app finishes resizing to 2576x1344 -> thumbnail props expand to full 2560x28.
+        let (src, dst) =
+            refresh_thumb_props_if_resized(tile, clip, (1293, 1344), (2576, 1344), (8, 0), host)
+                .expect("grown source must refresh thumbnail properties");
+        assert_eq!(src, Rect { x: 8, y: 0, w: 2560, h: 28 });
+        assert_eq!(dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+    }
+
+    #[test]
+    fn should_draw_backing_only_during_motion_or_thumb_failure() {
+        assert!(!should_draw_backing(false, false, false, true));
+        assert!(should_draw_backing(true, false, false, true));
+        assert!(should_draw_backing(false, true, false, true));
+        assert!(should_draw_backing(false, false, true, true));
+        assert!(should_draw_backing(false, false, false, false));
+    }
+
+    #[test]
+    fn stale_capture_decision_keeps_origin_bitmap_in_motion_and_drops_settled_mismatch() {
+        // (a) Shrinking window in motion: stand-in `rs` keeps original 2560x1364 while OS window
+        //     at `park` already shrunk to 1157x1364. Must KEEP the origin-size capture so the
+        //     stand-in covers the whole clip without blanking out during the 180 ms animation.
+        let shrunk_os = Some(Rect { x: 3584, y: 0, w: 1157, h: 1364 });
+        assert!(
+            !is_capture_stale((2560, 1364), (2560, 1364), shrunk_os, true),
+            "origin-size bitmap must be kept during motion even after OS window shrunk"
+        );
+        let tile = Rect { x: 0, y: 0, w: 2560, h: 1364 };
+        let clip = Rect { x: 0, y: 0, w: 2560, h: 1364 };
+        assert_eq!(
+            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), true, false, false, true),
+            Some((clip, clip)),
+            "kept origin-size bitmap covers full clip during shrinking animation"
+        );
+
+        // (b) Growing tile: during motion `rs` is still 1157x1364 so 1157 bitmap matches `rs`;
+        //     once settled (`in_motion == false`), 1157 bitmap vs 2560 OS frame is stale.
+        let grown_os = Some(Rect { x: 3584, y: 0, w: 2560, h: 1364 });
+        assert!(!is_capture_stale((1157, 1364), (1157, 1364), grown_os, true));
+        assert!(is_capture_stale((1157, 1364), (2560, 1364), grown_os, false));
+
+        // (c) Settled proxy / idle refresh with mismatched OS frame is stale and dropped.
+        assert!(is_capture_stale((1277, 1364), (1277, 1364), grown_os, false));
+        assert!(!is_capture_stale((2560, 1364), (2560, 1364), grown_os, false));
+    }
 }

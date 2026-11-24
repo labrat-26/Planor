@@ -1798,3 +1798,556 @@ fn config_reload_bumps_version_and_applies_gap() {
     assert_eq!(h.engine.hot.gap_px, 11);
     h.stop_clean();
 }
+
+#[test]
+fn edge_resize_suppresses_merge_boxes_and_borders_while_move_shows_them() {
+    use crate::daemon::is_edge_resize;
+
+    // Unit-level classification checks: 4 edges, 4 corners, cross-DPI move, snapped drag-restore.
+    let orig = Rect { x: 100, y: 50, w: 1200, h: 900 };
+    assert!(is_edge_resize(orig, Rect { x: 100, y: 50, w: 900, h: 900 }), "right edge resize");
+    assert!(is_edge_resize(orig, Rect { x: 250, y: 50, w: 1050, h: 900 }), "left edge resize");
+    assert!(is_edge_resize(orig, Rect { x: 100, y: 50, w: 1200, h: 700 }), "bottom edge resize");
+    assert!(is_edge_resize(orig, Rect { x: 100, y: 150, w: 1200, h: 800 }), "top edge resize");
+    assert!(is_edge_resize(orig, Rect { x: 200, y: 150, w: 1100, h: 800 }), "top-left corner resize");
+    assert!(
+        !is_edge_resize(orig, Rect { x: 1600, y: 60, w: 960, h: 720 }),
+        "cross-DPI move shifts both horizontal edges"
+    );
+    assert!(
+        !is_edge_resize(orig, Rect { x: 220, y: 50, w: 900, h: 700 }),
+        "snapped drag-restore keeps top edge near orig.y but shifts both horizontal edges"
+    );
+
+    // Simulation test (#37) on both landscape (MON0) and portrait (MON2).
+    for (mon, first_id, second_id, resize_fn) in [
+        (
+            "MON0",
+            101,
+            102,
+            (|r: Rect| Rect { w: r.w - 220, ..r }) as fn(Rect) -> Rect,
+        ),
+        (
+            "MON2",
+            301,
+            302,
+            (|r: Rect| Rect { h: r.h - 260, ..r }) as fn(Rect) -> Rect,
+        ),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        focus(&mut h, first_id);
+        let r1 = h.rect(first_id);
+        let r2 = h.rect(second_id);
+        let cursor_over_second = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+
+        let key = (h.engine.desktop.unwrap(), mon.to_string());
+
+        // 1. Edge resize: merge zones & drop borders must NOT appear even if cursor enters neighbour.
+        h.desktop.0.lock().unwrap().cursor = cursor_over_second;
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, first_id));
+        h.desktop.0.lock().unwrap().windows.get_mut(&first_id).unwrap().rect = resize_fn(r1);
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+
+        let last = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert!(last.zones.is_empty(), "{mon}: resize must not emit merge zones");
+        assert!(
+            h.engine.drag.as_ref().is_some_and(|d| d.resizing),
+            "{mon}: drag session should latch resizing=true"
+        );
+
+        // Complete resize -> column shrinks, does NOT group/swap with second_id.
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, first_id));
+        h.settle();
+        let after_resize = h.rect(first_id);
+        if mon == "MON0" {
+            assert_eq!(after_resize.w, r1.w - 220, "{mon}: width resized");
+        } else {
+            assert_eq!(after_resize.h, r1.h - 260, "{mon}: height resized");
+        }
+        assert!(
+            h.engine.strips[&key].locate(first_id).unwrap().0
+                != h.engine.strips[&key].locate(second_id).unwrap().0,
+            "{mon}: resize must not group windows"
+        );
+
+        // 2. Real move: merge zones DO appear and dropping in zone groups the windows.
+        let r1_now = h.rect(first_id);
+        let r2_now = h.rect(second_id);
+        let target_center = (r2_now.x + r2_now.w / 2, r2_now.y + r2_now.h / 2);
+        h.desktop.0.lock().unwrap().cursor = (r1_now.x + 20, r1_now.y + 10);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, first_id));
+        {
+            let mut d = h.desktop.0.lock().unwrap();
+            d.windows.get_mut(&first_id).unwrap().rect = Rect {
+                x: r1_now.x + 120,
+                y: r1_now.y + 80,
+                ..r1_now
+            };
+            d.cursor = target_center;
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+
+        let move_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert!(!move_scene.zones.is_empty(), "{mon}: real move must show merge zones");
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, first_id));
+        h.settle();
+        assert_eq!(
+            h.engine.strips[&key].locate(first_id).unwrap().0,
+            h.engine.strips[&key].locate(second_id).unwrap().0,
+            "{mon}: dropping inside stack zone must group windows"
+        );
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() {
+    // Covers #18 (grouping with left and bottom windows, landscape + portrait, while scrolled)
+    // and #55 (instant sync of drop boxes during edge-scroll + rate-limited edge-scroll).
+    let mut anim_cfg = note_cfg();
+    anim_cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    anim_cfg["animation"]["duration_ms"] = toml::Value::Integer(180);
+
+    // 1. Landscape (MON0, 1920x1152): 3 windows scrolled sideways so left window (101) is partially visible.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), anim_cfg.clone(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+            sim.add_window(SimWindow::new(103, Rect { x: 1920, y: 0, w: 960, h: 1152 }));
+        });
+        focus(&mut h, 103);
+        // Scroll partially so 101 peeks on the left, 102 in middle, 103 on right.
+        let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+        h.engine.strips.get_mut(&key).unwrap().offset = 400;
+        h.engine.dirty = true;
+        h.settle();
+
+        let r103 = h.rect(103);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 103));
+        // Move window 103 toward the left edge to trigger edge-scroll.
+        {
+            let mut d = h.desktop.0.lock().unwrap();
+            d.windows.get_mut(&103).unwrap().rect = Rect { x: r103.x - 300, y: 40, ..r103 };
+            d.cursor = (10, 500);
+        }
+        let off_before = h.engine.strips[&key].offset;
+        h.engine.tick().unwrap();
+        let off_after_one = h.engine.strips[&key].offset;
+        assert!(off_after_one < off_before, "edge-scroll should scroll left toward left windows");
+        assert!(
+            h.engine.instant,
+            "edge-scroll must mark scene instant so drop boxes never lag behind animating windows"
+        );
+        // Calling tick() again immediately (<30ms) must be rate-limited so left windows aren't flung away.
+        h.engine.tick().unwrap();
+        assert_eq!(
+            h.engine.strips[&key].offset,
+            off_after_one,
+            "edge-scroll must be rate-limited against 120Hz bursts"
+        );
+        h.settle_quiet();
+
+        // Verify left window (101) has a drop zone inside its visible rect, and dropping there groups 103 with 101.
+        let zones = crate::daemon::drop_zones(&h.engine.strips[&key], 96, 50, 103);
+        let left_zone = zones
+            .iter()
+            .find(|(id, _, _)| *id == 101)
+            .expect("left window 101 must have a drop zone");
+        assert!(left_zone.2.x >= 0 && left_zone.2.x + left_zone.2.w <= 1920);
+        h.desktop.0.lock().unwrap().cursor = (
+            left_zone.2.x + left_zone.2.w / 2,
+            left_zone.2.y + left_zone.2.h / 2,
+        );
+        h.engine.tick().unwrap();
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 103));
+        h.settle();
+        assert_eq!(
+            h.engine.strips[&key].locate(103).unwrap().0,
+            h.engine.strips[&key].locate(101).unwrap().0,
+            "dropping 103 into scrolled left window 101's drop zone must group them"
+        );
+        h.stop_clean();
+    }
+
+    // 2. Portrait (MON2, -1440,0,1440,2512): 3 windows scrolled so bottom window (303) is partially visible.
+    {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), anim_cfg, three_per_monitor);
+        focus(&mut h, 301);
+        let key = (h.engine.desktop.unwrap(), "MON2".to_string());
+        h.engine.strips.get_mut(&key).unwrap().offset = 300;
+        h.engine.dirty = true;
+        h.settle();
+
+        let r301 = h.rect(301);
+        let zones = crate::daemon::drop_zones(&h.engine.strips[&key], 96, 50, 301);
+        let bottom_zone = zones
+            .iter()
+            .find(|(id, _, _)| *id == 303)
+            .expect("bottom window 303 on portrait monitor must have a drop zone");
+        assert!(
+            bottom_zone.2.y >= 0 && bottom_zone.2.y + bottom_zone.2.h <= 2512,
+            "portrait bottom drop zone must stay within monitor work area"
+        );
+
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 301));
+        {
+            let mut d = h.desktop.0.lock().unwrap();
+            d.windows.get_mut(&301).unwrap().rect = Rect { x: r301.x + 80, y: r301.y + 400, ..r301 };
+            d.cursor = (
+                bottom_zone.2.x + bottom_zone.2.w / 2,
+                bottom_zone.2.y + bottom_zone.2.h / 2,
+            );
+        }
+        h.engine.tick().unwrap();
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
+        h.settle();
+        assert_eq!(
+            h.engine.strips[&key].locate(301).unwrap().0,
+            h.engine.strips[&key].locate(303).unwrap().0,
+            "dropping 301 into bottom window 303's drop zone on portrait monitor must group them"
+        );
+        h.stop_clean();
+    }
+}
+
+#[test]
+fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
+    // Reproduces exact bundle 225940320 layout (1920x1140 work area, 1920px windows, offset 1455)
+    // using the real 4-finger pad_drag path (Event::Contacts).
+    let rig = vec![(
+        "LEN403A".to_string(),
+        Rect { x: 0, y: 0, w: 1920, h: 1140 },
+        Rect { x: 0, y: 0, w: 1920, h: 1200 },
+    )];
+    let mut cfg = note_cfg();
+    cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    cfg["animation"]["duration_ms"] = toml::Value::Integer(180);
+    cfg["layout"]["stack_peek_px"] = toml::Value::Integer(28);
+
+    let mut h = SimHarness::with_setup(rig, cfg, |sim| {
+        // Add in reverse z-order so scan() builds columns [1376768, 11339466, 1049722, 26216776].
+        sim.add_window(SimWindow::new(26216776, Rect { x: 0, y: 0, w: 1920, h: 1140 }));
+        sim.add_window(SimWindow::new(1049722, Rect { x: 0, y: 0, w: 957, h: 1140 }));
+        sim.add_window(SimWindow::new(11339466, Rect { x: 0, y: 0, w: 1920, h: 1140 }));
+        sim.add_window(SimWindow::new(1376768, Rect { x: 0, y: 0, w: 1920, h: 1140 }));
+    });
+    let key = (h.engine.desktop.unwrap(), "LEN403A".to_string());
+    {
+        let s = h.engine.strips.get_mut(&key).unwrap();
+        assert_eq!(s.columns[0].members, vec![1376768]);
+        assert_eq!(s.columns[1].members, vec![11339466]);
+        assert_eq!(s.columns[2].members, vec![1049722]);
+        assert_eq!(s.columns[3].members, vec![26216776]);
+        s.columns[0].length = 1920;
+        s.columns[1].length = 1920;
+        s.columns[2].length = 957;
+        s.columns[3].length = 1920;
+        s.focus = 3;
+        s.offset = 1455;
+    }
+    h.desktop.0.lock().unwrap().foreground = 26216776;
+    h.engine.dirty = true;
+    h.settle();
+
+    // Start 4-finger pad drag via Event::Contacts (origin -> move past deadzone -> DragStart).
+    let pts = |dx: f64, dy: f64| {
+        vec![
+            (100.0 + dx, 100.0 + dy),
+            (120.0 + dx, 100.0 + dy),
+            (140.0 + dx, 100.0 + dy),
+            (160.0 + dx, 100.0 + dy),
+        ]
+    };
+    h.engine.event(Event::Contacts(pts(0.0, 0.0)));
+    h.engine.event(Event::Contacts(pts(-40.0, 0.0)));
+    assert!(h.engine.pad.is_some(), "4-finger swipe must start pad drag");
+    assert!(
+        h.engine.drag.as_ref().is_some_and(|d| d.pad_drag && d.moved),
+        "pad drag must mark pad_drag=true and moved=true"
+    );
+
+    // Move cursor over left window 1376768's visible drop zone (x in 116..348) and update.
+    h.desktop.0.lock().unwrap().cursor = (232, 570);
+    if let Some(p) = h.engine.pad.as_mut() {
+        p.cursor = (232.0, 570.0);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    let drag_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert_eq!(drag_scene.duration, 0, "drag hover scene must be instant so zones match tiles");
+    assert_eq!(drag_scene.zones.len(), 2, "both visible neighbours (1376768 and 11339466) show zones");
+
+    // Assert EVERY zone against its own tile's clipped rect and stack_zone(...).
+    let tile_rect = |id: isize| {
+        drag_scene
+            .tiles
+            .iter()
+            .find(|&&(tid, _)| tid == id)
+            .map(|&(_, r)| r)
+            .unwrap()
+    };
+    let clip_to_work = |r: Rect| {
+        let x = r.x.max(0);
+        let y = r.y.max(0);
+        let w = (r.x + r.w).min(1920) - x;
+        let h = (r.y + r.h).min(1140) - y;
+        Rect { x, y, w, h }
+    };
+    let expected_left_zone = planor::stack_zone(clip_to_work(tile_rect(1376768)), 50);
+    let expected_right_zone = planor::stack_zone(clip_to_work(tile_rect(11339466)), 50);
+    assert_eq!(tile_rect(1376768), Rect { x: -1455, y: 0, w: 1920, h: 1140 });
+    assert_eq!(tile_rect(11339466), Rect { x: 471, y: 0, w: 1920, h: 1140 });
+    assert_eq!(
+        drag_scene.zones.iter().map(|z| z.rect).collect::<Vec<_>>(),
+        vec![expected_left_zone, expected_right_zone],
+        "each drop zone must match stack_zone(clip(own_tile, work_area), 50) exactly"
+    );
+
+    // 1. Exact recorded drop from bundle 225940320: cursor near (1401, 633) over 11339466 (471..1920).
+    h.desktop.0.lock().unwrap().cursor = (1401, 633);
+    if let Some(p) = h.engine.pad.as_mut() {
+        p.cursor = (1401.0, 633.0);
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    {
+        let s = &h.engine.strips[&key];
+        assert_eq!(s.locate(26216776).unwrap().0, 1, "recorded drop at (1401,633) groups onto 11339466 at col 1");
+        assert_eq!(s.locate(11339466).unwrap().0, 1);
+        assert_eq!(s.offset, 1926, "full-width 1920px group reveals at offset 1926 so focused window is unparked");
+        assert_eq!(s.locate(1376768).unwrap().0, 0, "left window 1376768 remains intact at col 0");
+    }
+    // Scrolling/focusing left immediately restores the left window at x = 0.
+    h.cmd(Command::Key { name: "focus_left".into() });
+    h.settle();
+    assert_eq!(h.engine.strips[&key].offset, 0);
+    assert_eq!(h.rect(1376768), Rect { x: 0, y: 0, w: 1920, h: 1140 });
+    h.stop_clean();
+}
+
+#[test]
+fn fast_tick_drives_smooth_refresh_paced_edge_scroll() {
+    // Finding #3: edge scrolling runs via wants_fast_tick / fast_tick at display refresh rate,
+    // without requiring 32 ms tick() or pad_move() calls.
+    let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+        sim.add_window(SimWindow::new(103, Rect { x: 1920, y: 0, w: 960, h: 1152 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+    });
+    let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+    focus(&mut h, 103);
+    h.engine.strips.get_mut(&key).unwrap().offset = 600;
+    h.engine.dirty = true;
+    h.settle();
+
+    let r103 = h.rect(103);
+    h.desktop.0.lock().unwrap().cursor = (r103.x + 100, 500);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 103));
+    {
+        let mut d = h.desktop.0.lock().unwrap();
+        d.windows.get_mut(&103).unwrap().rect = Rect { x: r103.x - 200, y: 40, ..r103 };
+        d.cursor = (10, 500); // within 48px of left edge
+    }
+    // First tick enters edge-scroll and arms wants_fast_tick().
+    h.engine.tick().unwrap();
+    assert!(h.engine.wants_fast_tick(), "active drag at strip edge must request fast_tick");
+
+    // Drive edge scrolling exclusively via fast_tick() at ~60 Hz (17 ms intervals).
+    let start_offset = h.engine.strips[&key].offset;
+    let start_t = Instant::now();
+    let mut steps = 0;
+    for _ in 0..4 {
+        thread::sleep(Duration::from_millis(18));
+        let before = h.engine.strips[&key].offset;
+        h.engine.fast_tick();
+        let after = h.engine.strips[&key].offset;
+        assert!(after < before, "fast_tick must advance edge scroll smoothly");
+        assert!(
+            before - after <= 45,
+            "each fast_tick step must stay small and clamped (got {})",
+            before - after
+        );
+        steps += 1;
+    }
+    let elapsed_s = start_t.elapsed().as_secs_f64();
+    let total_px = (start_offset - h.engine.strips[&key].offset) as f64;
+    let speed = total_px / elapsed_s;
+    assert_eq!(steps, 4);
+    assert!(
+        (500.0..=1300.0).contains(&speed),
+        "fast_tick edge-scroll speed should be ~900 px/s (got {speed:.1} px/s over {elapsed_s:.3}s)"
+    );
+
+    // Moving cursor away from the edge disarms wants_fast_tick().
+    h.desktop.0.lock().unwrap().cursor = (500, 500);
+    h.engine.fast_tick();
+    assert!(!h.engine.wants_fast_tick(), "leaving edge zone must disarm fast_tick");
+    h.stop_clean();
+}
+
+#[test]
+fn snapped_drag_restore_and_cross_dpi_and_back_do_not_resize() {
+    // Finding #5: once a drag latches moved=true, size changes from snapped drag-restore or
+    // crossing DPI and returning must NEVER be misclassified as a resize.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key0 = (h.engine.desktop.unwrap(), "MON0".to_string());
+    focus(&mut h, 101);
+
+    // 1. Snapped drag-restore: top edge stays at orig.y while window moves horizontally and shrinks.
+    let r1 = h.rect(101);
+    let r2 = h.rect(102);
+    h.desktop.0.lock().unwrap().cursor = (r1.x + 100, r1.y + 10);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    {
+        let mut d = h.desktop.0.lock().unwrap();
+        d.windows.get_mut(&101).unwrap().rect = Rect {
+            x: r1.x + 250,
+            y: r1.y,
+            w: r1.w - 180,
+            h: r1.h - 200,
+        };
+        d.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+    }
+    h.engine.tick().unwrap();
+    assert!(
+        h.engine.drag.as_ref().is_some_and(|d| d.moved && !d.resizing),
+        "snapped drag-restore must latch moved=true, resizing=false"
+    );
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+    assert_eq!(
+        h.engine.strips[&key0].locate(101).unwrap().0,
+        h.engine.strips[&key0].locate(102).unwrap().0,
+        "snapped drag-restore over neighbour stack zone must group, not resize"
+    );
+    h.stop_clean();
+
+    // 2. Cross-DPI-and-back: move 101 to MON1 (DPI changes w/h), then return to MON0 and drop on 102.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key0 = (h.engine.desktop.unwrap(), "MON0".to_string());
+    focus(&mut h, 101);
+    let r1 = h.rect(101);
+    let r2 = h.rect(102);
+    h.desktop.0.lock().unwrap().cursor = (r1.x + 100, r1.y + 10);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    // Move onto MON1 with DPI-changed size.
+    {
+        let mut d = h.desktop.0.lock().unwrap();
+        d.windows.get_mut(&101).unwrap().rect = Rect {
+            x: 2100,
+            y: 120,
+            w: r1.w + 240,
+            h: r1.h + 100,
+        };
+        d.cursor = (2200, 200);
+    }
+    h.engine.tick().unwrap();
+    assert!(h.engine.drag.as_ref().is_some_and(|d| d.moved && !d.resizing));
+    // Return to MON0 over 102's stack zone while still keeping a different size.
+    {
+        let mut d = h.desktop.0.lock().unwrap();
+        d.windows.get_mut(&101).unwrap().rect = Rect {
+            x: r2.x + 40,
+            y: r2.y + 40,
+            w: r1.w + 240,
+            h: r1.h + 100,
+        };
+        d.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+    }
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+    assert_eq!(
+        h.engine.strips[&key0].locate(101).unwrap().0,
+        h.engine.strips[&key0].locate(102).unwrap().0,
+        "cross-DPI-and-back drop must group, not resize"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn same_monitor_drop_animates_and_release_near_edge_does_not_scroll() {
+    // Finding #6 (same-monitor drop keeps animation duration even if final drag_update changes target),
+    // Finding #7 (release within 48px of edge does not scroll), and Finding #8 (smooth edge_scroll_step).
+    use crate::daemon::edge_scroll_step;
+
+    // Finding #8 unit checks:
+    assert_eq!(edge_scroll_step(0.005, 60.0, -1, 0.0), None, "sub-refresh interval skipped");
+    let (px60, rem60) = edge_scroll_step(1.0 / 60.0, 60.0, 1, 0.0).unwrap();
+    assert_eq!(px60, 15, "900 px/s * 1/60s = 15 px");
+    assert!(rem60.abs() < 1e-6);
+    let (px_clamped, _) = edge_scroll_step(0.5, 60.0, -1, 0.0).unwrap();
+    assert_eq!(px_clamped, -45, "stalls clamped to 50 ms -> 45 px max");
+    assert_eq!(edge_scroll_step(0.02, 60.0, 0, 0.0), None, "dir=0 returns None");
+
+    let mut anim_cfg = note_cfg();
+    anim_cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    anim_cfg["animation"]["duration_ms"] = toml::Value::Integer(180);
+
+    // Finding #6: final drag_update inside drag_end changes target/mode -> drop must still animate!
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), anim_cfg.clone(), |sim| {
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+        });
+        focus(&mut h, 101);
+        let r1 = h.rect(101);
+        let r2 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r1.x + 50, r1.y + 50);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+        h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().rect =
+            Rect { x: r1.x + 40, y: r1.y + 40, ..r1 };
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+
+        // Now move cursor directly into 102's stack zone and release without an intermediate tick.
+        h.desktop.0.lock().unwrap().cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+        h.settle();
+        let drop_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert_eq!(
+            drop_scene.duration, 180,
+            "same-monitor drop must preserve animation duration even when final update changes target"
+        );
+        h.stop_clean();
+    }
+
+    // Finding #7: dropping within 48px of the strip edge must NOT edge-scroll on release.
+    {
+        let mut h = SimHarness::with_setup(primary_only_rig(), anim_cfg, |sim| {
+            sim.add_window(SimWindow::new(103, Rect { x: 1920, y: 0, w: 960, h: 1152 }));
+            sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 960, h: 1152 }));
+            sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1152 }));
+        });
+        focus(&mut h, 102);
+        let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+        // Offset 400 keeps 102 (col 1: 963..1920 -> 563..1520) completely in view, so reveal() is a no-op
+        // and only an illegal edge-scroll in drag_end could change offset.
+        h.engine.strips.get_mut(&key).unwrap().offset = 400;
+        h.engine.dirty = true;
+        h.settle();
+
+        let r102 = h.rect(102);
+        h.desktop.0.lock().unwrap().cursor = (r102.x + 100, 500);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 102));
+        h.desktop.0.lock().unwrap().windows.get_mut(&102).unwrap().rect =
+            Rect { x: r102.x - 200, y: 40, ..r102 };
+        h.engine.tick().unwrap();
+        // Place cursor at x=10 (within 48px of left edge) and release immediately.
+        // Hold Shift (drag_stack_modifier_vk = 0x10) so the drop cancels cleanly and only edge-scroll could change offset.
+        {
+            let mut d = h.desktop.0.lock().unwrap();
+            d.cursor = (10, 500);
+            d.keys_down.insert(0x10);
+        }
+        let offset_before_release = h.engine.strips[&key].offset;
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
+        assert_eq!(
+            h.engine.strips[&key].offset, offset_before_release,
+            "drag_end must not edge-scroll the strip on release"
+        );
+        h.stop_clean();
+    }
+}

@@ -412,7 +412,9 @@ pub(crate) mod sim {
     #[derive(Clone, Debug)]
     pub(crate) struct SimSceneSummary {
         pub epoch: u64,
+        pub duration: u64,
         pub tiles_len: usize,
+        pub tiles: Vec<(isize, Rect)>,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
         pub covered: Vec<isize>,
@@ -537,7 +539,9 @@ pub(crate) mod sim {
             }
             self.scenes.push(SimSceneSummary {
                 epoch: scene.epoch,
+                duration: scene.duration,
                 tiles_len: scene.tiles.len(),
+                tiles: scene.tiles.iter().map(|t| (t.id, t.rect)).collect(),
                 holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
                 covered: scene
