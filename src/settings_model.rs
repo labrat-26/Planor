@@ -351,6 +351,14 @@ mod tests {
     }
 
     #[test]
+    fn drag_axis_lock_is_listed_and_on_by_default() {
+        let m = model();
+        let i = idx(&m, "touchpad", "drag_axis_lock");
+        assert_eq!(m.value(i), toml::Value::Boolean(true));
+        assert!(!m.entries[i].help.is_empty());
+    }
+
+    #[test]
     fn loads_every_section_and_key_of_the_example_with_help() {
         let m = model();
         for s in ["layout", "borders", "animation", "touchpad", "mouse", "diagnostics", "hotkeys"] {

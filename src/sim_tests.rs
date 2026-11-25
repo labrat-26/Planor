@@ -1182,9 +1182,15 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
             format!("{what}: rolled the group")
         }
         4 => {
-            assert!(dragged, "{what}: four fingers must pick the window up");
+            // Drag axis lock (#83, on by default): only a start along the strip axis picks the window up; a
+            // cross-axis start is ignored (no pick-up is required, and nothing may be left behind, checked above).
+            // Only a clearly along-axis gesture (1.5x lead) must pick up; a diagonal or circular one may start either way.
+            let (lead, side) = if horizontal_strip { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
+            if lead >= 3. * side {
+                assert!(dragged, "{what}: four fingers along the strip must pick the window up");
+            }
             assert!(!moved || !h.engine.pad_scrolling, "{what}: no stray scroll after the drop");
-            format!("{what}: carried and dropped the window")
+            if dragged { format!("{what}: carried and dropped the window") } else { format!("{what}: cross-axis start ignored (axis lock)") }
         }
         _ => format!("{what}: no gesture for this many fingers"),
     }
@@ -1280,12 +1286,14 @@ fn non_dirtying_contacts_do_not_leave_stale_input_timestamp_on_both_orientations
         h.settle_quiet();
 
         // Start a 4-finger pad drag, wait past the 8 ms move gate, then nudge without changing target/mode.
+        // (Along the strip axis: sideways on landscape, up and down on portrait; drag axis lock is on.)
+        let (nudge, tiny) = if mon == "MON2" { ((200., 216.), (200., 216.2)) } else { ((216., 200.), (216.2, 200.)) };
         h.engine.event(Event::Contacts(vec![(200., 200.); 4]));
-        h.engine.event(Event::Contacts(vec![(216., 200.); 4]));
+        h.engine.event(Event::Contacts(vec![nudge; 4]));
         h.settle_quiet();
         assert!(h.engine.pad.is_some(), "{mon}: 4-finger drag started");
         thread::sleep(Duration::from_millis(12));
-        h.engine.event(Event::Contacts(vec![(216.2, 200.); 4]));
+        h.engine.event(Event::Contacts(vec![tiny; 4]));
         if !h.engine.dirty {
             assert!(h.engine.input_qpc_us.is_none(), "{mon}: pad_move without scene must not leave stale input_qpc_us");
         }
@@ -4855,4 +4863,76 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     assert_eq!(hp.engine.strips[&key_p].columns[0].members, vec![302]);
     assert_eq!(hp.engine.strips[&key_p].columns[1].members, vec![301], "bottom dropbox puts 301 last");
     hp.stop_clean();
+}
+
+/// Four fingers at `(x, y)` (centroid-ish: a row of four points 20 apart).
+fn four(x: f64, y: f64) -> Vec<(f64, f64)> {
+    (0..4).map(|i| (x + 20. * i as f64, y)).collect()
+}
+
+/// Run a 4-finger drag from the origin by `steps` of `(dx, dy)`; returns (picked up, cursor travel) and lifts.
+fn axis_lock_drag(lock: Option<bool>, focus_id: isize, step: (f64, f64)) -> (bool, (f64, f64)) {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(false);
+    if let Some(v) = lock {
+        cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(v);
+    }
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, focus_id);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let mut start = None;
+    let mut picked = false;
+    for i in 1..=8 {
+        h.engine.event(Event::Contacts(four(500. + step.0 * i as f64, 500. + step.1 * i as f64)));
+        if let Some(p) = h.engine.pad.as_ref() {
+            if !picked {
+                picked = true;
+                start = Some(p.cursor);
+            }
+        }
+    }
+    let travel = match (start, h.engine.pad.as_ref()) {
+        (Some(s), Some(p)) => (p.cursor.0 - s.0, p.cursor.1 - s.1),
+        _ => (0., 0.),
+    };
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    (picked, travel)
+}
+
+#[test]
+fn axis_lock_is_on_by_default_and_listed_in_settings() {
+    let cfg = test_cfg();
+    assert_eq!(cfg["touchpad"]["drag_axis_lock"].as_bool(), Some(true));
+    assert!(EXAMPLE.contains("drag_axis_lock = true"));
+}
+
+#[test]
+fn axis_lock_ignores_cross_axis_start_and_keeps_carry_on_axis() {
+    // Landscape (MON0, window 101): the strip runs sideways. Portrait (MON2, window 301): up and down.
+    for (win, along, cross, name) in [(101, (30., 0.), (0., 30.), "landscape"), (301, (0., 30.), (30., 0.), "portrait")] {
+        let (picked, _) = axis_lock_drag(None, win, cross);
+        assert!(!picked, "{name}: a cross-axis start must not pick the window up");
+        let (picked, t) = axis_lock_drag(None, win, along);
+        assert!(picked, "{name}: an along-axis start picks the window up");
+        let (cx, cy) = (t.0.abs(), t.1.abs());
+        if along.0 != 0. {
+            assert!(cx > 0. && cy == 0., "{name}: carry stays on the axis, moved ({cx}, {cy})");
+        } else {
+            assert!(cy > 0. && cx == 0., "{name}: carry stays on the axis, moved ({cx}, {cy})");
+        }
+        // Along start, then a diagonal wobble: still no cross-axis movement.
+        let (picked, _) = axis_lock_drag(None, win, (along.0 + cross.0 / 3., along.1 + cross.1 / 3.));
+        assert!(picked, "{name}: a start within the 1.5x lead picks up");
+    }
+}
+
+#[test]
+fn axis_lock_off_restores_free_drag() {
+    for (win, cross, name) in [(101, (0., 30.), "landscape"), (301, (30., 0.), "portrait")] {
+        let (picked, t) = axis_lock_drag(Some(false), win, cross);
+        assert!(picked, "{name}: with the lock off a cross-axis start picks the window up");
+        assert!(t.0.abs() + t.1.abs() > 0., "{name}: and it moves freely");
+    }
 }

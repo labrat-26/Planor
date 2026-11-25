@@ -567,6 +567,11 @@ pub struct Gesture {
     travel: f64,
     /// Five or more fingers were seen: nothing is a Planor gesture until the hand is lifted.
     vetoed: bool,
+    /// Drag axis lock: `Some(horizontal)` restricts four-finger drags to that axis (the strip axis). Set by
+    /// the caller before each `sample`; `None` is the free drag.
+    pub axis_lock: Option<bool>,
+    /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
+    rejected: bool,
 }
 #[derive(Debug, PartialEq)]
 pub enum Swipe {
@@ -592,6 +597,10 @@ pub enum Swipe {
 impl Gesture {
     pub fn sample(&mut self, points: &[(f64, f64)], deadzone: f64, step: f64) -> Swipe {
         let n = points.len();
+        let lock = self.axis_lock;
+        if self.rejected && (n == 3 || n == 4) {
+            return Swipe::None;
+        }
         if n >= 5 || (self.vetoed && n >= 3) {
             // The whole hand on the pad is not a Planor gesture. It lands and lifts in stages (3, 4, 5
             // fingers in the owner's recording), so whatever the first fingers started is cancelled and
@@ -651,12 +660,28 @@ impl Gesture {
                 if dx.hypot(dy) < deadzone {
                     return Swipe::None;
                 }
+                if let Some(h) = lock {
+                    // Only a start along the strip axis picks the window up (same 1.5x lead rule as the
+                    // three-finger scroll). A cross-axis start is ignored until the fingers lift.
+                    let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
+                    if along < 1.5 * cross {
+                        if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
+                            self.rejected = true;
+                        }
+                        return Swipe::None;
+                    }
+                }
                 self.dragging = true;
                 self.last = origin; // the first move includes the dead-zone travel
                 return Swipe::DragStart;
             }
-            let (mx, my) = (pos.0 - self.last.0, pos.1 - self.last.1);
+            let (mut mx, mut my) = (pos.0 - self.last.0, pos.1 - self.last.1);
             self.last = pos;
+            match lock {
+                Some(true) => my = 0.,
+                Some(false) => mx = 0.,
+                None => (),
+            }
             return if mx == 0. && my == 0. { Swipe::None } else { Swipe::DragMove(mx, my) };
         }
         // Three fingers start scrolling almost at once: the axis is picked after 3 units of travel when one

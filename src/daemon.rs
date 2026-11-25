@@ -171,6 +171,7 @@ pub(crate) struct HotCfg {
     pub swipe_drag_gain: f64,
     pub swipe_drag_accel: f64,
     pub swipe_drag_cross_monitors: bool,
+    pub drag_axis_lock: bool,
     pub swipe_fling_enabled: bool,
     pub swipe_fling_speed: f64,
     pub win_wheel_step_px: f64,
@@ -241,6 +242,7 @@ impl HotCfg {
             swipe_drag_gain: touchpad["swipe_drag_gain"].as_float().unwrap_or(1.),
             swipe_drag_accel: touchpad["swipe_drag_accel"].as_float().unwrap_or(0.),
             swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool() == Some(true),
+            drag_axis_lock: touchpad["drag_axis_lock"].as_bool() != Some(false),
             swipe_fling_enabled: touchpad["swipe_fling_enabled"].as_bool() == Some(true),
             swipe_fling_speed: touchpad["swipe_fling_speed"].as_integer().unwrap_or(900) as f64,
             win_wheel_step_px: mouse["win_wheel_step_px"].as_integer().unwrap_or(240) as f64,
@@ -1862,6 +1864,14 @@ impl<B: WindowBackend> Engine<B> {
             // Keep the fallback timeout alive while fingers remain on the pad even when held still
             // (without touching `pad.seen`, which `pad_move` uses for acceleration `dt`).
             pad.last_contact = Instant::now();
+        }
+        // Drag axis lock: the strip axis of the focused monitor (a drag already carrying keeps its axis).
+        if self.pad.is_none() {
+            self.gesture.axis_lock = if self.hot.drag_axis_lock {
+                self.key().and_then(|k| self.strips.get(&k)).map(|s| s.area.horizontal())
+            } else {
+                None
+            };
         }
         let swipe = self.gesture.sample(
             &p,
