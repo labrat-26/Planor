@@ -12,8 +12,9 @@
                       "id":  "N-002",
                       "time_utc":  "06:22:09, 06:52:26, 06:52:51",
                       "text":  "clicking the right window does not focus it; cannot keep focus on the rightmost window",
-                      "status":  "open",
-                      "note":  "not reproduced"
+                      "status":  "fixed",
+                      "test":  "src/sim_tests.rs::sim_clicking_rightmost_window_during_scroll_settle_keeps_focus_n002",
+                      "note":  "EVENT_SYSTEM_FOREGROUND was dropped during post-scroll settle (letting pad_settle revert focus), idle tick() did not reconcile missed foregrounds into strip.focus, and focus_follows_mouse reverted focus on stationary cursor"
                   },
                   {
                       "id":  "N-003",

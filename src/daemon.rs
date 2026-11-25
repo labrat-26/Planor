@@ -368,6 +368,7 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub overlay_seq: u64,
     pub last_foreground: isize,
     pub null_fg_ticks: u8,
+    pub last_cursor: Option<(i32, i32)>,
     pub holes_checked: Instant,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
@@ -447,6 +448,7 @@ impl<B: WindowBackend> Engine<B> {
             overlay_seq: 0,
             last_foreground: 0,
             null_fg_ticks: 0,
+            last_cursor: None,
             holes_checked: Instant::now(),
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
@@ -1108,6 +1110,29 @@ impl<B: WindowBackend> Engine<B> {
                     self.last_foreground = fg;
                     self.dirty = true;
                 }
+                if !self.blocked()
+                    && self.inertia.is_none()
+                    && self.drag.is_none()
+                    && let Some(managed_id) = self.managed_foreground_id(fg)
+                {
+                    let active_id = self
+                        .key()
+                        .and_then(|k| self.strips.get(&k))
+                        .and_then(|s| s.active());
+                    if active_id != Some(managed_id) {
+                        self.select(managed_id);
+                        let visible = self
+                            .owning(managed_id)
+                            .and_then(|k| self.strips.get(&k))
+                            .is_some_and(|s| s.in_view(managed_id));
+                        if visible {
+                            self.dirty = true;
+                        } else {
+                            self.action = "scroll";
+                            self.reveal();
+                        }
+                    }
+                }
             }
         }
         // An unmanaged window appearing, moving or closing changes what the overlay must stay clear of.
@@ -1213,13 +1238,22 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        if self.hot.focus_follows_mouse {
+        if self.hot.focus_follows_mouse
+            && !self.pad_scrolling
+            && self.settle.is_none()
+            && self.inertia.is_none()
+            && self.pad.is_none()
+            && self.drag.is_none()
+        {
             let (px, py) = self.backend.cursor_pos();
-            let id = self.backend.window_at_point(px, py);
-            if self.owning(id).is_some() && self.backend.foreground() != id {
-                self.select(id);
-                self.backend.activate(id);
-                self.dirty = true
+            if self.last_cursor != Some((px, py)) {
+                self.last_cursor = Some((px, py));
+                let id = self.backend.window_at_point(px, py);
+                if self.owning(id).is_some() && self.backend.foreground() != id {
+                    self.select(id);
+                    self.backend.activate(id);
+                    self.dirty = true
+                }
             }
         }
     }
@@ -2876,11 +2910,15 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 // While a touchpad scroll or drag is in progress it owns the focus; the normal
                 // "reveal the focused window" reaction would fight it (and snap the view back).
-                EVENT_SYSTEM_FOREGROUND if self.pad_scrolling || self.settle.is_some() || self.pad.is_some() => (),
+                EVENT_SYSTEM_FOREGROUND if self.pad_scrolling || self.pad.is_some() => (),
                 EVENT_SYSTEM_FOREGROUND => {
                     if id != 0 {
                         self.null_fg_ticks = 0;
+                        self.last_foreground = id;
                     }
+                    // A foreground change after fingers lifted (during post-scroll settle or
+                    // momentum) must win instead of letting `pad_settle` revert focus back.
+                    self.clear_scroll_state();
                     let target = self.managed_foreground_id(id);
                     if self.diag.enabled {
                         diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
@@ -2891,12 +2929,12 @@ impl<B: WindowBackend> Engine<B> {
                         .and_then(|s| s.active());
                     // Focus moving to or from an unmanaged window changes the border and the overlay order.
                     self.dirty = true;
-                    if let Some(managed_id) = target
-                        && active_id != Some(managed_id)
-                    {
-                        // A window (or its owned dialog) focused by any route must be selected and
-                        // visible: otherwise focus lands on a parked window or highlights the wrong tile.
-                        self.select(managed_id);
+                    if let Some(managed_id) = target {
+                        if active_id != Some(managed_id) {
+                            // A window (or its owned dialog) focused by any route must be selected and
+                            // visible: otherwise focus lands on a parked window or highlights the wrong tile.
+                            self.select(managed_id);
+                        }
                         let visible = self
                             .owning(managed_id)
                             .and_then(|k| self.strips.get(&k))
@@ -2924,14 +2962,29 @@ impl<B: WindowBackend> Engine<B> {
                     self.covering.remove(&id);
                     if !self.orphans.contains(&id) {
                         if let Some(k) = self.owning(id) {
-                            let focused =
-                                self.strips[&k].active() == Some(id) && k.1 == self.active;
+                            let focused = (self.strips[&k].active() == Some(id) && k.1 == self.active)
+                                || self.managed_foreground_id(self.backend.foreground()) == Some(id);
                             self.strips.get_mut(&k).unwrap().remove(id);
                             self.strips.get_mut(&k).unwrap().fill();
-                            if focused
-                                && let Some(next) = self.strips[&k].active()
-                            {
-                                self.backend.activate(next)
+                            if focused {
+                                if let Some(next) = self.strips[&k].active() {
+                                    self.active = k.1.clone();
+                                    self.backend.activate(next);
+                                } else if let Some((other_mon, other_next)) = self
+                                    .displays
+                                    .iter()
+                                    .filter(|m| m.0 != k.1)
+                                    .find_map(|m| {
+                                        let ok = (k.0, m.0.clone());
+                                        self.strips
+                                            .get(&ok)
+                                            .and_then(|s| s.active())
+                                            .map(|w| (m.0.clone(), w))
+                                    })
+                                {
+                                    self.active = other_mon;
+                                    self.backend.activate(other_next);
+                                }
                             }
                             self.placed.remove(&id);
                             self.action = "open_close";
@@ -3216,6 +3269,7 @@ pub fn run() -> Result<()> {
         overlay_seq: 0,
         last_foreground: 0,
         null_fg_ticks: 0,
+        last_cursor: None,
         holes_checked: Instant::now(),
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),
