@@ -4523,3 +4523,79 @@ fn sim_rapid_hotkey_walk_survives_async_os_foreground_lag() {
     h.settle();
     h.stop_clean();
 }
+
+#[test]
+fn sim_pull_orphans_keeps_both_orphans_in_view_across_foreground_reconcile() {
+    // Regression test for #73 (scn_display::offline_15s_round_trip / short_blip_3s):
+    // When MON0 has 3 windows [101, 102 (focused), 103] and MON1/MON2 go offline leaving
+    // two orphans (201, 301), PullOrphans must append them at the end of MON0's strip (so
+    // no trailing peek clips the first orphan off-screen) AND activate the newly focused
+    // rescued orphan (so tick() foreground reconciliation does not yank the camera back to 102).
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 100, y: 100, w: 300, h: 300 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 600, y: 100, w: 300, h: 300 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 1000, y: 100, w: 300, h: 300 }));
+        sim.add_window(SimWindow::new(201, Rect { x: 2000, y: 100, w: 300, h: 300 }));
+        sim.add_window(SimWindow::new(301, Rect { x: -1300, y: 100, w: 300, h: 300 }));
+    });
+    let desk = h.engine.desktop.unwrap();
+    let mon0 = (desk, "MON0".to_string());
+
+    // Disconnect MON1 & MON2, then focus middle primary window 102 (matching scn_display).
+    h.desktop.0.lock().unwrap().monitors = primary_only_rig();
+    h.engine.event(Event::Topology);
+    h.tick_now();
+    focus(&mut h, 102);
+
+    // Pull orphans onto MON0.
+    h.cmd(Command::PullOrphans);
+    h.settle();
+    // Run tick() so foreground reconciliation executes with the post-PullOrphans state.
+    h.engine.tick().unwrap();
+    h.settle();
+
+    let strip = &h.engine.strips[&mon0];
+    assert!(strip.in_view(201), "orphan 201 must be fully in-view on MON0 after PullOrphans + tick()");
+    assert!(strip.in_view(301), "orphan 301 must be fully in-view on MON0 after PullOrphans + tick()");
+    assert_eq!(strip.active(), Some(301), "last pulled orphan 301 must remain active");
+    assert_eq!(h.desktop.foreground(), 301, "PullOrphans must activate the focused rescued orphan");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_scanned_window_not_snapped_back_by_newborn_guard_while_shown_newborn_is() {
+    // Regression test for #73 (scn_scroll::resize_then_scroll):
+    // Pre-existing windows tiled during scan() are not newborns and must not be snapped back
+    // by hold_newborn when resized via SetWindowPos shortly after startup, whereas genuinely
+    // newly shown windows (EVENT_OBJECT_SHOW) still receive newborn-position enforcement.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 400, h: 400 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 500, y: 0, w: 400, h: 400 }));
+    });
+    h.settle();
+
+    // External resize of pre-existing scanned window 102 immediately after startup.
+    let resized = Rect { x: 0, y: 0, w: 1344, h: 1040 };
+    h.desktop.0.lock().unwrap().windows.get_mut(&102).unwrap().rect = resized;
+    h.engine.dirty = false;
+    h.engine.force_place = false;
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, 102));
+    assert!(
+        !h.engine.force_place && !h.engine.dirty,
+        "pre-existing window 102 from scan() must not trigger newborn snap-back"
+    );
+
+    // Genuinely newly shown window 201 via EVENT_OBJECT_SHOW MUST still trigger hold_newborn.
+    h.desktop.0.lock().unwrap().add_window(SimWindow::new(201, Rect { x: 200, y: 200, w: 400, h: 400 }));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, 201));
+    h.settle();
+    h.desktop.0.lock().unwrap().windows.get_mut(&201).unwrap().rect = Rect { x: 100, y: 100, w: 500, h: 500 };
+    h.engine.dirty = false;
+    h.engine.force_place = false;
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, 201));
+    assert!(
+        h.engine.force_place && h.engine.dirty,
+        "newly shown window 201 must still trigger newborn snap-back"
+    );
+    h.stop_clean();
+}

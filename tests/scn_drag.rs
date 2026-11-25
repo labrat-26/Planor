@@ -270,10 +270,25 @@ fn check_layout(ws: &[(usize, &Sentinel)], wr: RECT, vertical: bool, ctx: &str) 
             );
         }
     }
-    for a in 0..ws.len() {
-        for b in a + 1..ws.len() {
-            let (ia, va) = (ws[a].0, vis(ws[a].1));
-            let (ib, vb) = (ws[b].0, vis(ws[b].1));
+    // Parked off-screen tiles are intentionally anchored at (park_x, bound.y) (#46) so they share
+    // `y` with the top on-screen portrait tile. Verify axis separation across all on-screen tiles
+    // on `wr` and ensure at least min(ws.len(), 2) tiles are actually on-screen.
+    let on_screen: Vec<(usize, [i32; 4])> = ws
+        .iter()
+        .map(|&(i, w)| (i, vis(w)))
+        .filter(|&(_, v)| overlap(&RECT { left: v[0], top: v[1], right: v[2], bottom: v[3] }, &wr) > 0)
+        .collect();
+    let min_on_screen = ws.len().min(2);
+    assert!(
+        on_screen.len() >= min_on_screen,
+        "{ctx}: expected at least {min_on_screen} windows on monitor rect {:?}, observed {} on-screen ({on_screen:?})",
+        [wr.left, wr.top, wr.right, wr.bottom],
+        on_screen.len()
+    );
+    for a in 0..on_screen.len() {
+        for b in a + 1..on_screen.len() {
+            let (ia, va) = on_screen[a];
+            let (ib, vb) = on_screen[b];
             let (pa, pb, axis) = if vertical {
                 (va[1], vb[1], "y")
             } else {
