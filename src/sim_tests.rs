@@ -4346,7 +4346,7 @@ fn sim_wheel_and_inertia_survive_foreground_echo_for_already_active_window() {
     );
 
     // Self-activated target echo also preserves scroll state.
-    h.engine.self_activated = Some(103);
+    h.engine.self_activated = Some((103, Instant::now()));
     h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 103));
     assert!(h.engine.self_activated.is_none());
     assert!(h.engine.settle.is_some(), "self-activated echo must not cancel settle");
@@ -4471,5 +4471,55 @@ fn sim_minimize_grouped_window_autofocuses_sibling_then_right_column() {
     h.settle();
     assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(103));
     assert_eq!(h.desktop.foreground(), 103, "minimizing last group member 102 must autofocus right column 103");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_rapid_hotkey_walk_survives_async_os_foreground_lag() {
+    // Regression test for live scn_focus failures: during a rapid hotkey walk (e.g. Alt+Left),
+    // if OS GetForegroundWindow() temporarily lags behind activate_window() across a tick() or
+    // subsequent hotkey press, neither tick() nor keypress() may revert strip.active() back to
+    // the stale window; once the pending activation TTL expires, genuine external foreground
+    // divergence still reconciles cleanly.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 103);
+    let desk = h.engine.desktop.unwrap();
+
+    // Step 1: Alt+Left moves strip focus 103 -> 102, then OS foreground lags on 103 when tick() runs.
+    h.cmd(Command::Key { name: "focus_left".into() });
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(102));
+    assert!(h.engine.self_activated.is_some_and(|(id, _)| id == 102));
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.tick().unwrap();
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(102),
+        "tick() must not revert strip focus back to stale lagging OS foreground 103"
+    );
+
+    // Step 2: Rapid second Alt+Left while OS foreground still lags on 103 must continue 102 -> 101.
+    h.cmd(Command::Key { name: "focus_left".into() });
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(101),
+        "rapid second focus_left must walk 102 -> 101 instead of reverting to lagging 103"
+    );
+    h.settle();
+
+    // Step 3: Once the pending self-activation TTL expires, tick() reconciles genuine OS divergence.
+    h.engine.self_activated = Some((101, Instant::now() - Duration::from_millis(300)));
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.tick().unwrap();
+    assert!(h.engine.self_activated.is_none(), "stale self_activated must expire after TTL");
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(103),
+        "after self_activated TTL expires, tick() must reconcile OS foreground 103"
+    );
+    h.settle();
     h.stop_clean();
 }

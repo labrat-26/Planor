@@ -369,7 +369,7 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub last_foreground: isize,
     pub null_fg_ticks: u8,
     pub last_cursor: Option<(i32, i32)>,
-    pub self_activated: Option<isize>,
+    pub self_activated: Option<(isize, Instant)>,
     pub holes_checked: Instant,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
@@ -514,10 +514,14 @@ impl<B: WindowBackend> Engine<B> {
         }
     }
     fn activate_window(&mut self, id: isize) {
-        self.self_activated = Some(id);
+        self.self_activated = Some((id, Instant::now()));
         self.last_foreground = id;
         self.null_fg_ticks = 0;
         self.backend.activate(id);
+    }
+    fn has_pending_self_activation(&self) -> bool {
+        self.self_activated
+            .is_some_and(|(_, at)| at.elapsed() <= Duration::from_millis(250))
     }
     /// True when `id` is currently parked off-screen, orphaned, hidden in a group, or on another
     /// virtual desktop by Planor itself, so a transient `EVENT_OBJECT_HIDE` must not remove it
@@ -1155,6 +1159,12 @@ impl<B: WindowBackend> Engine<B> {
         // the focus border does not blink off and back on.
         if !self.pad_scrolling && self.settle.is_none() && self.pad.is_none() {
             let fg = self.backend.foreground();
+            if self.self_activated.is_some_and(|(target, at)| {
+                at.elapsed() > Duration::from_millis(250)
+                    || (fg != 0 && (fg == target || self.managed_foreground_id(fg) == Some(target)))
+            }) {
+                self.self_activated = None;
+            }
             if fg == 0 {
                 if self.last_foreground != 0 {
                     self.null_fg_ticks = self.null_fg_ticks.saturating_add(1);
@@ -1172,6 +1182,7 @@ impl<B: WindowBackend> Engine<B> {
                 if !self.blocked()
                     && self.inertia.is_none()
                     && self.drag.is_none()
+                    && !self.has_pending_self_activation()
                     && let Some(managed_id) = self.managed_foreground_id(fg)
                 {
                     let active_id = self
@@ -1888,9 +1899,11 @@ impl<B: WindowBackend> Engine<B> {
         }
         self.clear_scroll_state();
         // Act on the monitor that really holds focus, not the one Planor last recorded.
-        let focused = self.backend.foreground();
-        if self.owning(focused).is_some() {
-            self.select(focused)
+        if !self.has_pending_self_activation() {
+            let focused = self.backend.foreground();
+            if self.owning(focused).is_some() {
+                self.select(focused)
+            }
         }
         if key == "toggle_pin" {
             self.pin();
@@ -2979,7 +2992,10 @@ impl<B: WindowBackend> Engine<B> {
                     let was_self = self
                         .self_activated
                         .take()
-                        .is_some_and(|a| a == id || target == Some(a));
+                        .is_some_and(|(a, at)| {
+                            at.elapsed() <= Duration::from_millis(250)
+                                && (a == id || target == Some(a))
+                        });
                     if self.diag.enabled {
                         diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
                     }
