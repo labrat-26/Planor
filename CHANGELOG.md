@@ -2,6 +2,13 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.6.2] - 2026-11-24
+
+### Fixed
+- **Orphan rescue after monitor disconnect (#73)**: `Command::PullOrphans` sorts and appends rescued orphans at the end of the active strip, reveals them, and activates the newly focused orphan so foreground reconciliation does not snap back and re-park them.
+- **Resize retention after focus-only scenes (#73)**: Gate `self.born` tracking on `cover_newborn == true` (excluding pre-existing windows from `scan()`), and latch `scene_moved` per scene epoch in `RenderState` so zero-movement focus-only scenes skip the 250 ms `VerifyState` placement rewrite while animated scenes still verify.
+- **Portrait drag layout check (#73)**: Align `tests/scn_drag.rs::check_layout` pairwise axis-separation check to on-screen tiles (respecting `parked_target_rect` anchoring parked tiles at `(park, bound.y)`).
+
 ## [0.6.1] - 2026-11-24
 
 ### Fixed
