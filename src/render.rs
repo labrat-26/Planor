@@ -1222,11 +1222,31 @@ fn is_strictly_nearest_monitor(park_rect: Rect, monitor: Rect, all_monitors: &[R
     })
 }
 
+/// Park coordinates stay well inside i32 (top-level windows take 32-bit positions, and real layouts need
+/// about -37k), so extreme layouts never saturate or overflow `SetWindowPos`/`MonitorFromRect` math.
+pub(crate) const WIN32_COORD_LIMIT: i32 = 1_000_000;
+
+/// `park_y_unclamped` kept inside Win32 coordinate limits for extreme monitor layouts (#80): a
+/// candidate that would leave the window beyond the limit is replaced by `bound.y`.
+pub(crate) fn park_y_for_monitor(
+    park_x: i32,
+    monitor: Rect,
+    bound: Rect,
+    all_monitors: &[Rect],
+) -> i32 {
+    let y = park_y_unclamped(park_x, monitor, bound, all_monitors);
+    let lim = WIN32_COORD_LIMIT;
+    if y.saturating_add(monitor.h.max(1)) > lim || y < -lim {
+        return bound.y.clamp(-lim, lim);
+    }
+    y
+}
+
 /// Choose a constant off-screen `y` at `x = park_x` for `monitor` so `MonitorFromRect` /
 /// `MONITOR_DEFAULTTONEAREST` resolves to `monitor` instead of a neighboring different-DPI monitor
 /// (e.g. a wider monitor stacked above a narrower laptop screen), preventing `WM_DPICHANGED` storms
 /// on park/unpark (#75, #77, #78).
-pub(crate) fn park_y_for_monitor(
+fn park_y_unclamped(
     park_x: i32,
     monitor: Rect,
     bound: Rect,
@@ -3901,6 +3921,25 @@ mod tests {
             super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &[mon0]),
             0
         );
+    }
+
+    #[test]
+    fn park_y_for_monitor_stays_within_win32_coordinate_limits() {
+        // Monitors stacked so far apart that the nearest-monitor search overshoots 16-bit coordinates.
+        let mon0 = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+        let mon1 = Rect { x: 0, y: 990_000, w: 1920, h: 1080 };
+        let mon2 = Rect { x: 0, y: -990_000, w: 1920, h: 1080 };
+        let all = [mon0, mon1, mon2];
+        let lim = super::WIN32_COORD_LIMIT;
+        for m in all {
+            let bound = Rect { x: m.x, y: m.y, w: m.w, h: m.h - 40 };
+            let y = super::park_y_for_monitor(m.x + 5000, m, bound, &all);
+            assert!(y >= -lim && y.saturating_add(m.h) <= lim, "y {y} for {m:?} beyond limits");
+        }
+        // Bounds themselves far beyond the limit are clamped, never wrapped.
+        let far = Rect { x: 0, y: 2_000_000_000, w: 100, h: 100 };
+        let y = super::park_y_for_monitor(0, far, far, &[far, mon0]);
+        assert!((-lim..=lim).contains(&y));
     }
 
     #[test]

@@ -5419,3 +5419,62 @@ fn fullscreen_tile_carries_backend_frame_into_scene_for_preserved_rect() {
     // Non-fullscreen tiles never sample a frame.
     assert!(scene.os_frames.iter().all(|(i, _)| *i == id));
 }
+
+#[test]
+fn scroll_hold_fg_survives_a_resumed_gesture_while_foreground_stays_parked() {
+    // #80: after a 3-finger scroll the OS foreground stays on the now-scrolled-away window (101).
+    // Resuming with another gesture must keep scrolling from the held view: no snap back to 101,
+    // no foreground steal, and the hold only clears once the OS foreground genuinely moves.
+    let mut cfg = test_cfg();
+    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(4.0);
+    cfg["touchpad"]["swipe_inertia"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        for (i, x) in [(101, 0), (102, 400), (103, 800), (104, 1200)] {
+            sim.add_window(SimWindow::new(i, Rect { x, y: 0, w: 900, h: 1000 }));
+        }
+    });
+    focus(&mut h, 101);
+    let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+    let gesture = |h: &mut SimHarness, steps: usize, dx: f64| {
+        let mut x = 500.0;
+        h.engine.event(Event::Contacts(vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)]));
+        for _ in 0..steps {
+            x += dx;
+            h.engine.event(Event::Contacts(vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)]));
+            h.settle();
+        }
+        h.engine.event(Event::Contacts(vec![]));
+        h.engine.inertia = None;
+        if h.engine.settle.is_some() {
+            h.engine.settle = Some(Instant::now() - Duration::from_millis(1));
+        }
+        for _ in 0..4 {
+            h.engine.tick().unwrap();
+        }
+    };
+    gesture(&mut h, 10, -25.0);
+    let first = h.engine.strips[&key].active();
+    assert_ne!(first, Some(101));
+    assert_eq!(h.engine.scroll_hold_fg, Some(101), "hold remembers the parked foreground window");
+
+    // Resume with a second gesture in the same direction: view keeps going, foreground untouched.
+    gesture(&mut h, 10, -25.0);
+    assert_eq!(h.desktop.foreground(), 101, "resumed gesture must not steal OS foreground");
+    assert_eq!(h.engine.scroll_hold_fg, Some(101), "hold persists across the resumed gesture");
+    let second = h.engine.strips[&key].active();
+    assert_ne!(second, Some(101));
+    for _ in 0..5 {
+        h.engine.tick().unwrap();
+    }
+    assert_eq!(h.engine.strips[&key].active(), second, "ticks must not snap back to the held fg");
+
+    // A genuine foreground change releases the hold.
+    h.desktop.0.lock().unwrap().foreground = 102;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 102));
+    h.settle();
+    assert_eq!(h.engine.strips[&key].active(), Some(102));
+    assert_eq!(h.engine.scroll_hold_fg, None);
+    h.stop_clean();
+}
