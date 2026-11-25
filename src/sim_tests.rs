@@ -5196,7 +5196,7 @@ fn cursor_of(h: &SimHarness) -> (f64, f64) {
 }
 
 #[test]
-fn axis_lock_holds_outside_the_group_column_and_snaps_back() {
+fn axis_lock_holds_outside_the_group_column_and_returns_to_the_line() {
     for (mon, id, along, across) in [("MON0", 101, (6., 0.), (0., 6.)), ("MON2", 301, (0., 6.), (6., 0.))] {
         let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
         make_group(&mut h, mon, &[id, id + 1]);
@@ -5457,6 +5457,28 @@ fn ungroup_band_suppressed_on_edge_bordering_a_monitor() {
     assert!(crate::daemon::edge_borders_monitor(&rig, "MON1", true, false));
     assert!(!crate::daemon::edge_borders_monitor(&rig, "MON0", false, true));
     assert!(!crate::daemon::edge_borders_monitor(&rig, "MON2", false, false));
+}
+
+#[test]
+fn ungroup_bands_only_hidden_at_strip_edge_bordering_a_monitor() {
+    // #80/#90: MON0 has monitors on both sides. A group in a middle column keeps both bands; a column
+    // flush with a strip edge that borders a monitor loses that side's band.
+    let rig = three_monitor_rig();
+    let area = rig[0].2;
+    let middle = Rect { x: 500, y: area.y, w: 800, h: area.h };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, middle);
+    assert!(l.is_some() && t.is_some(), "middle column keeps both bands");
+    let left = Rect { x: area.x, y: area.y, w: 800, h: area.h };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, left);
+    assert!(l.is_none() && t.is_some(), "leading edge next to MON2 suppressed");
+    let right = Rect { x: area.x + area.w - 800, y: area.y, w: 800, h: area.h };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, right);
+    assert!(l.is_some() && t.is_none(), "trailing edge next to MON1 suppressed");
+    // MON1 has nothing on its right: a flush trailing column keeps its band.
+    let a1 = rig[1].2;
+    let flush = Rect { x: a1.x + a1.w - 800, y: a1.y, w: 800, h: a1.h };
+    let (_, t) = crate::daemon::ungroup_bands(&rig, "MON1", a1, flush);
+    assert!(t.is_some());
 }
 
 #[test]

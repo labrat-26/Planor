@@ -889,7 +889,7 @@ impl<B: WindowBackend> Engine<B> {
     /// isolated instance carves out only windows of the class named in PLANOR_HOLES (none if unset).
     pub(crate) fn state_snapshot(&self, json: bool) -> Result<String> {
         let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
+        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(DEFAULT_STACK_PEEK as i64) as i32;
         let monitors: Vec<serde_json::Value> = self
             .displays
             .iter()
@@ -1526,7 +1526,7 @@ impl<B: WindowBackend> Engine<B> {
             && self.settle.is_none()
             && self.inertia.is_none();
         if settled_state {
-            let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+            let stack_peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
             for ((desk, _), strip) in &self.strips {
                 if Some(*desk) != self.desktop {
                     continue;
@@ -1581,7 +1581,7 @@ impl<B: WindowBackend> Engine<B> {
             && let (Some(k), Some(c)) = (&d.destination, hot.drop_target_color)
             && let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop)
         {
-            let peek = hot.stack_peek_px.unwrap_or(96);
+            let peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
             let side = hot.stack_zone_percent;
             for (id, _, z) in drop_zones(s, peek, side, d.id) {
                 let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
@@ -1590,27 +1590,20 @@ impl<B: WindowBackend> Engine<B> {
             if k == &d.key
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             {
-                let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
-                let horizontal = s.area.horizontal();
-                if !edge_borders_monitor(&self.displays, &k.1, horizontal, false) {
-                    zones.push(render::Zone {
-                        rect: leading,
-                        monitor: k.1.clone(),
-                        color: c,
-                        alpha: if d.ungroup_edge == Some(false) { 0.85 } else { 0.35 },
-                    });
-                }
-                if !edge_borders_monitor(&self.displays, &k.1, horizontal, true) {
-                    zones.push(render::Zone {
-                        rect: trailing,
-                        monitor: k.1.clone(),
-                        color: c,
-                        alpha: if d.ungroup_edge == Some(true) { 0.85 } else { 0.35 },
-                    });
+                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                for (band, edge) in [(leading, false), (trailing, true)] {
+                    if let Some(rect) = band {
+                        zones.push(render::Zone {
+                            rect,
+                            monitor: k.1.clone(),
+                            color: c,
+                            alpha: if d.ungroup_edge == Some(edge) { 0.85 } else { 0.35 },
+                        });
+                    }
                 }
             }
         }
-        let stack_peek = hot.stack_peek_px.unwrap_or(96);
+        let stack_peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         for ((desk, name), strip) in &self.strips {
             if Some(*desk) != self.desktop {
                 continue;
@@ -2517,7 +2510,7 @@ impl<B: WindowBackend> Engine<B> {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
         let (relax, cross_ok) = (7. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
-        let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+        let stack_peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
         // The visible rect of the window's own group column (None for a lone window or a gone strip).
         let column = self.pad.as_ref().and_then(|p| {
@@ -2859,7 +2852,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_frac = 0.0;
         }
         let _ = velocity;
-        let peek = self.hot.stack_peek_px.unwrap_or(96);
+        let peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let side = self.hot.stack_zone_percent;
         // Hit-test the visible part of each window (a group member beyond its peek is clipped away).
         let target = self.strips.get(&k).and_then(|s| {
@@ -2894,11 +2887,10 @@ impl<B: WindowBackend> Engine<B> {
         let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
         let ungroup_edge = if !held && grouped && k == d.key {
             self.strips.get(&k).and_then(|s| {
-                let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
-                let horizontal = s.area.horizontal();
-                if !edge_borders_monitor(&self.displays, &k.1, horizontal, false) && contains(leading, p) {
+                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                if leading.is_some_and(|r| contains(r, p)) {
                     Some(false)
-                } else if !edge_borders_monitor(&self.displays, &k.1, horizontal, true) && contains(trailing, p) {
+                } else if trailing.is_some_and(|r| contains(r, p)) {
                     Some(true)
                 } else {
                     None
@@ -3050,7 +3042,7 @@ impl<B: WindowBackend> Engine<B> {
             // #91: a grouped window dropped beyond its group's shared border (the cursor outside the group's
             // column along the strip axis, over no window) leaves the group onto that side, the way a
             // fullscreen window sits beside, not inside, the other columns.
-            let col = group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(96));
+            let col = group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK));
             let (pos, lo, hi) = if s.area.horizontal() {
                 (d.point.0, col.x, col.x + col.w)
             } else {
@@ -3551,6 +3543,27 @@ pub(crate) fn edge_borders_monitor(
     };
     let dir = if trailing { 1 } else { -1 };
     planor::adjacent(bounds[at], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir }).is_some()
+}
+/// Fallback stack peek (matches `planor.example.toml`) shared by every consumer.
+pub(crate) const DEFAULT_STACK_PEEK: i32 = 96;
+/// The ungroup bands actually offered for a group column (#80, #90): a band is dropped only when its outer
+/// edge sits on the strip area edge AND another monitor lies beyond that side. Shared by the render zones and
+/// the drag hit-test so both agree.
+pub(crate) fn ungroup_bands(
+    displays: &[(String, Rect, Rect)],
+    monitor: &str,
+    area: Rect,
+    column: Rect,
+) -> (Option<Rect>, Option<Rect>) {
+    let horizontal = area.horizontal();
+    let (leading, trailing) = ungroup_edge_zones(column, horizontal);
+    let (at_lead, at_trail) = if horizontal {
+        (column.x <= area.x, column.x + column.w >= area.x + area.w)
+    } else {
+        (column.y <= area.y, column.y + column.h >= area.y + area.h)
+    };
+    let keep = |at_edge: bool, trailing: bool| !(at_edge && edge_borders_monitor(displays, monitor, horizontal, trailing));
+    (keep(at_lead, false).then_some(leading), keep(at_trail, true).then_some(trailing))
 }
 /// The visible part of the column holding `id`, full strip depth: the box the ungroup edge zones sit in
 /// (#90). Falls back to the whole strip area when the window is not in the strip.

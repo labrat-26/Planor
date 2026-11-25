@@ -86,6 +86,8 @@ max_log_mb = 25
 max_log_files = 3
 
 [hotkeys]
+# Win+W (diagnostic note) only reacts to physical keypresses: Win+W sent by key-injecting tools
+# (AutoHotkey, PowerToys remaps, the on-screen keyboard) is ignored by the hotkey path (#71).
 focus_left = "Alt+Left"
 focus_right = "Alt+Right"
 focus_up = "Alt+Up"

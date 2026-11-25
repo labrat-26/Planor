@@ -1237,7 +1237,7 @@ pub(crate) fn park_y_for_monitor(
     let y = park_y_unclamped(park_x, monitor, bound, all_monitors);
     let lim = WIN32_COORD_LIMIT;
     if y.saturating_add(monitor.h.max(1)) > lim || y < -lim {
-        return bound.y.clamp(-lim, lim);
+        return bound.y.clamp(-lim, (lim - monitor.h.max(1)).max(-lim));
     }
     y
 }
@@ -3939,7 +3939,7 @@ mod tests {
         // Bounds themselves far beyond the limit are clamped, never wrapped.
         let far = Rect { x: 0, y: 2_000_000_000, w: 100, h: 100 };
         let y = super::park_y_for_monitor(0, far, far, &[far, mon0]);
-        assert!((-lim..=lim).contains(&y));
+        assert!(y >= -lim && y.saturating_add(far.h) <= lim, "far y {y} beyond limits");
     }
 
     #[test]
