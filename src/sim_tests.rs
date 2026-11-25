@@ -1161,6 +1161,124 @@ fn start_offset(frames: &[Vec<(f64, f64)>], horizontal_strip: bool, deadzone: f6
 /// Four-finger recordings whose pick-up could not be checked (start unknown); reported and capped.
 static SKIPPED_PICKUP_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Lock releases seen while replaying recordings (the lock lets go once the fingers push towards a monitor).
+static LOCK_RELEASES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// What a replay observed frame by frame.
+#[derive(Default)]
+struct Observed {
+    moved: bool,
+    rolled: bool,
+    dragged: bool,
+    lock_released: bool,
+}
+
+/// Put the strip into a state where a three-finger gesture can do something visible.
+fn prepare_three_finger_replay(h: &mut SimHarness, key: &(u128, String), mon: &str, along: bool) {
+    if !along {
+        // Across the strip: give it a group of three to roll (a pair stops at its ends, N-010, so a swipe
+        // towards the end it already shows would rightly do nothing).
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let rest = h.engine.strips[key].columns.get(1).map(|c| c.members[0]);
+        if let Some(third) = rest {
+            focus(h, third);
+            h.cmd(Command::Key { name: "stack_toggle".into() });
+            h.settle();
+        }
+        assert!(h.engine.strips[key].columns.iter().any(|c| c.members.len() >= 3), "setup: a group of three on {mon}");
+    } else {
+        // Along the strip: start in the middle so either direction can scroll.
+        let s = h.engine.strips.get_mut(key).unwrap();
+        s.offset = i32::MAX / 4;
+        s.scroll(0);
+        s.offset /= 2;
+        h.engine.dirty = true;
+        h.settle();
+    }
+}
+
+/// Whether the carried window's cursor is over the visible rect of its own group column.
+fn cursor_in_own_group(h: &SimHarness, key: &(u128, String), p: &crate::daemon::PadDrag) -> bool {
+    let Some(st) = h.engine.strips.get(key) else { return false };
+    let Some((ci, _)) = st.locate(p.id).filter(|(ci, _)| st.columns[*ci].members.len() > 1) else { return false };
+    let own = &st.columns[ci].members;
+    let col = st.rects(28).into_iter().filter(|(id, _)| own.contains(id)).filter_map(|(_, r)| r.intersect(st.area)).reduce(|a, b| a.union(b));
+    col.is_some_and(|r| p.cursor.0 >= r.x as f64 && p.cursor.0 < (r.x + r.w) as f64 && p.cursor.1 >= r.y as f64 && p.cursor.1 < (r.y + r.h) as f64)
+}
+
+/// While the lock holds before and after a frame, that frame must not move the cursor further from the
+/// pick-up line across the strip axis. Updates `carry_cross` (the cross coordinate after the frame).
+fn check_carry_on_axis(h: &SimHarness, key: &(u128, String), mon: &str, horizontal_strip: bool, before: Option<bool>, carry_cross: &mut Option<f64>) {
+    let Some(p) = h.engine.pad.as_ref() else {
+        *carry_cross = None;
+        return;
+    };
+    // The lock follows the axis of the strip under the cursor (#84): that of the home strip until the carry
+    // reaches a monitor of the other orientation, where the lock switches (and its line is re-based).
+    let axis_h = p.lock.unwrap_or_else(|| p.home.as_ref().and_then(|k| h.engine.strips.get(k)).map_or(horizontal_strip, |st| st.area.horizontal()));
+    let cur = if axis_h { p.cursor.1 } else { p.cursor.0 };
+    // Over the window's own group column the lock is off by design (members are reordered across the axis).
+    let in_group = cursor_in_own_group(h, key, p);
+    // (A grab point outside the monitors is clamped into them by the first move; that is not the lock.)
+    let (lo, hi) = if axis_h { (p.limits.1, p.limits.3) } else { (p.limits.0, p.limits.2) };
+    let base = carry_cross.unwrap_or(cur);
+    if before.is_some() && before == p.lock && !in_group && base >= lo && base <= hi {
+        // Easing back onto the line (#84) is allowed; moving away from it across the strip axis is not.
+        assert!((cur - p.line).abs() <= (base - p.line).abs() + 1e-6, "{mon}: carry left the strip axis ({base} -> {cur}, line {})", p.line);
+    }
+    *carry_cross = Some(cur);
+}
+
+/// Feed every frame and record what the layout and the pad drag did.
+fn feed_replay_frames(h: &mut SimHarness, key: &(u128, String), mon: &str, horizontal_strip: bool, frames: &[Vec<(f64, f64)>]) -> Observed {
+    let start = h.engine.strips[key].clone();
+    let mut o = Observed::default();
+    let mut carry_cross: Option<f64> = None;
+    for f in frames {
+        let before = h.engine.pad.as_ref().and_then(|p| p.lock);
+        h.engine.event(Event::Contacts(f.clone()));
+        h.settle_quiet();
+        if before.is_some() && h.engine.pad.as_ref().is_some_and(|p| p.lock.is_none()) {
+            o.lock_released = true;
+        }
+        check_carry_on_axis(h, key, mon, horizontal_strip, before, &mut carry_cross);
+        let s = &h.engine.strips[key];
+        o.moved |= s.offset != start.offset;
+        o.rolled |= s.columns.iter().any(|c| c.frac != 0.) || s.columns.iter().zip(&start.columns).any(|(a, b)| a.active != b.active);
+        o.dragged |= h.engine.pad.is_some();
+    }
+    o
+}
+
+/// Verdict for a four-finger gesture: pick-up must follow the axis lock, and nothing may be left over.
+fn judge_four_fingers(what: &str, mon: &str, dx: f64, frames: &[Vec<(f64, f64)>], offset: Option<(f64, f64)>, o: &Observed) -> String {
+    // Drag axis lock (#83, on by default): a start with 1.5x more travel along the strip axis than
+    // across it picks the window up; one with 1.5x more across is ignored.
+    match offset {
+        Some((along_t, cross_t)) if along_t >= 1.5 * cross_t => {
+            assert!(o.dragged, "{what}: a start along the strip ({along_t:.0} vs {cross_t:.0}) must pick the window up");
+        }
+        // (MON0 lies right of the portrait MON2, so a rightward cross start there is a carry to it, #87.)
+        Some((along_t, cross_t)) if cross_t >= 1.5 * along_t && !(mon == "MON2" && dx > 0.) => {
+            assert!(!o.dragged, "{what}: a start across the strip ({along_t:.0} vs {cross_t:.0}) must be ignored; counts {:?}", frames.iter().take(12).map(|f| (f.len(), f.iter().map(|p| p.0).sum::<f64>() as i64 / f.len().max(1) as i64, f.iter().map(|p| p.1).sum::<f64>() as i64 / f.len().max(1) as i64)).collect::<Vec<_>>());
+        }
+        Some(_) => {}
+        None => {
+            SKIPPED_PICKUP_CHECKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    if o.lock_released {
+        LOCK_RELEASES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    if mon == "MON0" {
+        // Nothing lies above or below MON0, so the lock must never release there (#84).
+        assert!(!o.lock_released, "{what}: the lock released with no monitor across the axis");
+    }
+    if o.lock_released { format!("{what}: carried (lock released towards a monitor) and dropped the window") }
+    else if o.dragged { format!("{what}: carried and dropped the window") } else { format!("{what}: cross-axis start ignored (axis lock)") }
+}
+
 fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     let (fingers, dx, dy) = describe_gesture(frames);
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
@@ -1171,71 +1289,12 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     let along = (dx.abs() >= dy.abs()) == horizontal_strip;
     let first = h.engine.strips[&key].columns[0].members[0];
     focus(&mut h, first);
-    if fingers == 3 && !along {
-        // Across the strip: give it a group of three to roll (a pair stops at its ends, N-010, so a swipe
-        // towards the end it already shows would rightly do nothing).
-        h.cmd(Command::Key { name: "stack_toggle".into() });
-        h.settle();
-        let rest = h.engine.strips[&key].columns.get(1).map(|c| c.members[0]);
-        if let Some(third) = rest {
-            focus(&mut h, third);
-            h.cmd(Command::Key { name: "stack_toggle".into() });
-            h.settle();
-        }
-        assert!(h.engine.strips[&key].columns.iter().any(|c| c.members.len() >= 3), "setup: a group of three on {mon}");
-    }
-    if fingers == 3 && along {
-        // Along the strip: start in the middle so either direction can scroll.
-        let s = h.engine.strips.get_mut(&key).unwrap();
-        s.offset = i32::MAX / 4;
-        s.scroll(0);
-        s.offset /= 2;
-        h.engine.dirty = true;
-        h.settle();
+    if fingers == 3 {
+        prepare_three_finger_replay(&mut h, &key, mon, along);
     }
     let start = h.engine.strips[&key].clone();
-    let (mut moved, mut rolled, mut dragged) = (false, false, false);
     let offset = if fingers == 4 { start_offset(frames, horizontal_strip, deadzone) } else { None };
-    let mut carry_cross: Option<f64> = None;
-    let mut lock_released = false;
-    for f in frames {
-        // The lock (`pad.lock`) releases once the fingers push across the axis by 3x the dead zone; while it
-        // holds before and after a frame, that frame must not move the cursor across the strip axis.
-        let before = h.engine.pad.as_ref().and_then(|p| p.lock);
-        h.engine.event(Event::Contacts(f.clone()));
-        h.settle_quiet();
-        if before.is_some() && h.engine.pad.as_ref().is_some_and(|p| p.lock.is_none()) {
-            lock_released = true;
-        }
-        if let Some(p) = h.engine.pad.as_ref() {
-            // The lock follows the axis of the strip under the cursor (#84): that of the home strip until the carry
-            // reaches a monitor of the other orientation, where the lock switches (and its line is re-based).
-            let home_horizontal = p.lock.unwrap_or_else(|| p.home.as_ref().and_then(|k| h.engine.strips.get(k)).map_or(horizontal_strip, |st| st.area.horizontal()));
-            let cur = if home_horizontal { p.cursor.1 } else { p.cursor.0 };
-            // Over the window's own group column the lock is off by design (members are reordered across the axis).
-            let in_group = h.engine.strips.get(&key).is_some_and(|st| {
-                let Some((ci, _)) = st.locate(p.id).filter(|(ci, _)| st.columns[*ci].members.len() > 1) else { return false };
-                let own = &st.columns[ci].members;
-                let col = st.rects(28).into_iter().filter(|(id, _)| own.contains(id)).filter_map(|(_, r)| r.intersect(st.area)).reduce(|a, b| a.union(b));
-                col.is_some_and(|r| p.cursor.0 >= r.x as f64 && p.cursor.0 < (r.x + r.w) as f64 && p.cursor.1 >= r.y as f64 && p.cursor.1 < (r.y + r.h) as f64)
-            });
-            // (A grab point outside the monitors is clamped into them by the first move; that is not the lock.)
-            let (lo, hi) = if home_horizontal { (p.limits.1, p.limits.3) } else { (p.limits.0, p.limits.2) };
-            let base = carry_cross.unwrap_or(cur);
-            if before.is_some() && before == p.lock && !in_group && base >= lo && base <= hi {
-                // Easing back onto the line (#84) is allowed; moving away from it across the strip axis is not.
-                assert!((cur - p.line).abs() <= (base - p.line).abs() + 1e-6, "{mon}: carry left the strip axis ({base} -> {cur}, line {})", p.line);
-            }
-            carry_cross = Some(cur);
-        } else {
-            carry_cross = None;
-        }
-        let s = &h.engine.strips[&key];
-        moved |= s.offset != start.offset;
-        rolled |= s.columns.iter().any(|c| c.frac != 0.)
-            || s.columns.iter().zip(&start.columns).any(|(a, b)| a.active != b.active);
-        dragged |= h.engine.pad.is_some();
-    }
+    let o = feed_replay_frames(&mut h, &key, mon, horizontal_strip, frames);
     h.engine.event(Event::Contacts(vec![]));
     h.settle_quiet();
     settle_now(&mut h);
@@ -1244,7 +1303,7 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     assert!(h.engine.pad.is_none() && h.engine.drag.is_none() && !h.engine.pad_scrolling, "{what}: gesture left state behind");
     if fingers < 3 {
         // Cursor moves, taps, clicks, two-finger scroll and pinch: Planor must stay out of it.
-        assert!(!moved && !dragged && !rolled, "{what}: Planor reacted to a {fingers}-finger gesture");
+        assert!(!o.moved && !o.dragged && !o.rolled, "{what}: Planor reacted to a {fingers}-finger gesture");
         return format!("{what}: ignored, as it should be");
     }
     if fingers >= 5 {
@@ -1260,32 +1319,17 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     }
     match fingers {
         3 if along => {
-            assert!(moved, "{what}: fingers along the strip must scroll it");
+            assert!(o.moved, "{what}: fingers along the strip must scroll it");
             format!("{what}: scrolled the strip")
         }
         3 => {
-            assert!(rolled, "{what}: fingers across the strip must roll the group");
+            assert!(o.rolled, "{what}: fingers across the strip must roll the group");
             assert_eq!(h.engine.strips[&key].offset, start.offset, "{what}: rolling must not scroll the strip");
             format!("{what}: rolled the group")
         }
         4 => {
-            // Drag axis lock (#83, on by default): a start with 1.5x more travel along the strip axis than
-            // across it picks the window up; one with 1.5x more across is ignored.
-            if let Some((along_t, cross_t)) = offset {
-                if along_t >= 1.5 * cross_t {
-                    assert!(dragged, "{what}: a start along the strip ({along_t:.0} vs {cross_t:.0}) must pick the window up");
-                } else if cross_t >= 1.5 * along_t && !(mon == "MON2" && dx > 0.) {
-                    // (MON0 lies right of the portrait MON2, so a rightward cross start there is a carry to it, #87.)
-                    assert!(!dragged, "{what}: a start across the strip ({along_t:.0} vs {cross_t:.0}) must be ignored; counts {:?}", frames.iter().take(12).map(|f| (f.len(), f.iter().map(|p| p.0).sum::<f64>() as i64 / f.len().max(1) as i64, f.iter().map(|p| p.1).sum::<f64>() as i64 / f.len().max(1) as i64)).collect::<Vec<_>>());
-                }
-            }
-            assert!(!moved || !h.engine.pad_scrolling, "{what}: no stray scroll after the drop");
-            if mon == "MON0" {
-                // Nothing lies above or below MON0, so the lock must never release there.
-                assert!(!lock_released, "{what}: the lock released with no monitor across the axis");
-            }
-            if lock_released { format!("{what}: carried (lock released towards a monitor) and dropped the window") }
-            else if dragged { format!("{what}: carried and dropped the window") } else { format!("{what}: cross-axis start ignored (axis lock)") }
+            assert!(!o.moved || !h.engine.pad_scrolling, "{what}: no stray scroll after the drop");
+            judge_four_fingers(&what, mon, dx, frames, offset, &o)
         }
         _ => format!("{what}: no gesture for this many fingers"),
     }
@@ -1347,6 +1391,11 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
         }
     }
     assert!(carried[0] >= 5 && carried[1] >= 5, "too few carried drags (landscape, portrait): {carried:?}");
+    let skipped = SKIPPED_PICKUP_CHECKS.load(std::sync::atomic::Ordering::Relaxed);
+    let releases = LOCK_RELEASES.load(std::sync::atomic::Ordering::Relaxed);
+    report.push(format!("pick-up unchecked (start unknown) for {skipped} four-finger replays; {releases} lock releases (none on MON0, asserted per replay)"));
+    // Skipped checks are capped so a parser change cannot silently stop verifying pick-up.
+    assert!(skipped <= 40, "too many four-finger replays with an unchecked pick-up: {skipped}");
     println!("{}", report.join("\n"));
 }
 
