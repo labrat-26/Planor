@@ -1888,6 +1888,21 @@ impl<B: WindowBackend> Engine<B> {
             } else {
                 None
             };
+            // A monitor across that axis on either side makes a cross-axis start a carry there.
+            let home_bounds = self
+                .owning(self.backend.foreground())
+                .or_else(|| self.key())
+                .and_then(|k| self.displays.iter().find(|m| m.0 == k.1).map(|m| m.2));
+            self.gesture.cross_ok = match (self.gesture.axis_lock, home_bounds) {
+                (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
+                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                    let side = |d: i32| {
+                        if h { planor::adjacent(b, &bounds, 0, d) } else { planor::adjacent(b, &bounds, d, 0) }.is_some()
+                    };
+                    (side(-1), side(1))
+                }
+                _ => (false, false),
+            };
         }
         let swipe = self.gesture.sample(
             &p,
@@ -2484,7 +2499,7 @@ impl<B: WindowBackend> Engine<B> {
         );
         let now = Instant::now();
         let home = self.owning(id);
-        let lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
+        let lock = self.gesture.axis_lock.filter(|_| !self.gesture.started_cross).and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),

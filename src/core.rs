@@ -580,6 +580,12 @@ pub struct Gesture {
     /// the window up. Set by the caller before each `sample`; `None` is the free drag. The carry itself is
     /// restricted by the daemon (`pad_move`), which needs the raw finger deltas.
     pub axis_lock: Option<bool>,
+    /// With the lock on: whether a monitor lies across the axis on the (negative, positive) side (left/up,
+    /// right/down). A clearly cross-axis start towards such a side is a carry to that monitor (or a regroup from a
+    /// perpendicular direction) and starts unlocked. Set by the caller before each `sample`.
+    pub cross_ok: (bool, bool),
+    /// The running drag started across the lock axis towards a monitor: the caller starts it unlocked.
+    pub started_cross: bool,
     /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
     rejected: bool,
 }
@@ -675,10 +681,16 @@ impl Gesture {
                     // three-finger scroll). A cross-axis start is ignored until the fingers lift.
                     let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
                     if along < 1.5 * cross {
-                        if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
-                            self.rejected = true;
+                        let across = if h { dy } else { dx };
+                        let allowed = if across > 0. { self.cross_ok.1 } else { self.cross_ok.0 };
+                        if cross >= 1.5 * along && allowed {
+                            self.started_cross = true;
+                        } else {
+                            if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
+                                self.rejected = true;
+                            }
+                            return Swipe::None;
                         }
-                        return Swipe::None;
                     }
                 }
                 self.dragging = true;

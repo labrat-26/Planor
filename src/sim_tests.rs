@@ -1262,7 +1262,8 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
             if let Some((along_t, cross_t)) = offset {
                 if along_t >= 1.5 * cross_t {
                     assert!(dragged, "{what}: a start along the strip ({along_t:.0} vs {cross_t:.0}) must pick the window up");
-                } else if cross_t >= 1.5 * along_t {
+                } else if cross_t >= 1.5 * along_t && !(mon == "MON2" && dx > 0.) {
+                    // (MON0 lies right of the portrait MON2, so a rightward cross start there is a carry to it, #87.)
                     assert!(!dragged, "{what}: a start across the strip ({along_t:.0} vs {cross_t:.0}) must be ignored; counts {:?}", frames.iter().take(12).map(|f| (f.len(), f.iter().map(|p| p.0).sum::<f64>() as i64 / f.len().max(1) as i64, f.iter().map(|p| p.1).sum::<f64>() as i64 / f.len().max(1) as i64)).collect::<Vec<_>>());
                 }
             }
@@ -5241,4 +5242,44 @@ fn axis_lock_keeps_the_lock_on_a_side_with_no_monitor_and_ignores_a_flick_there(
     assert!(h.engine.pad.is_none() && h.engine.drag.is_none());
     let on = h.engine.strips.iter().find(|(_, s)| s.locate(102).is_some()).map(|(k, _)| k.1.clone());
     assert_eq!(on.as_deref(), Some("MON0"), "window stays on MON0");
+}
+
+/// Rig where a landscape monitor lies above MON0 and a portrait one sits left (the owner's desk, #87 #88 #89 #92).
+fn stacked_rig() -> Vec<(String, Rect, Rect)> {
+    vec![
+        ("MON0".into(), Rect { x: 0, y: 0, w: 1920, h: 1152 }, Rect { x: 0, y: 0, w: 1920, h: 1200 }),
+        ("MON1".into(), Rect { x: 0, y: -1440, w: 1920, h: 1392 }, Rect { x: 0, y: -1440, w: 1920, h: 1440 }),
+        ("MON2".into(), Rect { x: -1440, y: -400, w: 1440, h: 2512 }, Rect { x: -1440, y: -400, w: 1440, h: 2560 }),
+    ]
+}
+
+fn cross_start_drag(focus_id: isize, step: (f64, f64), cross_monitors: bool) -> (bool, Option<bool>) {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(cross_monitors);
+    let mut h = SimHarness::with_setup(stacked_rig(), cfg, three_per_monitor);
+    focus(&mut h, focus_id);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=8 {
+        h.engine.event(Event::Contacts(four(500. + step.0 * i as f64, 500. + step.1 * i as f64)));
+    }
+    let r = h.engine.pad.as_ref().map(|p| p.lock.is_some());
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    (r.is_some(), r)
+}
+
+#[test]
+fn axis_lock_cross_start_towards_a_monitor_picks_up_unlocked() {
+    // Landscape MON0 has MON1 above (push up works, push down has nothing there); portrait MON2 has MON0 to its right.
+    let (picked, lock) = cross_start_drag(101, (0., -30.), true);
+    assert!(picked && lock == Some(false), "landscape: up towards MON1 picks up unlocked ({picked}, {lock:?})");
+    let (picked, _) = cross_start_drag(101, (0., 30.), true);
+    assert!(!picked, "landscape: down has no monitor, stays ignored");
+    let (picked, lock) = cross_start_drag(301, (30., 0.), true);
+    assert!(picked && lock == Some(false), "portrait: right towards MON0 picks up unlocked ({picked}, {lock:?})");
+    let (picked, _) = cross_start_drag(301, (-30., 0.), true);
+    assert!(!picked, "portrait: left has no monitor, stays ignored");
+    let (picked, _) = cross_start_drag(101, (0., -30.), false);
+    assert!(!picked, "with cross-monitor drags off the cross start is still ignored");
 }
