@@ -167,6 +167,7 @@ pub(crate) struct HotCfg {
     pub swipe_natural_direction: bool,
     pub swipe_scroll_gain: f64,
     pub swipe_inertia: bool,
+    pub scroll_autofocus: bool,
     pub swipe_drag_gain: f64,
     pub swipe_drag_accel: f64,
     pub swipe_drag_cross_monitors: bool,
@@ -236,6 +237,7 @@ impl HotCfg {
             swipe_natural_direction: touchpad["swipe_natural_direction"].as_bool() == Some(true),
             swipe_scroll_gain: touchpad["swipe_scroll_gain"].as_float().unwrap_or(1.),
             swipe_inertia: touchpad["swipe_inertia"].as_bool() == Some(true),
+            scroll_autofocus: touchpad["scroll_autofocus"].as_bool() == Some(true),
             swipe_drag_gain: touchpad["swipe_drag_gain"].as_float().unwrap_or(1.),
             swipe_drag_accel: touchpad["swipe_drag_accel"].as_float().unwrap_or(0.),
             swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool() == Some(true),
@@ -295,6 +297,7 @@ pub(crate) struct DragSession {
     pub hover: Instant,
     pub target: Option<isize>,
     pub mode: planor::Drag,
+    pub ungroup_edge: Option<bool>,
     pub destination: Option<Key>,
     pub resizing: bool,
     pub moved: bool,
@@ -375,6 +378,7 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub desktop_checked: Instant,
     pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
     pub scroll_start_focus: Option<(Key, isize)>,
+    pub scroll_hold_fg: Option<isize>,
     pub scroll_dpi: Option<f64>,
     pub wheel_mode: Option<(Key, Instant, bool, bool)>,
     pub inertia: Option<(bool, f64, Instant, Option<f64>)>,
@@ -456,6 +460,7 @@ impl<B: WindowBackend> Engine<B> {
             desktop_checked: Instant::now(),
             scroll_samples: Default::default(),
             scroll_start_focus: None,
+            scroll_hold_fg: None,
             scroll_dpi: None,
             wheel_mode: None,
             inertia: None,
@@ -1199,17 +1204,23 @@ impl<B: WindowBackend> Engine<B> {
                         .key()
                         .and_then(|k| self.strips.get(&k))
                         .and_then(|s| s.active());
-                    if active_id != Some(managed_id) {
-                        self.select(managed_id);
-                        let visible = self
-                            .owning(managed_id)
-                            .and_then(|k| self.strips.get(&k))
-                            .is_some_and(|s| s.in_view(managed_id));
-                        if visible {
-                            self.dirty = true;
-                        } else {
-                            self.action = "scroll";
-                            self.reveal();
+                    if self.scroll_hold_fg == Some(managed_id) {
+                        // 3-finger scroll settled without autofocus (#76): keep the scrolled view
+                        // until OS foreground actually moves to a different window.
+                    } else {
+                        self.scroll_hold_fg = None;
+                        if active_id != Some(managed_id) {
+                            self.select(managed_id);
+                            let visible = self
+                                .owning(managed_id)
+                                .and_then(|k| self.strips.get(&k))
+                                .is_some_and(|s| s.in_view(managed_id));
+                            if visible {
+                                self.dirty = true;
+                            } else {
+                                self.action = "scroll";
+                                self.reveal();
+                            }
                         }
                     }
                 }
@@ -1413,6 +1424,7 @@ impl<B: WindowBackend> Engine<B> {
         self.inertia = None;
         self.wheel_mode = None;
         self.settle = None;
+        self.scroll_hold_fg = None;
     }
     fn select(&mut self, id: isize) {
         self.clear_scroll_state();
@@ -1574,6 +1586,23 @@ impl<B: WindowBackend> Engine<B> {
             for (id, _, z) in drop_zones(s, peek, side, d.id) {
                 let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
                 zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot_zone { 0.85 } else { 0.35 } });
+            }
+            if k == &d.key
+                && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
+            {
+                let (leading, trailing) = ungroup_edge_zones(s.area);
+                zones.push(render::Zone {
+                    rect: leading,
+                    monitor: k.1.clone(),
+                    color: c,
+                    alpha: if d.ungroup_edge == Some(false) { 0.85 } else { 0.35 },
+                });
+                zones.push(render::Zone {
+                    rect: trailing,
+                    monitor: k.1.clone(),
+                    color: c,
+                    alpha: if d.ungroup_edge == Some(true) { 0.85 } else { 0.35 },
+                });
             }
         }
         let stack_peek = hot.stack_peek_px.unwrap_or(96);
@@ -2030,6 +2059,7 @@ impl<B: WindowBackend> Engine<B> {
                 hover: Instant::now(),
                 target: None,
                 mode: planor::Drag::None,
+                ungroup_edge: None,
                 destination: None,
                 resizing: false,
                 edge_scroll_at: None,
@@ -2064,7 +2094,7 @@ impl<B: WindowBackend> Engine<B> {
             self.hopped = false;
             self.scroll_samples.clear();
             // Resuming within the settle delay keeps the focus the scroll already chose.
-            if self.settle.is_none() {
+            if self.settle.is_none() && self.scroll_hold_fg.is_none() {
                 let focused = self.backend.foreground();
                 if self.owning(focused).is_some() {
                     self.select(focused)
@@ -2317,8 +2347,13 @@ impl<B: WindowBackend> Engine<B> {
                 self.action = "scroll";
                 self.quick = true;
                 self.reveal();
-                if let Some(id) = id {
-                    self.activate_window(id);
+                if self.hot.scroll_autofocus {
+                    self.scroll_hold_fg = None;
+                    if let Some(id) = id {
+                        self.activate_window(id);
+                    }
+                } else {
+                    self.scroll_hold_fg = self.managed_foreground_id(self.backend.foreground());
                 }
                 return;
             }
@@ -2353,7 +2388,7 @@ impl<B: WindowBackend> Engine<B> {
         self.settle = None;
         self.scroll_start_focus = None;
         self.scroll_dpi = None;
-        self.wheel_mode = None;
+        let from_wheel = self.wheel_mode.take().is_some();
         if self.blocked() {
             return;
         }
@@ -2364,8 +2399,13 @@ impl<B: WindowBackend> Engine<B> {
         self.action = "scroll";
         self.quick = true;
         self.reveal();
-        if let Some(id) = id {
-            self.activate_window(id)
+        if from_wheel || self.hot.scroll_autofocus {
+            self.scroll_hold_fg = None;
+            if let Some(id) = id {
+                self.activate_window(id)
+            }
+        } else {
+            self.scroll_hold_fg = self.managed_foreground_id(self.backend.foreground());
         }
     }
     fn pad_begin(&mut self) {
@@ -2593,9 +2633,14 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         if d.resizing || !d.moved {
-            if d.target.is_some() || d.mode != planor::Drag::None || d.destination.is_some() {
+            if d.target.is_some()
+                || d.mode != planor::Drag::None
+                || d.ungroup_edge.is_some()
+                || d.destination.is_some()
+            {
                 d.target = None;
                 d.mode = planor::Drag::None;
+                d.ungroup_edge = None;
                 d.destination = None;
                 self.dirty = true;
             }
@@ -2613,6 +2658,7 @@ impl<B: WindowBackend> Engine<B> {
         else {
             d.target = None;
             d.mode = planor::Drag::None;
+            d.ungroup_edge = None;
             d.destination = None;
             d.edge_scroll_at = None;
             d.edge_scroll_frac = 0.0;
@@ -2711,14 +2757,43 @@ impl<B: WindowBackend> Engine<B> {
         let grouped = home.zip(column).is_some_and(|(s, i)| s.columns[i].members.len() > 1);
         // Holding the drag modifier (Shift by default) makes the drop do nothing: the window goes back.
         let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
-        let mode = target
-            .filter(|_| !held)
-            .map(|(t, fraction, in_zone)| {
-                let sibling = k == d.key
-                    && home.and_then(|s| s.locate(t)).map(|(i, _)| i) == column;
-                planor::drag(in_zone, fraction, grouped, sibling, k != d.key)
+        let ungroup_edge = if !held && grouped && k == d.key {
+            self.strips.get(&k).and_then(|s| {
+                let (leading, trailing) = ungroup_edge_zones(s.area);
+                if contains(leading, p) {
+                    Some(false)
+                } else if contains(trailing, p) {
+                    Some(true)
+                } else {
+                    None
+                }
             })
-            .unwrap_or(planor::Drag::None);
+        } else {
+            None
+        };
+        if ungroup_edge != d.ungroup_edge {
+            d.ungroup_edge = ungroup_edge;
+            self.action = "drag_reflow";
+            self.instant = true;
+            self.dirty = true;
+        }
+        let mode = if ungroup_edge.is_some() {
+            if d.target.is_some() {
+                d.target = None;
+                self.instant = true;
+                self.dirty = true;
+            }
+            planor::Drag::None
+        } else {
+            target
+                .filter(|_| !held)
+                .map(|(t, fraction, in_zone)| {
+                    let sibling = k == d.key
+                        && home.and_then(|s| s.locate(t)).map(|(i, _)| i) == column;
+                    planor::drag(in_zone, fraction, grouped, sibling, k != d.key)
+                })
+                .unwrap_or(planor::Drag::None)
+        };
         if mode != d.mode {
             d.mode = mode;
             self.action = "drag_reflow";
@@ -2754,6 +2829,7 @@ impl<B: WindowBackend> Engine<B> {
             // A fling only changes monitor; it never reorders or stacks onto what is under the cursor.
             d.target = None;
             d.mode = planor::Drag::None;
+            d.ungroup_edge = None;
         }
         if id != d.id
             || self.blocked()
@@ -2810,6 +2886,20 @@ impl<B: WindowBackend> Engine<B> {
         if let Some(target) = d.target
             && (!self.backend.is_window(target) || self.owning(target) != Some(dest.clone()))
         {
+            return;
+        }
+        if !flung
+            && dest == d.key
+            && let Some(trailing) = d.ungroup_edge
+        {
+            // Dropped an in-group window onto the left/right (or top/bottom) edge dropbox (#79):
+            // remove it from its group and place it as its own column on that side of the screen.
+            let s = self.strips.get_mut(&dest).unwrap();
+            s.ungroup_to_side(id, trailing);
+            self.active = dest.1.clone();
+            s.select(id);
+            self.action = "drag_reflow";
+            self.reveal();
             return;
         }
         if let (planor::Drag::Swap, Some(target), true) = (d.mode, d.target, dest == d.key) {
@@ -3061,6 +3151,9 @@ impl<B: WindowBackend> Engine<B> {
                         self.dirty = true;
                     }
                     self.covering.remove(&id);
+                    if self.scroll_hold_fg == Some(id) {
+                        self.scroll_hold_fg = None;
+                    }
                     if !self.orphans.contains(&id) {
                         if let Some(k) = self.owning(id) {
                             let focused = (self.strips[&k].active() == Some(id) && k.1 == self.active)
@@ -3280,6 +3373,23 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
         .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
         .collect()
 }
+/// Two side edge dropboxes shown when dragging a window that belongs to a group (#79):
+/// `(leading, trailing)` = `(left, right)` on landscape monitors, `(top, bottom)` on portrait.
+pub(crate) fn ungroup_edge_zones(area: Rect) -> (Rect, Rect) {
+    if area.horizontal() {
+        let band = (area.w / 10).clamp(64, 160).min((area.w / 3).max(1));
+        (
+            Rect { x: area.x, y: area.y, w: band, h: area.h },
+            Rect { x: area.x + area.w - band, y: area.y, w: band, h: area.h },
+        )
+    } else {
+        let band = (area.h / 10).clamp(64, 160).min((area.h / 3).max(1));
+        (
+            Rect { x: area.x, y: area.y, w: area.w, h: band },
+            Rect { x: area.x, y: area.y + area.h - band, w: area.w, h: band },
+        )
+    }
+}
 /// Log any step of the daemon loop that blocks for noticeable time (finds UI stalls).
 fn slow(what: &str, since: Instant) {
     let ms = since.elapsed().as_millis();
@@ -3370,6 +3480,7 @@ pub fn run() -> Result<()> {
         desktop_checked: Instant::now(),
         scroll_samples: Default::default(),
         scroll_start_focus: None,
+        scroll_hold_fg: None,
         scroll_dpi: None,
         wheel_mode: None,
         inertia: None,

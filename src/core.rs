@@ -231,6 +231,58 @@ impl Strip {
             self.insert(id, 1)
         }
     }
+
+    /// Remove `id` from its group and place it as its own column on the leading (`trailing == false`:
+    /// left on landscape, top on portrait) or trailing (`trailing == true`: right on landscape, bottom
+    /// on portrait) side of the currently visible viewport (#79).
+    pub fn ungroup_to_side(&mut self, id: WindowId, trailing: bool) {
+        let Some((from, _)) = self.locate(id) else {
+            return;
+        };
+        if self.columns[from].members.len() <= 1 {
+            return;
+        }
+        let span = self.area.length();
+        let mut first_vis = None;
+        let mut last_vis = None;
+        let mut x = 0;
+        for (i, c) in self.columns.iter().enumerate() {
+            if x < self.offset + span && x + c.length > self.offset {
+                first_vis.get_or_insert(i);
+                last_vis = Some(i);
+            }
+            x += c.length + self.gap;
+        }
+        let pos = if trailing {
+            last_vis.map(|i| i + 1).unwrap_or(from + 1)
+        } else {
+            first_vis.unwrap_or(from)
+        };
+        self.remove(id);
+        let usable = (span - self.gap).max(1);
+        let length = match self.columns.as_mut_slice() {
+            [] => span,
+            [c] if self.split && c.length == span => {
+                c.length = (usable / 2).min(usable - 1).max(c.minimum);
+                usable - c.length
+            }
+            _ => (usable as f64 * self.share).round() as i32,
+        }
+        .max(1);
+        let pos = pos.min(self.columns.len());
+        self.columns.insert(
+            pos,
+            Column {
+                members: vec![id],
+                active: 0,
+                length,
+                minimum: 1,
+                prior: None,
+                frac: 0.,
+            },
+        );
+        self.focus = pos;
+    }
     pub fn navigate(&mut self, step: isize, cross: bool) {
         if self.columns.is_empty() {
             return;

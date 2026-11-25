@@ -4599,3 +4599,260 @@ fn sim_scanned_window_not_snapped_back_by_newborn_guard_while_shown_newborn_is()
     );
     h.stop_clean();
 }
+
+
+#[test]
+fn sim_three_finger_scroll_autofocus_default_off_and_opt_in() {
+    // Verify planor.example.toml / settings_model exposes [touchpad].scroll_autofocus = false by default (#76).
+    let mut model = crate::settings_model::Model::from_text(
+        std::path::Path::new("planor.toml"),
+        crate::EXAMPLE,
+    )
+    .expect("load settings model");
+    let idx = model
+        .entries
+        .iter()
+        .position(|e| e.section == "touchpad" && e.key == "scroll_autofocus")
+        .expect("touchpad.scroll_autofocus must exist in settings model");
+    assert_eq!(model.value(idx), toml::Value::Boolean(false));
+    assert!(!model.entries[idx].help.is_empty(), "scroll_autofocus must have help text");
+    assert!(model.set(idx, toml::Value::Boolean(true)).is_ok());
+    assert_eq!(model.value(idx), toml::Value::Boolean(true));
+
+    // Helper: perform a 3-finger horizontal scroll leftwards (natural_direction = true -> advances strip right).
+    let do_three_finger_scroll = |h: &mut SimHarness, steps: usize, step_dx: f64| {
+        let mut x = 500.0;
+        h.engine.event(Event::Contacts(vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)]));
+        for _ in 0..steps {
+            x += step_dx;
+            h.engine.event(Event::Contacts(vec![(x, 100.0), (x + 20.0, 100.0), (x + 40.0, 100.0)]));
+            h.settle();
+        }
+        // Lift fingers -> Swipe::ScrollEnd.
+        h.engine.event(Event::Contacts(vec![]));
+        // Force any settle deadline to expire and tick several times.
+        h.engine.inertia = None;
+        if h.engine.settle.is_some() {
+            h.engine.settle = Some(Instant::now() - Duration::from_millis(1));
+        }
+        for _ in 0..4 {
+            h.engine.tick().unwrap();
+        }
+    };
+
+    // (a) Default config: scroll_autofocus is false -> 3-finger scroll moves view without stealing OS focus.
+    let mut cfg_default = test_cfg();
+    cfg_default["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg_default["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    cfg_default["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(4.0);
+    cfg_default["touchpad"]["swipe_inertia"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg_default, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 900, h: 1000 }));
+    });
+    assert!(!h.engine.hot.scroll_autofocus, "scroll_autofocus must default to false");
+    focus(&mut h, 101);
+    let desk = h.engine.desktop.unwrap();
+    let key = (desk, "MON0".to_string());
+    assert_eq!(h.desktop.foreground(), 101);
+
+    do_three_finger_scroll(&mut h, 10, -25.0);
+    let scrolled_active = h.engine.strips[&key].active();
+    assert_ne!(scrolled_active, Some(101), "3-finger scroll should advance the strip view");
+    assert_eq!(
+        h.desktop.foreground(),
+        101,
+        "default scroll_autofocus=false must NOT steal OS foreground on 3-finger scroll"
+    );
+    // Subsequent ticks must NOT snap the strip back to 101.
+    for _ in 0..5 {
+        h.engine.tick().unwrap();
+    }
+    assert_eq!(
+        h.engine.strips[&key].active(),
+        scrolled_active,
+        "tick() foreground reconciliation must hold the scrolled view until OS focus actually changes"
+    );
+
+    // Genuine OS foreground change to 103 clears scroll_hold_fg and reconciles normally.
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 103));
+    h.settle();
+    assert_eq!(h.engine.strips[&key].active(), Some(103));
+    assert_eq!(h.engine.scroll_hold_fg, None);
+    h.stop_clean();
+
+    // (b) Opt-in config: scroll_autofocus = true -> 3-finger scroll focuses the settled window.
+    let mut cfg_auto = test_cfg();
+    cfg_auto["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
+    cfg_auto["touchpad"]["swipe_natural_direction"] = toml::Value::Boolean(true);
+    cfg_auto["touchpad"]["swipe_scroll_gain"] = toml::Value::Float(4.0);
+    cfg_auto["touchpad"]["swipe_inertia"] = toml::Value::Boolean(false);
+    cfg_auto["touchpad"]["scroll_autofocus"] = toml::Value::Boolean(true);
+    let mut h2 = SimHarness::with_setup(primary_only_rig(), cfg_auto, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 900, h: 1000 }));
+    });
+    assert!(h2.engine.hot.scroll_autofocus);
+    focus(&mut h2, 101);
+    let desk2 = h2.engine.desktop.unwrap();
+    let key2 = (desk2, "MON0".to_string());
+    do_three_finger_scroll(&mut h2, 10, -25.0);
+    let settled = h2.engine.strips[&key2].active().unwrap();
+    assert_ne!(settled, 101);
+    assert_eq!(
+        h2.desktop.foreground(),
+        settled,
+        "scroll_autofocus=true must activate the settled window"
+    );
+    h2.stop_clean();
+}
+
+#[test]
+fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
+    // (a) Landscape single-column group [101, 102]: left & right edge dropboxes ungroup onto left / right side (#79).
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+    });
+    let desk = h.engine.desktop.unwrap();
+    let key = (desk, "MON0".to_string());
+    let area = h.engine.strips[&key].area;
+    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(area);
+
+    // Dragging a non-grouped window must NOT show ungroup edge dropboxes.
+    focus(&mut h, 101);
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.cursor = (400, 400);
+    }
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.windows.get_mut(&101).unwrap().rect.x += 50;
+        sim.cursor = (left_box.x + 20, left_box.y + 100);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let scene_lone = h.desktop.0.lock().unwrap().scenes.last().cloned().expect("scene");
+    assert!(
+        !scene_lone.zones.iter().any(|z| z.rect == left_box || z.rect == right_box),
+        "lone window drag must not render ungroup edge dropboxes"
+    );
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+
+    // Group [101, 102] into one column and drag 101 into the LEFT edge dropbox.
+    h.engine.strips.get_mut(&key).unwrap().group(101, 102);
+    h.engine.dirty = true;
+    h.settle();
+    assert_eq!(h.engine.strips[&key].columns.len(), 1);
+    assert_eq!(h.engine.strips[&key].columns[0].members, vec![102, 101]);
+
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.cursor = (area.x + area.w / 2, area.y + area.h / 2);
+    }
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.windows.get_mut(&101).unwrap().rect.x += 40;
+        sim.cursor = (left_box.x + left_box.w / 2, left_box.y + left_box.h / 2);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(h.engine.drag.as_ref().and_then(|d| d.ungroup_edge), Some(false));
+    let scene_left = h.desktop.0.lock().unwrap().scenes.last().cloned().expect("scene");
+    assert!(
+        scene_left.zones.iter().any(|z| z.rect == left_box && (z.alpha - 0.85).abs() < 1e-3),
+        "left edge dropbox must render highlighted when hovered"
+    );
+    assert!(
+        scene_left.zones.iter().any(|z| z.rect == right_box && (z.alpha - 0.35).abs() < 1e-3),
+        "right edge dropbox must also render when dragging an in-group window"
+    );
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+    assert_eq!(h.engine.strips[&key].columns.len(), 2);
+    assert_eq!(h.engine.strips[&key].columns[0].members, vec![101], "left dropbox puts 101 on left");
+    assert_eq!(h.engine.strips[&key].columns[1].members, vec![102]);
+
+    // Re-group [101, 102] and drag 101 into the RIGHT edge dropbox.
+    h.engine.strips.get_mut(&key).unwrap().group(101, 102);
+    h.engine.dirty = true;
+    h.settle();
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.cursor = (area.x + area.w / 2, area.y + area.h / 2);
+    }
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.windows.get_mut(&101).unwrap().rect.x += 40;
+        sim.cursor = (right_box.x + right_box.w / 2, right_box.y + right_box.h / 2);
+    }
+    h.engine.tick().unwrap();
+    assert_eq!(h.engine.drag.as_ref().and_then(|d| d.ungroup_edge), Some(true));
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+    assert_eq!(h.engine.strips[&key].columns.len(), 2);
+    assert_eq!(h.engine.strips[&key].columns[0].members, vec![102]);
+    assert_eq!(h.engine.strips[&key].columns[1].members, vec![101], "right dropbox puts 101 on right");
+    h.stop_clean();
+
+    // (b) Portrait monitor: top & bottom edge dropboxes ungroup onto top / bottom side (#79).
+    let mut hp = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(301, Rect { x: -1440, y: 0, w: 1440, h: 1200 }));
+        sim.add_window(SimWindow::new(302, Rect { x: -1440, y: 600, w: 1440, h: 1200 }));
+    });
+    let desk_p = hp.engine.desktop.unwrap();
+    let key_p = (desk_p, "MON2".to_string());
+    let area_p = hp.engine.strips[&key_p].area;
+    assert!(!area_p.horizontal());
+    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(area_p);
+    hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
+    hp.engine.dirty = true;
+    hp.settle();
+
+    // Drop 301 onto TOP edge dropbox.
+    {
+        let mut sim = hp.desktop.0.lock().unwrap();
+        sim.cursor = (area_p.x + area_p.w / 2, area_p.y + area_p.h / 2);
+    }
+    hp.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 301));
+    {
+        let mut sim = hp.desktop.0.lock().unwrap();
+        sim.windows.get_mut(&301).unwrap().rect.y += 40;
+        sim.cursor = (top_box.x + top_box.w / 2, top_box.y + top_box.h / 2);
+    }
+    hp.engine.tick().unwrap();
+    assert_eq!(hp.engine.drag.as_ref().and_then(|d| d.ungroup_edge), Some(false));
+    hp.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
+    hp.settle();
+    assert_eq!(hp.engine.strips[&key_p].columns[0].members, vec![301], "top dropbox puts 301 first");
+    assert_eq!(hp.engine.strips[&key_p].columns[1].members, vec![302]);
+
+    // Re-group and drop 301 onto BOTTOM edge dropbox.
+    hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
+    hp.engine.dirty = true;
+    hp.settle();
+    {
+        let mut sim = hp.desktop.0.lock().unwrap();
+        sim.cursor = (area_p.x + area_p.w / 2, area_p.y + area_p.h / 2);
+    }
+    hp.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 301));
+    {
+        let mut sim = hp.desktop.0.lock().unwrap();
+        sim.windows.get_mut(&301).unwrap().rect.y += 40;
+        sim.cursor = (bot_box.x + bot_box.w / 2, bot_box.y + bot_box.h / 2);
+    }
+    hp.engine.tick().unwrap();
+    assert_eq!(hp.engine.drag.as_ref().and_then(|d| d.ungroup_edge), Some(true));
+    hp.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
+    hp.settle();
+    assert_eq!(hp.engine.strips[&key_p].columns[0].members, vec![302]);
+    assert_eq!(hp.engine.strips[&key_p].columns[1].members, vec![301], "bottom dropbox puts 301 last");
+    hp.stop_clean();
+}
