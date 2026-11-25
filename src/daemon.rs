@@ -542,33 +542,15 @@ impl<B: WindowBackend> Engine<B> {
         self.self_activated
             .is_some_and(|(_, at)| at.elapsed() <= Duration::from_millis(250))
     }
-    /// True when `id` is currently parked off-screen, orphaned, hidden in a group, or on another
-    /// virtual desktop by Planor itself, so a transient `EVENT_OBJECT_HIDE` must not remove it
-    /// or move focus away from it (a real close still removes it via `EVENT_OBJECT_DESTROY`).
-    fn is_parked_or_hidden_by_planor(&self, id: isize) -> bool {
+    /// #71: the narrow check used by the HIDE guard. Only an orphan or a window sitting at the park position is
+    /// Planor's own doing; a window that is merely off-view / on another desktop yet neither visible nor iconic hid
+    /// itself (tray-hide) and must not stay behind as a ghost tile.
+    fn is_parked_by_planor(&self, id: isize) -> bool {
         if self.orphans.contains(&id) {
             return true;
         }
         let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-        if self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2) {
-            return true;
-        }
-        let Some(k) = self.owning(id) else {
-            return false;
-        };
-        if Some(k.0) != self.desktop {
-            return true;
-        }
-        let Some(strip) = self.strips.get(&k) else {
-            return false;
-        };
-        let Some((ci, member_idx)) = strip.locate(id) else {
-            return false;
-        };
-        let preview = strip.columns[ci].members[strip.columns[ci].active] != id;
-        let hidden = !strip.columns[ci].shown(member_idx);
-        let clipped = strip.fullscreen_id() != Some(id) && !strip.in_view(id);
-        preview || hidden || clipped
+        self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2)
     }
     /// Pick the spatially nearest other monitor on the same desktop that still has an active window.
     fn nearest_other_active_monitor(&self, from: &Key) -> Option<(String, isize)> {
@@ -3265,7 +3247,7 @@ impl<B: WindowBackend> Engine<B> {
                     if self.backend.is_visible(id)
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none()
-                        || self.is_parked_or_hidden_by_planor(id) => {}
+                        || self.is_parked_by_planor(id) => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         self.drag = None;

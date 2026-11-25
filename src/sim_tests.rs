@@ -5338,3 +5338,44 @@ fn sim_drag_grouped_window_beyond_group_border_leaves_group() {
     let cols = drag_group_beyond_border(three_monitor_rig(), (301, 302), "MON2", false);
     assert_eq!(cols, vec![vec![302], vec![301]]);
 }
+
+#[test]
+fn sim_tray_hide_of_off_view_window_not_at_park_position_removes_ghost_tile() {
+    // #71: an off-view window that hides itself (tray-hide) while NOT sitting at Planor's park position is not
+    // "parked by Planor": it must leave the strip instead of staying behind as a ghost tile.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 103);
+    let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+    assert!(!h.engine.strips[&key].in_view(101));
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        let w = sim.windows.get_mut(&101).unwrap();
+        w.rect = Rect { x: 100, y: 0, w: 800, h: 1000 };
+        w.visible = false;
+    }
+    h.engine.event(Event::Window(EVENT_OBJECT_HIDE, 101));
+    h.settle();
+    assert!(h.engine.strips[&key].locate(101).is_none(), "tray-hidden window must not remain a ghost tile");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_real_click_on_another_window_inside_self_activated_ttl_is_not_swallowed() {
+    // #71: inside the 250 ms self_activated TTL only the echo of Planor's own activation is ignored; a real
+    // foreground change to a different window must still select it.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 101);
+    let key = (h.engine.desktop.unwrap(), "MON0".to_string());
+    h.engine.self_activated = Some((101, std::time::Instant::now()));
+    h.desktop.0.lock().unwrap().foreground = 102;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 102));
+    assert_eq!(h.engine.strips[&key].active(), Some(102), "real click within the TTL must select the clicked window");
+    h.stop_clean();
+}
