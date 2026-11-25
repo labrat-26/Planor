@@ -1392,6 +1392,27 @@ pub(crate) fn all_targets_already_placed(
         })
     })
 }
+/// True when at least one on-screen target (or cover placement) differs from its real OS frame
+/// by more than 2 px. Used to decide whether a settled scene needs a delayed `VerifyState` pass:
+/// focus-only hotkeys (e.g. Alt+Left to an already-visible tile) move zero windows and must not
+/// schedule a 250 ms verify pass that would snap back a subsequent external `SetWindowPos` resize.
+pub(crate) fn any_on_screen_target_moved(
+    park: i32,
+    has_covers: bool,
+    placements: &[(isize, Rect)],
+    frame_of: impl Fn(isize) -> Option<Rect>,
+) -> bool {
+    has_covers
+        || placements.iter().any(|&(id, target)| {
+            target.x != park
+                && frame_of(id).is_none_or(|got| {
+                    (got.x - target.x).abs() > 2
+                        || (got.y - target.y).abs() > 2
+                        || (got.w - target.w).abs() > 2
+                        || (got.h - target.h).abs() > 2
+                })
+        })
+}
 fn interpolate(a: Rect, b: Rect, t: f64) -> Rect {
     let f = |a, b| (a as f64 + (b as f64 - a as f64) * t).round() as i32;
     Rect {
@@ -1442,6 +1463,7 @@ struct PresentInfo {
     render_start: Instant,
     retries: u32,
     placement_us: u64,
+    did_place: bool,
 }
 
 #[derive(Default)]
@@ -2571,7 +2593,7 @@ impl RenderState {
         park: i32,
         open_handoff: bool,
         any_cover_active: bool,
-    ) -> (u32, u64) {
+    ) -> (u32, u64, bool) {
         unsafe {
             let scratch = &mut self.scratch;
             if !scratch.cover_placements.is_empty() {
@@ -2604,8 +2626,14 @@ impl RenderState {
                 &scratch.placements,
                 win32::frame,
             ) {
-                return (0, 0);
+                return (0, 0, false);
             }
+            let any_moved = any_on_screen_target_moved(
+                park,
+                !scratch.cover_placements.is_empty(),
+                &scratch.placements,
+                win32::frame,
+            );
             let mut retries = 0u32;
             let mut place_ok = false;
             scratch.rejected.clear();
@@ -2746,7 +2774,7 @@ impl RenderState {
                     }
                 }
             }
-            (retries, start.elapsed().as_micros() as u64)
+            (retries, start.elapsed().as_micros() as u64, any_moved)
         }
     }
 
@@ -2759,6 +2787,7 @@ impl RenderState {
             render_start,
             retries,
             placement_us,
+            did_place,
         } = info;
         unsafe {
             std::mem::swap(&mut self.current, &mut self.scratch.next);
@@ -2810,7 +2839,7 @@ impl RenderState {
                 self.settled =
                     self.timestamp() + planor::pacing::settled_capture_delay_100ns(self.live_refresh_us);
                 let current_epoch = s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
-                if current_epoch {
+                if current_epoch && did_place {
                     self.scratch.verify_items.clear();
                     for &(id, rect) in &self.scratch.placements {
                         if rect.x != park {
@@ -2993,7 +3022,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 && state.open_landed != Some(s.epoch);
             let any_cover_active = state.build_all_hosts(&s, t, park, open_handoff);
             let place_start = Instant::now();
-            let (retries, placement_us) =
+            let (retries, placement_us, did_place) =
                 state.apply_placements(&s, t, park, open_handoff, any_cover_active);
             state.post_present(
                 s,
@@ -3005,6 +3034,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     render_start: place_start,
                     retries,
                     placement_us,
+                    did_place,
                 },
             );
         }
@@ -3573,6 +3603,24 @@ mod tests {
         }));
         // Non-idle action -> must place.
         assert!(!all_targets_already_placed("scroll", false, false, &placements, |id| {
+            Some(if id == 1 { on_screen } else { parked })
+        }));
+    }
+
+    #[test]
+    fn any_on_screen_target_moved_skips_verify_when_no_on_screen_window_changed() {
+        let park = 3584;
+        let on_screen = Rect { x: 0, y: 0, w: 957, h: 1140 };
+        let parked = Rect { x: park, y: 0, w: 957, h: 1140 };
+        let placements = vec![(1, on_screen), (2, parked)];
+
+        assert!(!any_on_screen_target_moved(park, false, &placements, |id| {
+            Some(if id == 1 { on_screen } else { parked })
+        }));
+        assert!(any_on_screen_target_moved(park, false, &placements, |id| {
+            Some(if id == 1 { Rect { x: 100, ..on_screen } } else { parked })
+        }));
+        assert!(any_on_screen_target_moved(park, true, &placements, |id| {
             Some(if id == 1 { on_screen } else { parked })
         }));
     }

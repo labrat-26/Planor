@@ -638,9 +638,9 @@ impl<B: WindowBackend> Engine<B> {
         s.split = self.hot.first_pair_split;
         s.share = self.hot.default_tile_share;
         s.insert(id, self.backend.minimum(id, area.horizontal()));
-        self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
-        self.born.insert(id, (Instant::now(), 0));
         if cover_newborn {
+            self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
+            self.born.insert(id, (Instant::now(), 0));
             self.mark_cover(id);
         }
         self.reveal()
@@ -789,23 +789,33 @@ impl<B: WindowBackend> Engine<B> {
                 else {
                     return Err("unknown monitor".into());
                 };
-                let ids: Vec<_> = self
+                let mut ids: Vec<_> = self
                     .orphans
                     .iter()
                     .copied()
                     .filter(|id| self.owning(*id).is_some_and(|k| k.0 == dest.0))
                     .collect();
-                for id in ids {
-                    if let Some(k) = self.owning(id) {
-                        self.strips.get_mut(&k).unwrap().remove(id)
+                ids.sort_unstable();
+                if !ids.is_empty() {
+                    for id in ids {
+                        if let Some(k) = self.owning(id) {
+                            self.strips.get_mut(&k).unwrap().remove(id)
+                        }
+                        self.orphans.remove(&id);
+                        self.backend.show_no_activate(id);
+                        // Stays in `homes`: it goes back to its own monitor once that one is attached again.
+                        let minimum = self.backend.minimum(id, area.horizontal());
+                        let s = self.home_strip(dest.clone(), area);
+                        if !s.columns.is_empty() {
+                            s.focus = s.columns.len() - 1;
+                        }
+                        s.insert(id, minimum);
                     }
-                    self.orphans.remove(&id);
-                    self.backend.show_no_activate(id);
-                    // Stays in `homes`: it goes back to its own monitor once that one is attached again.
-                    let minimum = self.backend.minimum(id, area.horizontal());
-                    self.home_strip(dest.clone(), area).insert(id, minimum);
+                    self.reveal();
+                    if let Some(active) = self.strips.get(&dest).and_then(|s| s.active()) {
+                        self.activate_window(active);
+                    }
                 }
-                self.reveal()
             }
             Command::Key { name } if name == "panic_exit" => {
                 self.paused = true;
