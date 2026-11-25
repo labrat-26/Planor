@@ -5158,6 +5158,12 @@ fn axis_lock_holds_outside_the_group_column_and_snaps_back() {
             y += across.1 / 3.;
             h.engine.event(Event::Contacts(four(x, y)));
         }
+        // The return onto the line eases over a few frames (#84); a few more steps along the strip finish it.
+        for _ in 0..8 {
+            x += along.0;
+            y += along.1;
+            h.engine.event(Event::Contacts(four(x, y)));
+        }
         let p = h.engine.pad.as_ref().expect("carrying");
         assert!(p.lock.is_some(), "{mon}: lock still on");
         assert_eq!(cross_of(p.cursor), line, "{mon}: outside its column the carry is back on the pick-up line");
@@ -5477,4 +5483,85 @@ fn scroll_hold_fg_survives_a_resumed_gesture_while_foreground_stays_parked() {
     assert_eq!(h.engine.strips[&key].active(), Some(102));
     assert_eq!(h.engine.scroll_hold_fg, None);
     h.stop_clean();
+}
+
+/// Carry window `id` (grouped with its neighbour) on `mon`: wobble across inside the column, then run far
+/// along the strip. Returns the cross-axis cursor offset from the pick-up line after every report.
+fn offsets_after_leaving_column(mon: &str, id: isize, along: (f64, f64), across: (f64, f64)) -> (f64, Vec<f64>) {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    make_group(&mut h, mon, &[id, id + 1]);
+    let horizontal = mon == "MON0";
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    for _ in 0..3 {
+        x += along.0;
+        y += along.1;
+        h.engine.event(Event::Contacts(four(x, y)));
+    }
+    let line = h.engine.pad.as_ref().expect("carrying").line;
+    // Cross travel while still over the column pushes the cursor off the line.
+    for _ in 0..3 {
+        x += across.0;
+        y += across.1;
+        h.engine.event(Event::Contacts(four(x, y)));
+    }
+    let mut out = vec![];
+    for _ in 0..40 {
+        x += along.0;
+        y += along.1;
+        h.engine.event(Event::Contacts(four(x, y)));
+        let c = h.engine.pad.as_ref().expect("carrying").cursor;
+        out.push((if horizontal { c.1 } else { c.0 }) - line);
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    (line, out)
+}
+
+#[test]
+fn axis_lock_eases_back_onto_the_line_instead_of_snapping() {
+    for (mon, id, along, across) in [("MON0", 101, (6., 0.), (0., 10.)), ("MON2", 301, (0., 6.), (10., 0.))] {
+        let (_, off) = offsets_after_leaving_column(mon, id, along, across);
+        let start = off.iter().position(|o| o.abs() > 1e-6).unwrap_or(0);
+        let peak = off.iter().cloned().fold(0., |a: f64, b| if b.abs() > a.abs() { b } else { a });
+        assert!(peak.abs() > 2., "{mon}: cross travel over the column must offset the cursor ({off:?})");
+        // Never jumps the whole way in one report, shrinks monotonically, and arrives exactly.
+        let tail = &off[start..];
+        for w in tail.windows(2) {
+            assert!(w[1].abs() <= w[0].abs() + 1e-9, "{mon}: easing must not move away from the line: {tail:?}");
+        }
+        let drops = tail.windows(2).filter(|w| w[1].abs() < w[0].abs() - 1e-9).count();
+        assert!(drops >= 2, "{mon}: the return must take several frames, not one: {tail:?}");
+        assert_eq!(*off.last().unwrap(), 0., "{mon}: ends exactly on the pick-up line");
+    }
+}
+
+#[test]
+fn axis_lock_cross_travel_over_the_group_column_does_not_count_towards_release() {
+    // Cross travel (several times the 7x-deadzone release distance) while the cursor is over the window's
+    // own group column must not release the lock towards a monitor that lies that way (#84).
+    // MON2 (portrait) has MON0 to its right; with cross-monitor drags on, enough cross travel would release.
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    make_group(&mut h, "MON2", &[301, 302]);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    for _ in 0..3 {
+        y += 6.;
+        h.engine.event(Event::Contacts(four(x, y)));
+    }
+    assert!(h.engine.pad.as_ref().is_some_and(|p| p.lock.is_some()), "locked after pick-up");
+    // Sweep rightwards (towards MON0) well past the 7x-deadzone release distance, still over the column.
+    for _ in 0..14 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        assert!(h.engine.pad.as_ref().is_some_and(|p| p.lock.is_some()), "lock released by travel over the column");
+    }
+    let p = h.engine.pad.as_ref().expect("carrying");
+    assert!(p.lock.is_some(), "lock must survive cross travel over the group column");
+    assert!(p.cross.abs() < 7. * 12., "cross travel over the column is not accumulated: {}", p.cross);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
 }

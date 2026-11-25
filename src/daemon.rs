@@ -2539,7 +2539,11 @@ impl<B: WindowBackend> Engine<B> {
         let (raw_dx, raw_dy) = (dx, dy);
         let (mut dx, mut dy) = (dx, dy);
         if let Some(h) = p.lock {
-            p.cross += if h { raw_dy } else { raw_dx };
+            // Travel over the window's own group column is a regroup/reorder across the axis, not an
+            // intent to leave for another monitor: it does not count towards the lock release (#84).
+            if !in_column {
+                p.cross += if h { raw_dy } else { raw_dx };
+            }
             let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
             let monitor_that_way = home_bounds.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
             if cross_ok && monitor_that_way && p.cross.abs() >= relax {
@@ -2566,8 +2570,12 @@ impl<B: WindowBackend> Engine<B> {
             && column.is_some()
             && !column.is_some_and(|r| inside(r, p.cursor))
         {
-            // Left the group column: back onto the pick-up line (the lock holds from here on).
-            if h { p.cursor.1 = p.line } else { p.cursor.0 = p.line }
+            // Left the group column: ease back onto the pick-up line over a few frames instead of
+            // snapping there in one (#84). The lock holds from here on, so the remaining gap closes
+            // by half each report and snaps once it is under 2 px.
+            let c = if h { &mut p.cursor.1 } else { &mut p.cursor.0 };
+            let gap = p.line - *c;
+            *c = if gap.abs() < 2. { p.line } else { *c + gap * 0.5 };
         }
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
