@@ -1376,3 +1376,27 @@ fn resize_varied_valid_operations_on_landscape_and_portrait() {
         assert!(check_strip_invariants(&tight, 28).is_empty());
     }
 }
+
+#[test]
+fn remove_focuses_right_then_left_then_empty() {
+    for area in [LANDSCAPE, PORTRAIT] {
+        let mut s = Strip::new(area);
+        s.insert(1, 180);
+        s.insert(2, 180);
+        s.insert(3, 180);
+        s.select(2);
+        assert_eq!(s.active(), Some(2));
+
+        // Removing a non-rightmost focused window selects the next window to the right.
+        s.remove(2);
+        assert_eq!(s.active(), Some(3), "{area:?}: should focus window to the right");
+
+        // Removing the rightmost focused window selects the nearest window to the left.
+        s.remove(3);
+        assert_eq!(s.active(), Some(1), "{area:?}: should focus window to the left");
+
+        // Removing the only remaining window leaves no active window.
+        s.remove(1);
+        assert_eq!(s.active(), None, "{area:?}: empty strip has no active window");
+    }
+}

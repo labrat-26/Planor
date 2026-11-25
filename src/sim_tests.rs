@@ -4152,3 +4152,374 @@ fn sim_pad_drag_cross_monitor_release_commits_immediately_even_before_async_move
     );
     h.stop_clean();
 }
+
+#[test]
+fn sim_clicking_rightmost_window_during_scroll_settle_keeps_focus_n002() {
+    // Regression test for #19 (N-002): clicking the rightmost window while a post-scroll settle
+    // timer is pending must focus it immediately and cancel settle so focus is not reverted.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 102);
+
+    // Win+wheel scroll starts a pending settle timer with 102 still selected.
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 500, y: 500 });
+    assert!(h.engine.settle.is_some(), "wheel scroll should arm settle timer");
+
+    // User clicks the rightmost window (103) before settle expires.
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 103));
+    assert!(h.engine.settle.is_none(), "foreground click must cancel pending scroll settle");
+    h.settle();
+
+    // Even after ticks run, focus stays on the rightmost window 103.
+    h.engine.tick().unwrap();
+    h.settle();
+    let desk = h.engine.desktop.unwrap();
+    let strip = &h.engine.strips[&(desk, "MON0".to_string())];
+    assert_eq!(strip.active(), Some(103), "strip focus must stay on rightmost window 103");
+    assert_eq!(h.desktop.foreground(), 103, "OS foreground must not be reverted away from 103");
+    let snap = h.state();
+    let tile_103 = snap["tiles"].as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(103)).unwrap();
+    assert!(!tile_103["color"].is_null(), "rightmost window 103 should have focus highlight");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_focus_follows_mouse_stationary_cursor_does_not_revert_rightmost_focus() {
+    // Regression test for #19 (N-002): with focus_follows_mouse enabled, a stationary cursor over
+    // the left window must not steal focus back after the user focuses the rightmost window.
+    let mut cfg = test_cfg();
+    cfg["layout"]["focus_follows_mouse"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 800, y: 0, w: 900, h: 1000 }));
+    });
+    // Place cursor over left window 101 and let tick record it.
+    let r101 = h.rect(101);
+    h.desktop.0.lock().unwrap().cursor = (r101.x + 50, r101.y + 50);
+    h.engine.tick().unwrap();
+    h.settle();
+    assert_eq!(h.desktop.foreground(), 101);
+
+    // Focus the rightmost window 102 while cursor remains stationary over 101.
+    focus(&mut h, 102);
+    h.engine.tick().unwrap();
+    h.settle();
+    assert_eq!(h.desktop.foreground(), 102, "stationary cursor must not revert focus from rightmost window");
+
+    // Moving the cursor inside 101 should then follow the mouse to 101.
+    h.desktop.0.lock().unwrap().cursor = (r101.x + 60, r101.y + 50);
+    h.engine.tick().unwrap();
+    h.settle();
+    assert_eq!(h.desktop.foreground(), 101, "moving cursor onto 101 should focus it");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_tick_reconciles_missed_foreground_on_left_app() {
+    // Regression test for #40: if OS foreground moves to the left window while EVENT_SYSTEM_FOREGROUND
+    // was missed or suppressed, idle tick() must reconcile strip selection and focus highlight.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 800, y: 0, w: 900, h: 1000 }));
+    });
+    focus(&mut h, 102);
+
+    // Simulate OS foreground switching to the left window 101 without delivering EVENT_SYSTEM_FOREGROUND.
+    h.desktop.0.lock().unwrap().foreground = 101;
+    h.engine.tick().unwrap();
+    h.settle();
+
+    let desk = h.engine.desktop.unwrap();
+    let strip = &h.engine.strips[&(desk, "MON0".to_string())];
+    assert_eq!(strip.active(), Some(101), "tick() must reconcile strip focus to left app 101");
+    let snap = h.state();
+    let tile_101 = snap["tiles"].as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(101)).unwrap();
+    let tile_102 = snap["tiles"].as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(102)).unwrap();
+    assert!(!tile_101["color"].is_null(), "left app 101 must receive focus border");
+    assert!(tile_102["color"].is_null(), "right app 102 must lose focus border");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_autofocus_right_then_left_same_monitor() {
+    // Regression test for #41: minimizing the focused window on a monitor with other windows
+    // focuses the next window to the right, or nearest to the left when rightmost is minimized.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 600, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 600, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 600, h: 1000 }));
+    });
+    focus(&mut h, 102);
+
+    // Minimize middle window 102 -> must autofocus 103 (to the right).
+    h.desktop.0.lock().unwrap().windows.get_mut(&102).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 102));
+    h.settle();
+    let desk = h.engine.desktop.unwrap();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(103));
+    assert_eq!(h.desktop.foreground(), 103, "minimizing 102 must autofocus right neighbour 103");
+
+    // Minimize rightmost window 103 -> must autofocus 101 (to the left).
+    h.desktop.0.lock().unwrap().windows.get_mut(&103).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 103));
+    h.settle();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(101));
+    assert_eq!(h.desktop.foreground(), 101, "minimizing rightmost 103 must autofocus left neighbour 101");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_only_window_autofocuses_other_monitor_and_handles_empty() {
+    // Regression test for #41: minimizing the only active window on a monitor autofocuses an active
+    // window on another monitor; when no other monitor has windows, it leaves focus empty cleanly.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
+        // MON0: 0..1920, MON1: 1920..3840
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(201, Rect { x: 1920, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(202, Rect { x: 2400, y: 0, w: 960, h: 1040 }));
+    });
+    // Ensure 202 is active on MON1, then focus 101 (only window) on MON0.
+    focus(&mut h, 202);
+    focus(&mut h, 101);
+    assert_eq!(h.engine.active, "MON0");
+
+    // Minimize 101 (only active window on MON0) -> must autofocus 202 on MON1.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 101));
+    h.settle();
+    assert_eq!(h.engine.active, "MON1", "active monitor must switch to MON1");
+    assert_eq!(h.desktop.foreground(), 202, "must autofocus active window 202 on MON1");
+    let snap = h.state();
+    let tile_202 = snap["tiles"].as_array().unwrap().iter().find(|t| t["id"].as_i64() == Some(202)).unwrap();
+    assert!(!tile_202["color"].is_null(), "autofocused window 202 on MON1 must have focus border");
+
+    // Minimize 202 (rightmost on MON1) -> must autofocus 201 (left on MON1).
+    h.desktop.0.lock().unwrap().windows.get_mut(&202).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 202));
+    h.settle();
+    assert_eq!(h.desktop.foreground(), 201, "minimizing 202 must autofocus 201 on MON1");
+
+    // Minimize 201 (last active window across all monitors) -> clean empty state, no panic.
+    h.desktop.0.lock().unwrap().windows.get_mut(&201).unwrap().iconic = true;
+    h.desktop.0.lock().unwrap().foreground = 0;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 201));
+    h.settle();
+    let desk = h.engine.desktop.unwrap();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), None);
+    assert_eq!(h.engine.strips[&(desk, "MON1".to_string())].active(), None);
+    h.stop_clean();
+}
+
+#[test]
+fn sim_wheel_and_inertia_survive_foreground_echo_for_already_active_window() {
+    // Review regression test (#19/#40): a foreground event for the already-active window (or a
+    // self-activated echo) must NOT cancel active wheel settle or touchpad inertia.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 102);
+
+    // Wheel scroll arms `settle`; also arm `inertia` to verify both survive.
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 500, y: 500 });
+    h.engine.inertia = Some((false, 300.0, Instant::now(), Some(96.0)));
+    assert!(h.engine.settle.is_some());
+    assert!(h.engine.inertia.is_some());
+
+    let desk = h.engine.desktop.unwrap();
+    let active_id = h.engine.strips[&(desk, "MON0".to_string())].active().unwrap();
+    h.desktop.0.lock().unwrap().foreground = active_id;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, active_id));
+
+    assert!(
+        h.engine.settle.is_some(),
+        "foreground echo for already-active window must not cancel settle"
+    );
+    assert!(
+        h.engine.inertia.is_some(),
+        "foreground echo for already-active window must not cancel inertia"
+    );
+
+    // Self-activated target echo also preserves scroll state.
+    h.engine.self_activated = Some((103, Instant::now()));
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 103));
+    assert!(h.engine.self_activated.is_none());
+    assert!(h.engine.settle.is_some(), "self-activated echo must not cancel settle");
+    assert!(h.engine.inertia.is_some(), "self-activated echo must not cancel inertia");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_hide_on_parked_focused_window_does_not_remove_or_steal_focus() {
+    // Review regression test (#41): EVENT_OBJECT_HIDE arriving for a window that Planor itself
+    // has parked off-screen (while it is still OS foreground) must not evict it or steal focus.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    // Focus 103 so 101 is clipped/parked off-screen at park_x, while OS foreground still points at 101.
+    focus(&mut h, 103);
+    let desk = h.engine.desktop.unwrap();
+    assert!(!h.engine.strips[&(desk, "MON0".to_string())].in_view(101));
+
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.foreground = 101;
+        sim.windows.get_mut(&101).unwrap().visible = false;
+    }
+    h.engine.event(Event::Window(EVENT_OBJECT_HIDE, 101));
+    h.settle();
+
+    assert!(
+        h.engine.strips[&(desk, "MON0".to_string())].locate(101).is_some(),
+        "EVENT_OBJECT_HIDE on a parked window must not remove it from its strip"
+    );
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(103),
+        "EVENT_OBJECT_HIDE on a parked window must not alter strip focus"
+    );
+    assert_eq!(
+        h.desktop.foreground(),
+        101,
+        "EVENT_OBJECT_HIDE on a parked window must not steal OS focus"
+    );
+
+    // A genuine close (EVENT_OBJECT_DESTROY) still removes the parked window cleanly.
+    h.engine.event(Event::Window(EVENT_OBJECT_DESTROY, 101));
+    h.settle();
+    assert!(
+        h.engine.strips[&(desk, "MON0".to_string())].locate(101).is_none(),
+        "EVENT_OBJECT_DESTROY must still remove a parked window"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_only_window_autofocuses_spatially_nearest_monitor_and_reveals() {
+    // Review regression test (#41): when multiple other monitors have active windows, minimizing
+    // the only window on MON0 picks the spatially nearest monitor (MON2 over MON1, even though
+    // MON1 appears earlier in `displays`), updates `last_foreground`, and reveals an off-view target.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
+        // MON0: center (960, 576); MON1: center (3200, 696); MON2: center (-720, 1256).
+        // Distance(MON0, MON2)^2 < Distance(MON0, MON1)^2.
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(201, Rect { x: 1920, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(301, Rect { x: -1440, y: 0, w: 1440, h: 1200 }));
+        sim.add_window(SimWindow::new(302, Rect { x: -1440, y: 400, w: 1440, h: 1200 }));
+        sim.add_window(SimWindow::new(303, Rect { x: -1440, y: 800, w: 1440, h: 1200 }));
+    });
+    // Select 301 on MON2, then scroll MON2's strip so 301 is off-view/parked.
+    focus(&mut h, 301);
+    let desk = h.engine.desktop.unwrap();
+    {
+        let s = h.engine.strips.get_mut(&(desk, "MON2".to_string())).unwrap();
+        s.scroll(2000);
+        assert!(!s.in_view(301), "301 should be scrolled off-view before minimize");
+    }
+    focus(&mut h, 101);
+    assert_eq!(h.engine.active, "MON0");
+
+    // Minimize 101 (only window on MON0) -> must pick spatially nearest MON2 and reveal 301.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 101));
+    assert_eq!(h.engine.active, "MON2", "must pick spatially nearest monitor MON2 over MON1");
+    assert_eq!(h.engine.last_foreground, 301, "last_foreground must update to autofocused window");
+    assert_eq!(h.desktop.foreground(), 301, "OS foreground must activate MON2's active window 301");
+    assert!(
+        h.engine.strips[&(desk, "MON2".to_string())].in_view(301),
+        "autofocused off-view window 301 on MON2 must be revealed immediately"
+    );
+    h.settle();
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_grouped_window_autofocuses_sibling_then_right_column() {
+    // Review regression test (#41): minimizing an active window in a stacked group autofocuses
+    // its sibling inside the group; minimizing the last member autofocuses the column to the right.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    let desk = h.engine.desktop.unwrap();
+    {
+        let s = h.engine.strips.get_mut(&(desk, "MON0".to_string())).unwrap();
+        s.group(102, 101);
+        assert_eq!(s.columns.len(), 2, "101 and 102 should share column 0 with 103 in column 1");
+    }
+    focus(&mut h, 101);
+
+    // Minimize 101 -> autofocuses sibling 102 in the same group.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 101));
+    h.settle();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(102));
+    assert_eq!(h.desktop.foreground(), 102, "minimizing grouped 101 must autofocus sibling 102");
+    assert_eq!(h.engine.last_foreground, 102);
+
+    // Minimize 102 (now alone in column 0) -> autofocuses column 1 to the right (103).
+    h.desktop.0.lock().unwrap().windows.get_mut(&102).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 102));
+    h.settle();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(103));
+    assert_eq!(h.desktop.foreground(), 103, "minimizing last group member 102 must autofocus right column 103");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_rapid_hotkey_walk_survives_async_os_foreground_lag() {
+    // Regression test for live scn_focus failures: during a rapid hotkey walk (e.g. Alt+Left),
+    // if OS GetForegroundWindow() temporarily lags behind activate_window() across a tick() or
+    // subsequent hotkey press, neither tick() nor keypress() may revert strip.active() back to
+    // the stale window; once the pending activation TTL expires, genuine external foreground
+    // divergence still reconciles cleanly.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 103);
+    let desk = h.engine.desktop.unwrap();
+
+    // Step 1: Alt+Left moves strip focus 103 -> 102, then OS foreground lags on 103 when tick() runs.
+    h.cmd(Command::Key { name: "focus_left".into() });
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(102));
+    assert!(h.engine.self_activated.is_some_and(|(id, _)| id == 102));
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.tick().unwrap();
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(102),
+        "tick() must not revert strip focus back to stale lagging OS foreground 103"
+    );
+
+    // Step 2: Rapid second Alt+Left while OS foreground still lags on 103 must continue 102 -> 101.
+    h.cmd(Command::Key { name: "focus_left".into() });
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(101),
+        "rapid second focus_left must walk 102 -> 101 instead of reverting to lagging 103"
+    );
+    h.settle();
+
+    // Step 3: Once the pending self-activation TTL expires, tick() reconciles genuine OS divergence.
+    h.engine.self_activated = Some((101, Instant::now() - Duration::from_millis(300)));
+    h.desktop.0.lock().unwrap().foreground = 103;
+    h.engine.tick().unwrap();
+    assert!(h.engine.self_activated.is_none(), "stale self_activated must expire after TTL");
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(103),
+        "after self_activated TTL expires, tick() must reconcile OS foreground 103"
+    );
+    h.settle();
+    h.stop_clean();
+}

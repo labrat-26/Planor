@@ -807,11 +807,43 @@ pub fn restore_system(backup: &std::path::Path) -> bool {
 }
 pub fn activate(id: isize) {
     unsafe {
-        let fg = GetWindowThreadProcessId(GetForegroundWindow(), null_mut());
+        let fg_hwnd = GetForegroundWindow();
+        let fg = GetWindowThreadProcessId(fg_hwnd, null_mut());
+        let target = GetWindowThreadProcessId(id as _, null_mut());
         let own = GetCurrentThreadId();
-        let attached = fg != 0 && fg != own && AttachThreadInput(own, fg, 1) != 0;
-        SetForegroundWindow(id as _);
-        if attached {
+        let att_fg = fg != 0 && fg != own && AttachThreadInput(own, fg, 1) != 0;
+        let att_target =
+            target != 0 && target != own && target != fg && AttachThreadInput(own, target, 1) != 0;
+        let mut ret = SetForegroundWindow(id as _);
+        if ret == 0 {
+            // Unassigned VK 0xE8 satisfies Windows' foreground-lock input check without triggering
+            // app menus or shortcuts (same technique used for Win+W / Win+Wheel).
+            KeyboardAndMouse::keybd_event(0xE8, 0, 0, 0);
+            KeyboardAndMouse::keybd_event(0xE8, 0, KeyboardAndMouse::KEYEVENTF_KEYUP, 0);
+            ret = SetForegroundWindow(id as _);
+        }
+        if ret == 0 {
+            // Fallback: Alt tap with 0xE8 in between so menu bars do not open.
+            KeyboardAndMouse::keybd_event(
+                KeyboardAndMouse::VK_MENU as u8,
+                0,
+                KeyboardAndMouse::KEYEVENTF_EXTENDEDKEY,
+                0,
+            );
+            KeyboardAndMouse::keybd_event(0xE8, 0, 0, 0);
+            KeyboardAndMouse::keybd_event(0xE8, 0, KeyboardAndMouse::KEYEVENTF_KEYUP, 0);
+            KeyboardAndMouse::keybd_event(
+                KeyboardAndMouse::VK_MENU as u8,
+                0,
+                KeyboardAndMouse::KEYEVENTF_EXTENDEDKEY | KeyboardAndMouse::KEYEVENTF_KEYUP,
+                0,
+            );
+            let _ = SetForegroundWindow(id as _);
+        }
+        if att_target {
+            AttachThreadInput(own, target, 0);
+        }
+        if att_fg {
             AttachThreadInput(own, fg, 0);
         }
     }
