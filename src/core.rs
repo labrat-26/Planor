@@ -12,6 +12,15 @@ impl Rect {
     pub fn horizontal(self) -> bool {
         self.w >= self.h
     }
+    pub fn intersect(self, o: Rect) -> Option<Rect> {
+        let (x, y) = (self.x.max(o.x), self.y.max(o.y));
+        let (r, b) = ((self.x + self.w).min(o.x + o.w), (self.y + self.h).min(o.y + o.h));
+        (r > x && b > y).then_some(Rect { x, y, w: r - x, h: b - y })
+    }
+    pub fn union(self, o: Rect) -> Rect {
+        let (x, y) = (self.x.min(o.x), self.y.min(o.y));
+        Rect { x, y, w: (self.x + self.w).max(o.x + o.w) - x, h: (self.y + self.h).max(o.y + o.h) - y }
+    }
     pub fn length(self) -> i32 {
         if self.horizontal() { self.w } else { self.h }
     }

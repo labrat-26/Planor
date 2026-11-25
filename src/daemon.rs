@@ -333,10 +333,14 @@ pub(crate) struct PadDrag {
     pub moved: Instant,
     /// Recent raw finger deltas, newest last, for the lift-off velocity (fling).
     pub samples: std::collections::VecDeque<(Instant, f64, f64)>,
-    /// Drag axis lock while carrying: `Some(horizontal)` slides only along that (strip) axis. Relaxed
-    /// (set to `None`) for good once the fingers push across it by 3x the dead zone with cross-monitor
-    /// drags on, so a window can be carried to a monitor on the other side.
+    /// Drag axis lock while carrying: `Some(horizontal)` slides only along that (strip) axis, on the cursor's
+    /// pick-up line (`line`). It does not apply over the window's own group column (members are reordered
+    /// across the axis there); leaving the column snaps the cursor back to the line. Released (set to `None`)
+    /// for good once the fingers push across the axis by 7x the dead zone towards a monitor that lies that
+    /// way (cross-monitor drags on), so the window can be carried there.
     pub lock: Option<bool>,
+    /// Cursor coordinate across the lock axis at pick-up.
+    pub line: f64,
     /// Strip the window was picked up from (its area bounds the lock; its group column is never locked).
     pub home: Option<Key>,
     /// Net finger travel across the lock axis since pick-up.
@@ -2480,6 +2484,7 @@ impl<B: WindowBackend> Engine<B> {
         );
         let now = Instant::now();
         let home = self.owning(id);
+        let lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2492,7 +2497,8 @@ impl<B: WindowBackend> Engine<B> {
             samples: Default::default(),
             // Lock axis and home strip come from the strip that owns the dragged window (the active
             // monitor can differ from it).
-            lock: self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal())),
+            lock,
+            line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
             home,
             cross: 0.,
         });
@@ -2500,25 +2506,41 @@ impl<B: WindowBackend> Engine<B> {
     fn pad_move(&mut self, dx: f64, dy: f64) {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
-        let (relax, cross_ok) = (3. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
-        // The lock does not apply over the window's own group column (members peek across the strip axis and
-        // swapping with one needs that movement).
-        let in_group = self.pad.as_ref().is_some_and(|p| {
-            let c = (p.cursor.0 as i32, p.cursor.1 as i32);
-            p.home.as_ref().and_then(|k| self.strips.get(k)).is_some_and(|s| {
-                s.locate(p.id).is_some_and(|(ci, _)| s.columns[ci].members.len() > 1)
-                    && c.0 >= s.area.x && c.0 < s.area.x + s.area.w && c.1 >= s.area.y && c.1 < s.area.y + s.area.h
-            })
+        let (relax, cross_ok) = (7. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
+        let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+        let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+        // The visible rect of the window's own group column (None for a lone window or a gone strip).
+        let column = self.pad.as_ref().and_then(|p| {
+            let s = p.home.as_ref().and_then(|k| self.strips.get(k))?;
+            let (ci, _) = s.locate(p.id)?;
+            if s.columns[ci].members.len() < 2 {
+                return None;
+            }
+            let own = s.columns[ci].members.clone();
+            s.rects(stack_peek)
+                .into_iter()
+                .filter(|(id, _)| own.contains(id))
+                .filter_map(|(_, r)| r.intersect(s.area))
+                .reduce(|a, b| a.union(b))
+        });
+        // The monitor of the home strip, to find out whether another one lies across the lock axis.
+        let home_bounds = self.pad.as_ref().and_then(|p| {
+            let name = &p.home.as_ref()?.1;
+            self.displays.iter().find(|m| &m.0 == name).map(|m| m.2)
         });
         let Some(p) = self.pad.as_mut() else { return };
+        let inside = |r: Rect, c: (f64, f64)| c.0 >= r.x as f64 && c.0 < (r.x + r.w) as f64 && c.1 >= r.y as f64 && c.1 < (r.y + r.h) as f64;
+        let in_column = column.is_some_and(|r| inside(r, p.cursor));
         // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
         let (raw_dx, raw_dy) = (dx, dy);
         let (mut dx, mut dy) = (dx, dy);
         if let Some(h) = p.lock {
             p.cross += if h { raw_dy } else { raw_dx };
-            if cross_ok && p.cross.abs() >= relax {
+            let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
+            let monitor_that_way = home_bounds.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
+            if cross_ok && monitor_that_way && p.cross.abs() >= relax {
                 p.lock = None;
-            } else if !in_group {
+            } else if !in_column {
                 if h { dy = 0. } else { dx = 0. }
             }
         }
@@ -2536,6 +2558,13 @@ impl<B: WindowBackend> Engine<B> {
         let (l, t, r, b) = p.limits;
         p.cursor.0 = (p.cursor.0 + dx * gain).clamp(l, r);
         p.cursor.1 = (p.cursor.1 + dy * gain).clamp(t, b);
+        if let Some(h) = p.lock
+            && column.is_some()
+            && !column.is_some_and(|r| inside(r, p.cursor))
+        {
+            // Left the group column: back onto the pick-up line (the lock holds from here on).
+            if h { p.cursor.1 = p.line } else { p.cursor.0 = p.line }
+        }
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
         // window cannot keep up with every touchpad report, and a queue of stale moves would make the
