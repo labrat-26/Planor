@@ -2,6 +2,14 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.8.0] - 2026-11-25
+
+### Added
+- **Touchpad drag axis lock (#83)**: `[touchpad] drag_axis_lock = true` (on by default, in the Settings UI). A four-finger drag picks a window up only when travel along the strip axis leads cross travel by 1.5x; a cross-axis start does nothing. A carried window slides along the strip axis only (horizontal on landscape, vertical on portrait). The lock is off while the cursor is over the window's own group column, so group reorder still works, and the window snaps back to its pick-up line on leaving it. With cross-monitor drags on, the lock releases only toward a monitor that lies in the direction of the cross travel, after 7x `axis_lock_deadzone`; throws use raw finger deltas so flings still cross monitors. Off restores the previous free drag.
+
+### Tests
+- `tests/sim_tests`: axis lock on landscape and portrait (cross-axis start ignored, carry stays on axis, toggle off, group column and snap-back, sibling swap by pad drag, MON0 keeps the lock, MON2 to MON0 release and throw). `replay_on` now asserts pick-up at a 1.5x lead and no pick-up at a 1.5x cross lead, replays portrait as recorded and with x/y swapped, requires at least 5 carried drags per orientation and counts lock releases. `non_dirtying_contacts_do_not_leave_stale_input_timestamp_on_both_orientations` drags along the strip axis.
+
 ## [0.7.0] - 2026-11-25
 
 ### Added
