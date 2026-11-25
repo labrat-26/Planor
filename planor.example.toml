@@ -52,6 +52,13 @@ swipe_natural_direction = true
 # Four fingers pick the focused window up and carry it; it drops where the fingers lift.
 # swipe_drag_gain: window travel per unit of finger travel.
 swipe_drag_gain = 7.0
+# Drag axis lock: a four-finger drag only starts along the strip axis (sideways on landscape, up and down on portrait);
+# a cross-axis start does nothing. The carried window then slides only along that axis. Limits: over the window's
+# own group column it moves freely (to reorder the group); leaving the column puts it back on its line. Pushing
+# the fingers across the axis by 7x axis_lock_deadzone releases the lock only when swipe_drag_cross_monitors is on
+# and another monitor lies that way. The axis stays that of the strip it was picked up from, and a fling still goes
+# in any direction. Off: free drag in any direction.
+drag_axis_lock = true
 # Acceleration: extra gain per 1000 units/s of smoothed finger speed, capped at 1.6x (0 = linear). Kept small so one swipe always moves the window about the same.
 swipe_drag_accel = 0.15
 # Three fingers sideways scroll the strip live (focus follows the window nearest the centre) and

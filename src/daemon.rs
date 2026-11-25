@@ -171,6 +171,7 @@ pub(crate) struct HotCfg {
     pub swipe_drag_gain: f64,
     pub swipe_drag_accel: f64,
     pub swipe_drag_cross_monitors: bool,
+    pub drag_axis_lock: bool,
     pub swipe_fling_enabled: bool,
     pub swipe_fling_speed: f64,
     pub win_wheel_step_px: f64,
@@ -241,6 +242,7 @@ impl HotCfg {
             swipe_drag_gain: touchpad["swipe_drag_gain"].as_float().unwrap_or(1.),
             swipe_drag_accel: touchpad["swipe_drag_accel"].as_float().unwrap_or(0.),
             swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool() == Some(true),
+            drag_axis_lock: touchpad["drag_axis_lock"].as_bool() != Some(false),
             swipe_fling_enabled: touchpad["swipe_fling_enabled"].as_bool() == Some(true),
             swipe_fling_speed: touchpad["swipe_fling_speed"].as_integer().unwrap_or(900) as f64,
             win_wheel_step_px: mouse["win_wheel_step_px"].as_integer().unwrap_or(240) as f64,
@@ -331,6 +333,18 @@ pub(crate) struct PadDrag {
     pub moved: Instant,
     /// Recent raw finger deltas, newest last, for the lift-off velocity (fling).
     pub samples: std::collections::VecDeque<(Instant, f64, f64)>,
+    /// Drag axis lock while carrying: `Some(horizontal)` slides only along that (strip) axis, on the cursor's
+    /// pick-up line (`line`). It does not apply over the window's own group column (members are reordered
+    /// across the axis there); leaving the column snaps the cursor back to the line. Released (set to `None`)
+    /// for good once the fingers push across the axis by 7x the dead zone towards a monitor that lies that
+    /// way (cross-monitor drags on), so the window can be carried there.
+    pub lock: Option<bool>,
+    /// Cursor coordinate across the lock axis at pick-up.
+    pub line: f64,
+    /// Strip the window was picked up from (its area bounds the lock; its group column is never locked).
+    pub home: Option<Key>,
+    /// Net finger travel across the lock axis since pick-up.
+    pub cross: f64,
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
@@ -1863,6 +1877,18 @@ impl<B: WindowBackend> Engine<B> {
             // (without touching `pad.seen`, which `pad_move` uses for acceleration `dt`).
             pad.last_contact = Instant::now();
         }
+        // Drag axis lock: the strip axis of the strip that owns the foreground window (as pad_begin picks it).
+        if self.pad.is_none() {
+            self.gesture.axis_lock = if self.hot.drag_axis_lock {
+                let fg = self.backend.foreground();
+                self.owning(fg)
+                    .or_else(|| self.key())
+                    .and_then(|k| self.strips.get(&k))
+                    .map(|s| s.area.horizontal())
+            } else {
+                None
+            };
+        }
         let swipe = self.gesture.sample(
             &p,
             self.hot.axis_lock_deadzone,
@@ -2457,6 +2483,8 @@ impl<B: WindowBackend> Engine<B> {
             b.map(|r| r.y + r.h).max().unwrap_or(1) as f64 - 1.,
         );
         let now = Instant::now();
+        let home = self.owning(id);
+        let lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2467,26 +2495,76 @@ impl<B: WindowBackend> Engine<B> {
             speed: 0.,
             moved: now,
             samples: Default::default(),
+            // Lock axis and home strip come from the strip that owns the dragged window (the active
+            // monitor can differ from it).
+            lock,
+            line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
+            home,
+            cross: 0.,
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
+        let (relax, cross_ok) = (7. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
+        let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+        let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+        // The visible rect of the window's own group column (None for a lone window or a gone strip).
+        let column = self.pad.as_ref().and_then(|p| {
+            let s = p.home.as_ref().and_then(|k| self.strips.get(k))?;
+            let (ci, _) = s.locate(p.id)?;
+            if s.columns[ci].members.len() < 2 {
+                return None;
+            }
+            let own = s.columns[ci].members.clone();
+            s.rects(stack_peek)
+                .into_iter()
+                .filter(|(id, _)| own.contains(id))
+                .filter_map(|(_, r)| r.intersect(s.area))
+                .reduce(|a, b| a.union(b))
+        });
+        // The monitor of the home strip, to find out whether another one lies across the lock axis.
+        let home_bounds = self.pad.as_ref().and_then(|p| {
+            let name = &p.home.as_ref()?.1;
+            self.displays.iter().find(|m| &m.0 == name).map(|m| m.2)
+        });
         let Some(p) = self.pad.as_mut() else { return };
+        let inside = |r: Rect, c: (f64, f64)| c.0 >= r.x as f64 && c.0 < (r.x + r.w) as f64 && c.1 >= r.y as f64 && c.1 < (r.y + r.h) as f64;
+        let in_column = column.is_some_and(|r| inside(r, p.cursor));
+        // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
+        let (raw_dx, raw_dy) = (dx, dy);
+        let (mut dx, mut dy) = (dx, dy);
+        if let Some(h) = p.lock {
+            p.cross += if h { raw_dy } else { raw_dx };
+            let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
+            let monitor_that_way = home_bounds.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
+            if cross_ok && monitor_that_way && p.cross.abs() >= relax {
+                p.lock = None;
+            } else if !in_column {
+                if h { dy = 0. } else { dx = 0. }
+            }
+        }
         let now = Instant::now();
         // Acceleration: the faster the fingers move, the further the window goes per unit.
         let dt = now.duration_since(p.seen).as_secs_f64().clamp(0.008, 0.1);
-        let speed = dx.hypot(dy) / dt;
+        let speed = raw_dx.hypot(raw_dy) / dt;
         p.speed = p.speed * 0.8 + speed * 0.2;
         let gain = base * (1. + accel * p.speed / 1000.).min(1.6);
         p.seen = now;
-        p.samples.push_back((now, dx, dy));
+        p.samples.push_back((now, raw_dx, raw_dy));
         while p.samples.front().is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150)) {
             p.samples.pop_front();
         }
         let (l, t, r, b) = p.limits;
         p.cursor.0 = (p.cursor.0 + dx * gain).clamp(l, r);
         p.cursor.1 = (p.cursor.1 + dy * gain).clamp(t, b);
+        if let Some(h) = p.lock
+            && column.is_some()
+            && !column.is_some_and(|r| inside(r, p.cursor))
+        {
+            // Left the group column: back onto the pick-up line (the lock holds from here on).
+            if h { p.cursor.1 = p.line } else { p.cursor.0 = p.line }
+        }
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
         // window cannot keep up with every touchpad report, and a queue of stale moves would make the
