@@ -567,8 +567,9 @@ pub struct Gesture {
     travel: f64,
     /// Five or more fingers were seen: nothing is a Planor gesture until the hand is lifted.
     vetoed: bool,
-    /// Drag axis lock: `Some(horizontal)` restricts four-finger drags to that axis (the strip axis). Set by
-    /// the caller before each `sample`; `None` is the free drag.
+    /// Drag axis lock: `Some(horizontal)` makes only a four-finger start along that axis (the strip axis) pick
+    /// the window up. Set by the caller before each `sample`; `None` is the free drag. The carry itself is
+    /// restricted by the daemon (`pad_move`), which needs the raw finger deltas.
     pub axis_lock: Option<bool>,
     /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
     rejected: bool,
@@ -675,13 +676,8 @@ impl Gesture {
                 self.last = origin; // the first move includes the dead-zone travel
                 return Swipe::DragStart;
             }
-            let (mut mx, mut my) = (pos.0 - self.last.0, pos.1 - self.last.1);
+            let (mx, my) = (pos.0 - self.last.0, pos.1 - self.last.1);
             self.last = pos;
-            match lock {
-                Some(true) => my = 0.,
-                Some(false) => mx = 0.,
-                None => (),
-            }
             return if mx == 0. && my == 0. { Swipe::None } else { Swipe::DragMove(mx, my) };
         }
         // Three fingers start scrolling almost at once: the axis is picked after 3 units of travel when one

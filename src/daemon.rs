@@ -333,6 +333,14 @@ pub(crate) struct PadDrag {
     pub moved: Instant,
     /// Recent raw finger deltas, newest last, for the lift-off velocity (fling).
     pub samples: std::collections::VecDeque<(Instant, f64, f64)>,
+    /// Drag axis lock while carrying: `Some(horizontal)` slides only along that (strip) axis. Relaxed
+    /// (set to `None`) for good once the fingers push across it by 3x the dead zone with cross-monitor
+    /// drags on, so a window can be carried to a monitor on the other side.
+    pub lock: Option<bool>,
+    /// Strip the window was picked up from (its area bounds the lock; its group column is never locked).
+    pub home: Option<Key>,
+    /// Net finger travel across the lock axis since pick-up.
+    pub cross: f64,
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
@@ -1865,10 +1873,14 @@ impl<B: WindowBackend> Engine<B> {
             // (without touching `pad.seen`, which `pad_move` uses for acceleration `dt`).
             pad.last_contact = Instant::now();
         }
-        // Drag axis lock: the strip axis of the focused monitor (a drag already carrying keeps its axis).
+        // Drag axis lock: the strip axis of the strip that owns the foreground window (as pad_begin picks it).
         if self.pad.is_none() {
             self.gesture.axis_lock = if self.hot.drag_axis_lock {
-                self.key().and_then(|k| self.strips.get(&k)).map(|s| s.area.horizontal())
+                let fg = self.backend.foreground();
+                self.owning(fg)
+                    .or_else(|| self.key())
+                    .and_then(|k| self.strips.get(&k))
+                    .map(|s| s.area.horizontal())
             } else {
                 None
             };
@@ -2467,6 +2479,7 @@ impl<B: WindowBackend> Engine<B> {
             b.map(|r| r.y + r.h).max().unwrap_or(1) as f64 - 1.,
         );
         let now = Instant::now();
+        let home = self.owning(id);
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2477,20 +2490,46 @@ impl<B: WindowBackend> Engine<B> {
             speed: 0.,
             moved: now,
             samples: Default::default(),
+            // Lock axis and home strip come from the strip that owns the dragged window (the active
+            // monitor can differ from it).
+            lock: self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal())),
+            home,
+            cross: 0.,
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
+        let (relax, cross_ok) = (3. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
+        // The lock does not apply over the window's own group column (members peek across the strip axis and
+        // swapping with one needs that movement).
+        let in_group = self.pad.as_ref().is_some_and(|p| {
+            let c = (p.cursor.0 as i32, p.cursor.1 as i32);
+            p.home.as_ref().and_then(|k| self.strips.get(k)).is_some_and(|s| {
+                s.locate(p.id).is_some_and(|(ci, _)| s.columns[ci].members.len() > 1)
+                    && c.0 >= s.area.x && c.0 < s.area.x + s.area.w && c.1 >= s.area.y && c.1 < s.area.y + s.area.h
+            })
+        });
         let Some(p) = self.pad.as_mut() else { return };
+        // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
+        let (raw_dx, raw_dy) = (dx, dy);
+        let (mut dx, mut dy) = (dx, dy);
+        if let Some(h) = p.lock {
+            p.cross += if h { raw_dy } else { raw_dx };
+            if cross_ok && p.cross.abs() >= relax {
+                p.lock = None;
+            } else if !in_group {
+                if h { dy = 0. } else { dx = 0. }
+            }
+        }
         let now = Instant::now();
         // Acceleration: the faster the fingers move, the further the window goes per unit.
         let dt = now.duration_since(p.seen).as_secs_f64().clamp(0.008, 0.1);
-        let speed = dx.hypot(dy) / dt;
+        let speed = raw_dx.hypot(raw_dy) / dt;
         p.speed = p.speed * 0.8 + speed * 0.2;
         let gain = base * (1. + accel * p.speed / 1000.).min(1.6);
         p.seen = now;
-        p.samples.push_back((now, dx, dy));
+        p.samples.push_back((now, raw_dx, raw_dy));
         while p.samples.front().is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150)) {
             p.samples.pop_front();
         }
