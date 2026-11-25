@@ -369,6 +369,7 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub last_foreground: isize,
     pub null_fg_ticks: u8,
     pub last_cursor: Option<(i32, i32)>,
+    pub self_activated: Option<isize>,
     pub holes_checked: Instant,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
@@ -449,6 +450,7 @@ impl<B: WindowBackend> Engine<B> {
             last_foreground: 0,
             null_fg_ticks: 0,
             last_cursor: None,
+            self_activated: None,
             holes_checked: Instant::now(),
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
@@ -510,6 +512,63 @@ impl<B: WindowBackend> Engine<B> {
         } else {
             None
         }
+    }
+    fn activate_window(&mut self, id: isize) {
+        self.self_activated = Some(id);
+        self.last_foreground = id;
+        self.null_fg_ticks = 0;
+        self.backend.activate(id);
+    }
+    /// True when `id` is currently parked off-screen, orphaned, hidden in a group, or on another
+    /// virtual desktop by Planor itself, so a transient `EVENT_OBJECT_HIDE` must not remove it
+    /// or move focus away from it (a real close still removes it via `EVENT_OBJECT_DESTROY`).
+    fn is_parked_or_hidden_by_planor(&self, id: isize) -> bool {
+        if self.orphans.contains(&id) {
+            return true;
+        }
+        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        if self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2) {
+            return true;
+        }
+        let Some(k) = self.owning(id) else {
+            return false;
+        };
+        if Some(k.0) != self.desktop {
+            return true;
+        }
+        let Some(strip) = self.strips.get(&k) else {
+            return false;
+        };
+        let Some((ci, member_idx)) = strip.locate(id) else {
+            return false;
+        };
+        let preview = strip.columns[ci].members[strip.columns[ci].active] != id;
+        let hidden = !strip.columns[ci].shown(member_idx);
+        let clipped = strip.fullscreen_id() != Some(id) && !strip.in_view(id);
+        preview || hidden || clipped
+    }
+    /// Pick the spatially nearest other monitor on the same desktop that still has an active window.
+    fn nearest_other_active_monitor(&self, from: &Key) -> Option<(String, isize)> {
+        let from_rect = self.displays.iter().find(|m| m.0 == from.1).map(|m| m.1);
+        self.displays
+            .iter()
+            .filter(|m| m.0 != from.1)
+            .filter_map(|m| {
+                let ok = (from.0, m.0.clone());
+                let win = self.strips.get(&ok).and_then(|s| s.active())?;
+                let dist_sq = from_rect.map_or(0i128, |fr| {
+                    let fx = fr.x as i128 * 2 + fr.w as i128;
+                    let fy = fr.y as i128 * 2 + fr.h as i128;
+                    let mx = m.1.x as i128 * 2 + m.1.w as i128;
+                    let my = m.1.y as i128 * 2 + m.1.h as i128;
+                    let dx = mx - fx;
+                    let dy = my - fy;
+                    dx * dx + dy * dy
+                });
+                Some((dist_sq, m.0.clone(), win))
+            })
+            .min_by_key(|&(dist_sq, _, _)| dist_sq)
+            .map(|(_, mon, win)| (mon, win))
     }
     fn blocked(&self) -> bool {
         self.paused || self.locked || self.deadline.is_some() || self.desktop.is_none()
@@ -1251,7 +1310,7 @@ impl<B: WindowBackend> Engine<B> {
                 let id = self.backend.window_at_point(px, py);
                 if self.owning(id).is_some() && self.backend.foreground() != id {
                     self.select(id);
-                    self.backend.activate(id);
+                    self.activate_window(id);
                     self.dirty = true
                 }
             }
@@ -1920,7 +1979,7 @@ impl<B: WindowBackend> Engine<B> {
         let id = s.active();
         self.reveal();
         if let Some(id) = id {
-            self.backend.activate(id);
+            self.activate_window(id);
             if self.hot.warp_cursor_to_focused
                 && let Some(r) = self.strips[&self.key().unwrap()]
                     .rects(0)
@@ -2236,7 +2295,7 @@ impl<B: WindowBackend> Engine<B> {
                 self.quick = true;
                 self.reveal();
                 if let Some(id) = id {
-                    self.backend.activate(id);
+                    self.activate_window(id);
                 }
                 return;
             }
@@ -2283,7 +2342,7 @@ impl<B: WindowBackend> Engine<B> {
         self.quick = true;
         self.reveal();
         if let Some(id) = id {
-            self.backend.activate(id)
+            self.activate_window(id)
         }
     }
     fn pad_begin(&mut self) {
@@ -2838,7 +2897,7 @@ impl<B: WindowBackend> Engine<B> {
                 self.action = "scroll";
                 self.select(id);
                 self.reveal();
-                self.backend.activate(id)
+                self.activate_window(id)
             }
             Event::Rejected(seq, entries) if seq == self.seq && !self.blocked() => {
                 for (id, r) in entries {
@@ -2916,10 +2975,11 @@ impl<B: WindowBackend> Engine<B> {
                         self.null_fg_ticks = 0;
                         self.last_foreground = id;
                     }
-                    // A foreground change after fingers lifted (during post-scroll settle or
-                    // momentum) must win instead of letting `pad_settle` revert focus back.
-                    self.clear_scroll_state();
                     let target = self.managed_foreground_id(id);
+                    let was_self = self
+                        .self_activated
+                        .take()
+                        .is_some_and(|a| a == id || target == Some(a));
                     if self.diag.enabled {
                         diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
                     }
@@ -2927,24 +2987,38 @@ impl<B: WindowBackend> Engine<B> {
                         .key()
                         .and_then(|k| self.strips.get(&k))
                         .and_then(|s| s.active());
+                    let same_as_active = target.is_some() && target == active_id;
+                    let scrolling =
+                        self.settle.is_some() || self.inertia.is_some() || self.wheel_mode.is_some();
                     // Focus moving to or from an unmanaged window changes the border and the overlay order.
                     self.dirty = true;
-                    if let Some(managed_id) = target {
-                        if active_id != Some(managed_id) {
-                            // A window (or its owned dialog) focused by any route must be selected and
-                            // visible: otherwise focus lands on a parked window or highlights the wrong tile.
-                            self.select(managed_id);
+                    if !was_self {
+                        if !same_as_active {
+                            // A real foreground change to another window after fingers lifted (during
+                            // post-scroll settle or momentum) must win instead of letting `pad_settle`
+                            // revert focus back. Ignore echoes for the self-activated or already-active
+                            // window so active wheel/inertia/settle scrolls are not cancelled.
+                            self.clear_scroll_state();
                         }
-                        let visible = self
-                            .owning(managed_id)
-                            .and_then(|k| self.strips.get(&k))
-                            .is_some_and(|s| s.in_view(managed_id));
-                        if visible {
-                            // Already on screen (e.g. a click on a visible tile): only move the border.
-                            self.dirty = true
-                        } else {
-                            self.action = "scroll";
-                            self.reveal()
+                        if let Some(managed_id) = target {
+                            if active_id != Some(managed_id) {
+                                // A window (or its owned dialog) focused by any route must be selected and
+                                // visible: otherwise focus lands on a parked window or highlights the wrong tile.
+                                self.select(managed_id);
+                            }
+                            if !(same_as_active && scrolling) {
+                                let visible = self
+                                    .owning(managed_id)
+                                    .and_then(|k| self.strips.get(&k))
+                                    .is_some_and(|s| s.in_view(managed_id));
+                                if visible {
+                                    // Already on screen (e.g. a click on a visible tile): only move the border.
+                                    self.dirty = true
+                                } else {
+                                    self.action = "scroll";
+                                    self.reveal()
+                                }
+                            }
                         }
                     }
                 }
@@ -2953,7 +3027,8 @@ impl<B: WindowBackend> Engine<B> {
                 EVENT_OBJECT_HIDE
                     if self.backend.is_visible(id)
                         || self.backend.is_iconic(id)
-                        || self.owning(id).is_none() => {}
+                        || self.owning(id).is_none()
+                        || self.is_parked_or_hidden_by_planor(id) => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         self.drag = None;
@@ -2969,21 +3044,14 @@ impl<B: WindowBackend> Engine<B> {
                             if focused {
                                 if let Some(next) = self.strips[&k].active() {
                                     self.active = k.1.clone();
-                                    self.backend.activate(next);
-                                } else if let Some((other_mon, other_next)) = self
-                                    .displays
-                                    .iter()
-                                    .filter(|m| m.0 != k.1)
-                                    .find_map(|m| {
-                                        let ok = (k.0, m.0.clone());
-                                        self.strips
-                                            .get(&ok)
-                                            .and_then(|s| s.active())
-                                            .map(|w| (m.0.clone(), w))
-                                    })
+                                    self.reveal();
+                                    self.activate_window(next);
+                                } else if let Some((other_mon, other_next)) =
+                                    self.nearest_other_active_monitor(&k)
                                 {
                                     self.active = other_mon;
-                                    self.backend.activate(other_next);
+                                    self.reveal();
+                                    self.activate_window(other_next);
                                 }
                             }
                             self.placed.remove(&id);
@@ -3270,6 +3338,7 @@ pub fn run() -> Result<()> {
         last_foreground: 0,
         null_fg_ticks: 0,
         last_cursor: None,
+        self_activated: None,
         holes_checked: Instant::now(),
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),

@@ -4313,3 +4313,163 @@ fn sim_minimize_only_window_autofocuses_other_monitor_and_handles_empty() {
     assert_eq!(h.engine.strips[&(desk, "MON1".to_string())].active(), None);
     h.stop_clean();
 }
+
+#[test]
+fn sim_wheel_and_inertia_survive_foreground_echo_for_already_active_window() {
+    // Review regression test (#19/#40): a foreground event for the already-active window (or a
+    // self-activated echo) must NOT cancel active wheel settle or touchpad inertia.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    focus(&mut h, 102);
+
+    // Wheel scroll arms `settle`; also arm `inertia` to verify both survive.
+    h.engine.event(Event::Wheel { delta: -120, tilt: false, shift: false, x: 500, y: 500 });
+    h.engine.inertia = Some((false, 300.0, Instant::now(), Some(96.0)));
+    assert!(h.engine.settle.is_some());
+    assert!(h.engine.inertia.is_some());
+
+    let desk = h.engine.desktop.unwrap();
+    let active_id = h.engine.strips[&(desk, "MON0".to_string())].active().unwrap();
+    h.desktop.0.lock().unwrap().foreground = active_id;
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, active_id));
+
+    assert!(
+        h.engine.settle.is_some(),
+        "foreground echo for already-active window must not cancel settle"
+    );
+    assert!(
+        h.engine.inertia.is_some(),
+        "foreground echo for already-active window must not cancel inertia"
+    );
+
+    // Self-activated target echo also preserves scroll state.
+    h.engine.self_activated = Some(103);
+    h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, 103));
+    assert!(h.engine.self_activated.is_none());
+    assert!(h.engine.settle.is_some(), "self-activated echo must not cancel settle");
+    assert!(h.engine.inertia.is_some(), "self-activated echo must not cancel inertia");
+    h.stop_clean();
+}
+
+#[test]
+fn sim_hide_on_parked_focused_window_does_not_remove_or_steal_focus() {
+    // Review regression test (#41): EVENT_OBJECT_HIDE arriving for a window that Planor itself
+    // has parked off-screen (while it is still OS foreground) must not evict it or steal focus.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    // Focus 103 so 101 is clipped/parked off-screen at park_x, while OS foreground still points at 101.
+    focus(&mut h, 103);
+    let desk = h.engine.desktop.unwrap();
+    assert!(!h.engine.strips[&(desk, "MON0".to_string())].in_view(101));
+
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        sim.foreground = 101;
+        sim.windows.get_mut(&101).unwrap().visible = false;
+    }
+    h.engine.event(Event::Window(EVENT_OBJECT_HIDE, 101));
+    h.settle();
+
+    assert!(
+        h.engine.strips[&(desk, "MON0".to_string())].locate(101).is_some(),
+        "EVENT_OBJECT_HIDE on a parked window must not remove it from its strip"
+    );
+    assert_eq!(
+        h.engine.strips[&(desk, "MON0".to_string())].active(),
+        Some(103),
+        "EVENT_OBJECT_HIDE on a parked window must not alter strip focus"
+    );
+    assert_eq!(
+        h.desktop.foreground(),
+        101,
+        "EVENT_OBJECT_HIDE on a parked window must not steal OS focus"
+    );
+
+    // A genuine close (EVENT_OBJECT_DESTROY) still removes the parked window cleanly.
+    h.engine.event(Event::Window(EVENT_OBJECT_DESTROY, 101));
+    h.settle();
+    assert!(
+        h.engine.strips[&(desk, "MON0".to_string())].locate(101).is_none(),
+        "EVENT_OBJECT_DESTROY must still remove a parked window"
+    );
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_only_window_autofocuses_spatially_nearest_monitor_and_reveals() {
+    // Review regression test (#41): when multiple other monitors have active windows, minimizing
+    // the only window on MON0 picks the spatially nearest monitor (MON2 over MON1, even though
+    // MON1 appears earlier in `displays`), updates `last_foreground`, and reveals an off-view target.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
+        // MON0: center (960, 576); MON1: center (3200, 696); MON2: center (-720, 1256).
+        // Distance(MON0, MON2)^2 < Distance(MON0, MON1)^2.
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(201, Rect { x: 1920, y: 0, w: 960, h: 1040 }));
+        sim.add_window(SimWindow::new(301, Rect { x: -1440, y: 0, w: 1440, h: 1200 }));
+        sim.add_window(SimWindow::new(302, Rect { x: -1440, y: 400, w: 1440, h: 1200 }));
+        sim.add_window(SimWindow::new(303, Rect { x: -1440, y: 800, w: 1440, h: 1200 }));
+    });
+    // Select 301 on MON2, then scroll MON2's strip so 301 is off-view/parked.
+    focus(&mut h, 301);
+    let desk = h.engine.desktop.unwrap();
+    {
+        let s = h.engine.strips.get_mut(&(desk, "MON2".to_string())).unwrap();
+        s.scroll(2000);
+        assert!(!s.in_view(301), "301 should be scrolled off-view before minimize");
+    }
+    focus(&mut h, 101);
+    assert_eq!(h.engine.active, "MON0");
+
+    // Minimize 101 (only window on MON0) -> must pick spatially nearest MON2 and reveal 301.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 101));
+    assert_eq!(h.engine.active, "MON2", "must pick spatially nearest monitor MON2 over MON1");
+    assert_eq!(h.engine.last_foreground, 301, "last_foreground must update to autofocused window");
+    assert_eq!(h.desktop.foreground(), 301, "OS foreground must activate MON2's active window 301");
+    assert!(
+        h.engine.strips[&(desk, "MON2".to_string())].in_view(301),
+        "autofocused off-view window 301 on MON2 must be revealed immediately"
+    );
+    h.settle();
+    h.stop_clean();
+}
+
+#[test]
+fn sim_minimize_grouped_window_autofocuses_sibling_then_right_column() {
+    // Review regression test (#41): minimizing an active window in a stacked group autofocuses
+    // its sibling inside the group; minimizing the last member autofocuses the column to the right.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 400, y: 0, w: 800, h: 1000 }));
+        sim.add_window(SimWindow::new(103, Rect { x: 800, y: 0, w: 800, h: 1000 }));
+    });
+    let desk = h.engine.desktop.unwrap();
+    {
+        let s = h.engine.strips.get_mut(&(desk, "MON0".to_string())).unwrap();
+        s.group(102, 101);
+        assert_eq!(s.columns.len(), 2, "101 and 102 should share column 0 with 103 in column 1");
+    }
+    focus(&mut h, 101);
+
+    // Minimize 101 -> autofocuses sibling 102 in the same group.
+    h.desktop.0.lock().unwrap().windows.get_mut(&101).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 101));
+    h.settle();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(102));
+    assert_eq!(h.desktop.foreground(), 102, "minimizing grouped 101 must autofocus sibling 102");
+    assert_eq!(h.engine.last_foreground, 102);
+
+    // Minimize 102 (now alone in column 0) -> autofocuses column 1 to the right (103).
+    h.desktop.0.lock().unwrap().windows.get_mut(&102).unwrap().iconic = true;
+    h.engine.event(Event::Window(EVENT_SYSTEM_MINIMIZESTART, 102));
+    h.settle();
+    assert_eq!(h.engine.strips[&(desk, "MON0".to_string())].active(), Some(103));
+    assert_eq!(h.desktop.foreground(), 103, "minimizing last group member 102 must autofocus right column 103");
+    h.stop_clean();
+}
