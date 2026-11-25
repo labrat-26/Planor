@@ -5298,3 +5298,43 @@ fn ungroup_edge_zones_sit_inside_the_group_column_both_orientations() {
     assert_eq!((a.y, b.y + b.h), (300, 1100));
     assert!(a.h < colp.h / 2 && a.w == 1000 && b.w == 1000);
 }
+
+fn drag_group_beyond_border(rig: Vec<(String, Rect, Rect)>, ids: (isize, isize), mon: &str, horizontal: bool) -> Vec<Vec<isize>> {
+    let (a, b) = ids;
+    let r = if horizontal { Rect { x: 0, y: 0, w: 800, h: 1000 } } else { Rect { x: -1440, y: 0, w: 1440, h: 800 } };
+    let mut h = SimHarness::with_setup(rig, test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(a, r));
+        sim.add_window(SimWindow::new(b, r));
+    });
+    let key = (h.engine.desktop.unwrap(), mon.to_string());
+    h.engine.strips.get_mut(&key).unwrap().group(a, b);
+    h.engine.strips.get_mut(&key).unwrap().columns[0].length = 800;
+    h.engine.dirty = true;
+    h.settle();
+    let area = h.engine.strips[&key].area;
+    let col = crate::daemon::group_column_rect(&h.engine.strips[&key], a, 96);
+    let (cx, cy) = (col.x + col.w / 2, col.y + col.h / 2);
+    h.desktop.0.lock().unwrap().cursor = (cx, cy);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, a));
+    {
+        let mut sim = h.desktop.0.lock().unwrap();
+        if horizontal { sim.windows.get_mut(&a).unwrap().rect.x += 40 } else { sim.windows.get_mut(&a).unwrap().rect.y += 40 }
+        sim.cursor = if horizontal { (area.x + area.w - 20, cy) } else { (cx, area.y + area.h - 20) };
+    }
+    h.engine.tick().unwrap();
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, a));
+    h.settle();
+    let out = h.engine.strips[&key].columns.iter().map(|c| c.members.clone()).collect();
+    h.stop_clean();
+    out
+}
+
+#[test]
+fn sim_drag_grouped_window_beyond_group_border_leaves_group() {
+    // #91 landscape: dropping past the group's shared border (empty space) ungroups onto that side.
+    let cols = drag_group_beyond_border(primary_only_rig(), (101, 102), "MON0", true);
+    assert_eq!(cols, vec![vec![102], vec![101]]);
+    // portrait
+    let cols = drag_group_beyond_border(three_monitor_rig(), (301, 302), "MON2", false);
+    assert_eq!(cols, vec![vec![302], vec![301]]);
+}

@@ -2995,6 +2995,34 @@ impl<B: WindowBackend> Engine<B> {
             self.reveal();
             return;
         }
+        if !flung
+            && dest == d.key
+            && d.ungroup_edge.is_none()
+            && d.target.is_none()
+            && d.mode == planor::Drag::None
+            && let Some(s) = self.strips.get(&dest)
+            && s.locate(id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
+            && !self.backend.key_down(self.hot.drag_stack_modifier_vk)
+        {
+            // #91: a grouped window dropped beyond its group's shared border (the cursor outside the group's
+            // column along the strip axis, over no window) leaves the group onto that side, the way a
+            // fullscreen window sits beside, not inside, the other columns.
+            let col = group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(96));
+            let (pos, lo, hi) = if s.area.horizontal() {
+                (d.point.0, col.x, col.x + col.w)
+            } else {
+                (d.point.1, col.y, col.y + col.h)
+            };
+            if pos < lo || pos >= hi {
+                let s = self.strips.get_mut(&dest).unwrap();
+                s.ungroup_to_side(id, pos >= hi);
+                self.active = dest.1.clone();
+                s.select(id);
+                self.action = "drag_reflow";
+                self.reveal();
+                return;
+            }
+        }
         if let (planor::Drag::Swap, Some(target), true) = (d.mode, d.target, dest == d.key) {
             // Dropped on a window of the same monitor (not in its stack zone): the two exchange places.
             // Within a group this reorders the group.
