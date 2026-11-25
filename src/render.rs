@@ -29,6 +29,8 @@ pub struct Tile {
     /// so it never paints over the taskbar.
     pub bound: Rect,
     pub fullscreen: bool,
+    /// OS frame sampled via the backend for fullscreen tiles (#80); keeps render free of win32 calls.
+    pub os_frame: Option<Rect>,
     pub preview: bool,
     pub id: isize,
     pub rect: Rect,
@@ -2422,7 +2424,7 @@ impl RenderState {
                     }
                     let effective_rect = fullscreen_preserved_rect(
                         tile.rect,
-                        if tile.fullscreen { win32::frame(tile.id) } else { None },
+                        tile.os_frame,
                         tile.fullscreen,
                     );
                     let target = if park_window {
@@ -3840,6 +3842,7 @@ mod tests {
                 hidden: false,
                 bound: Rect { x: 0, y: 0, w: 1920, h: 1080 },
                 fullscreen: false,
+                os_frame: None,
                 preview: false,
                 id: 101,
                 rect: Rect { x: 0, y: 0, w: 960, h: 1080 },

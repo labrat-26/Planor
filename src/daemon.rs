@@ -1668,6 +1668,7 @@ impl<B: WindowBackend> Engine<B> {
                         monitor: name.clone(),
                         pinned: false,
                         fullscreen,
+                        os_frame: if fullscreen { self.backend.frame(id) } else { None },
                         preview,
                         hidden,
                         bound: if fullscreen {
@@ -1700,6 +1701,7 @@ impl<B: WindowBackend> Engine<B> {
                     cookie: saved.cookie,
                     pinned: true,
                     fullscreen: false,
+                    os_frame: None,
                     preview: false,
                     hidden: false,
                     bound: rect,

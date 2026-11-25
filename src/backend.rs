@@ -472,6 +472,8 @@ pub(crate) mod sim {
         pub zones: Vec<render::Zone>,
         pub covered: Vec<isize>,
         pub tile_colors: Vec<(isize, Option<u32>)>,
+        /// `(id, os_frame)` for fullscreen tiles: the backend-sampled frame the renderer preserves (#80).
+        pub os_frames: Vec<(isize, Option<Rect>)>,
     }
 
     pub(crate) struct SimDesktop {
@@ -610,6 +612,7 @@ pub(crate) mod sim {
                     .map(|t| t.id)
                     .collect(),
                 tile_colors: scene.tiles.iter().map(|t| (t.id, t.color)).collect(),
+                os_frames: scene.tiles.iter().filter(|t| t.fullscreen).map(|t| (t.id, t.os_frame)).collect(),
             });
             rejected
         }

@@ -5391,3 +5391,31 @@ fn ungroup_band_suppressed_on_edge_bordering_a_monitor() {
     assert!(!crate::daemon::edge_borders_monitor(&rig, "MON0", false, true));
     assert!(!crate::daemon::edge_borders_monitor(&rig, "MON2", false, false));
 }
+
+#[test]
+fn fullscreen_tile_carries_backend_frame_into_scene_for_preserved_rect() {
+    // #80: the renderer used to call win32::frame per pass; the scene now carries the backend frame.
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        sim.add_window(SimWindow::new(1, Rect { x: 50, y: 80, w: 600, h: 400 }));
+        sim.add_window(SimWindow::new(2, Rect { x: 150, y: 80, w: 600, h: 400 }));
+        sim.foreground = 1;
+    });
+    let id = 1;
+    let odd = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        let w = g.windows.get_mut(&id).unwrap();
+        w.rect = odd;
+        w.caption = false;
+    }
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, id));
+    h.settle();
+    assert_eq!(h.engine.strips[&(1, "MON0".into())].fullscreen_id(), Some(id));
+    let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    let frame = scene.os_frames.iter().find(|(i, _)| *i == id).expect("fullscreen tile in scene").1;
+    assert!(frame.is_some(), "fullscreen tile carries the backend frame");
+    let want = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+    assert_eq!(crate::render::fullscreen_preserved_rect(want, frame, true).h, frame.unwrap().h);
+    // Non-fullscreen tiles never sample a frame.
+    assert!(scene.os_frames.iter().all(|(i, _)| *i == id));
+}
