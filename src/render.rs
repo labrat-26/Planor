@@ -2586,9 +2586,7 @@ impl RenderState {
                             };
                             let draw_start = Instant::now();
                             let drawn = if removed_before_skip {
-                                Err(windows::core::Error::from(
-                                    surface.gpu.GetDeviceRemovedReason().unwrap_err(),
-                                )
+                                Err(surface.gpu.GetDeviceRemovedReason().unwrap_err()
                                 .into())
                             } else {
                                 let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);

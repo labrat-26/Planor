@@ -4821,7 +4821,7 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     let desk = h.engine.desktop.unwrap();
     let key = (desk, "MON0".to_string());
     let area = h.engine.strips[&key].area;
-    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(area);
+    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(area, true);
 
     // Dragging a non-grouped window must NOT show ungroup edge dropboxes.
     focus(&mut h, 101);
@@ -4851,6 +4851,8 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     h.settle();
     assert_eq!(h.engine.strips[&key].columns.len(), 1);
     assert_eq!(h.engine.strips[&key].columns[0].members, vec![102, 101]);
+    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&h.engine.strips[&key], 101, h.engine.hot.stack_peek_px.unwrap_or(96)), true);
+    assert!(left_box.x >= area.x && right_box.x + right_box.w <= area.x + area.w);
 
     {
         let mut sim = h.desktop.0.lock().unwrap();
@@ -4912,8 +4914,8 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     let key_p = (desk_p, "MON2".to_string());
     let area_p = hp.engine.strips[&key_p].area;
     assert!(!area_p.horizontal());
-    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(area_p);
     hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
+    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&hp.engine.strips[&key_p], 301, hp.engine.hot.stack_peek_px.unwrap_or(96)), false);
     hp.engine.dirty = true;
     hp.settle();
 
@@ -5282,4 +5284,17 @@ fn axis_lock_cross_start_towards_a_monitor_picks_up_unlocked() {
     assert!(!picked, "portrait: left has no monitor, stays ignored");
     let (picked, _) = cross_start_drag(101, (0., -30.), false);
     assert!(!picked, "with cross-monitor drags off the cross start is still ignored");
+}
+
+#[test]
+fn ungroup_edge_zones_sit_inside_the_group_column_both_orientations() {
+    // #90: the zones live within the sides of the dragged window's own column, not the monitor edges.
+    let col = Rect { x: 500, y: 0, w: 800, h: 1000 };
+    let (l, t) = crate::daemon::ungroup_edge_zones(col, true);
+    assert_eq!((l.x, t.x + t.w), (500, 1300));
+    assert!(l.w < col.w / 2 && t.w < col.w / 2 && l.h == 1000 && t.h == 1000);
+    let colp = Rect { x: 0, y: 300, w: 1000, h: 800 };
+    let (a, b) = crate::daemon::ungroup_edge_zones(colp, false);
+    assert_eq!((a.y, b.y + b.h), (300, 1100));
+    assert!(a.h < colp.h / 2 && a.w == 1000 && b.w == 1000);
 }

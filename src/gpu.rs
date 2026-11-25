@@ -80,7 +80,7 @@ impl GpuTimer {
             if let Err(ref e) = ok {
                 let code = e.code().0;
                 // DXGI_ERROR_DEVICE_REMOVED / HUNG / RESET: drop all queries bound to the dead device.
-                if matches!(code, -2005270523 | -2005270522 | -2005270521) {
+                if matches!(code, -2005270523..=-2005270521) {
                     self.clear();
                     return;
                 }

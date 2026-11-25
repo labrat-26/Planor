@@ -1604,7 +1604,7 @@ impl<B: WindowBackend> Engine<B> {
             if k == &d.key
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             {
-                let (leading, trailing) = ungroup_edge_zones(s.area);
+                let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
                 zones.push(render::Zone {
                     rect: leading,
                     monitor: k.1.clone(),
@@ -2852,7 +2852,7 @@ impl<B: WindowBackend> Engine<B> {
         let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
         let ungroup_edge = if !held && grouped && k == d.key {
             self.strips.get(&k).and_then(|s| {
-                let (leading, trailing) = ungroup_edge_zones(s.area);
+                let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
                 if contains(leading, p) {
                     Some(false)
                 } else if contains(trailing, p) {
@@ -3466,20 +3466,38 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
         .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
         .collect()
 }
-/// Two side edge dropboxes shown when dragging a window that belongs to a group (#79):
-/// `(leading, trailing)` = `(left, right)` on landscape monitors, `(top, bottom)` on portrait.
-pub(crate) fn ungroup_edge_zones(area: Rect) -> (Rect, Rect) {
-    if area.horizontal() {
-        let band = (area.w / 10).clamp(64, 160).min((area.w / 3).max(1));
+/// The visible part of the column holding `id`, full strip depth: the box the ungroup edge zones sit in
+/// (#90). Falls back to the whole strip area when the window is not in the strip.
+pub(crate) fn group_column_rect(s: &Strip, id: isize, peek: i32) -> Rect {
+    s.rects(peek)
+        .into_iter()
+        .find(|(w, _)| *w == id)
+        .map(|(_, r)| {
+            if s.area.horizontal() {
+                Rect { x: r.x, y: s.area.y, w: r.w, h: s.area.h }
+            } else {
+                Rect { x: s.area.x, y: r.y, w: s.area.w, h: r.h }
+            }
+        })
+        .and_then(|r| clip(r, s.area))
+        .unwrap_or(s.area)
+}
+/// Two side edge dropboxes shown when dragging a window that belongs to a group (#79), placed inside the
+/// sides of the group's own column (#90) instead of at the monitor edges. `column` is that column's visible
+/// rect and `horizontal` the strip's axis; the result is `(leading, trailing)` = `(left, right)` on
+/// landscape, `(top, bottom)` on portrait.
+pub(crate) fn ungroup_edge_zones(column: Rect, horizontal: bool) -> (Rect, Rect) {
+    if horizontal {
+        let band = (column.w / 10).clamp(64, 160).min((column.w / 4).max(1));
         (
-            Rect { x: area.x, y: area.y, w: band, h: area.h },
-            Rect { x: area.x + area.w - band, y: area.y, w: band, h: area.h },
+            Rect { x: column.x, y: column.y, w: band, h: column.h },
+            Rect { x: column.x + column.w - band, y: column.y, w: band, h: column.h },
         )
     } else {
-        let band = (area.h / 10).clamp(64, 160).min((area.h / 3).max(1));
+        let band = (column.h / 10).clamp(64, 160).min((column.h / 4).max(1));
         (
-            Rect { x: area.x, y: area.y, w: area.w, h: band },
-            Rect { x: area.x, y: area.y + area.h - band, w: area.w, h: band },
+            Rect { x: column.x, y: column.y, w: column.w, h: band },
+            Rect { x: column.x, y: column.y + column.h - band, w: column.w, h: band },
         )
     }
 }
