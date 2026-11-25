@@ -5379,3 +5379,15 @@ fn sim_real_click_on_another_window_inside_self_activated_ttl_is_not_swallowed()
     assert_eq!(h.engine.strips[&key].active(), Some(102), "real click within the TTL must select the clicked window");
     h.stop_clean();
 }
+
+#[test]
+fn ungroup_band_suppressed_on_edge_bordering_a_monitor() {
+    // #80: MON0 has MON1 on its right (landscape) and MON2 on its left; MON1 has nothing to its right.
+    let rig = three_monitor_rig();
+    assert!(crate::daemon::edge_borders_monitor(&rig, "MON0", true, true));
+    assert!(crate::daemon::edge_borders_monitor(&rig, "MON0", true, false));
+    assert!(!crate::daemon::edge_borders_monitor(&rig, "MON1", true, true));
+    assert!(crate::daemon::edge_borders_monitor(&rig, "MON1", true, false));
+    assert!(!crate::daemon::edge_borders_monitor(&rig, "MON0", false, true));
+    assert!(!crate::daemon::edge_borders_monitor(&rig, "MON2", false, false));
+}

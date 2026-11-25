@@ -1587,18 +1587,23 @@ impl<B: WindowBackend> Engine<B> {
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             {
                 let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
-                zones.push(render::Zone {
-                    rect: leading,
-                    monitor: k.1.clone(),
-                    color: c,
-                    alpha: if d.ungroup_edge == Some(false) { 0.85 } else { 0.35 },
-                });
-                zones.push(render::Zone {
-                    rect: trailing,
-                    monitor: k.1.clone(),
-                    color: c,
-                    alpha: if d.ungroup_edge == Some(true) { 0.85 } else { 0.35 },
-                });
+                let horizontal = s.area.horizontal();
+                if !edge_borders_monitor(&self.displays, &k.1, horizontal, false) {
+                    zones.push(render::Zone {
+                        rect: leading,
+                        monitor: k.1.clone(),
+                        color: c,
+                        alpha: if d.ungroup_edge == Some(false) { 0.85 } else { 0.35 },
+                    });
+                }
+                if !edge_borders_monitor(&self.displays, &k.1, horizontal, true) {
+                    zones.push(render::Zone {
+                        rect: trailing,
+                        monitor: k.1.clone(),
+                        color: c,
+                        alpha: if d.ungroup_edge == Some(true) { 0.85 } else { 0.35 },
+                    });
+                }
             }
         }
         let stack_peek = hot.stack_peek_px.unwrap_or(96);
@@ -2835,9 +2840,10 @@ impl<B: WindowBackend> Engine<B> {
         let ungroup_edge = if !held && grouped && k == d.key {
             self.strips.get(&k).and_then(|s| {
                 let (leading, trailing) = ungroup_edge_zones(group_column_rect(s, d.id, peek), s.area.horizontal());
-                if contains(leading, p) {
+                let horizontal = s.area.horizontal();
+                if !edge_borders_monitor(&self.displays, &k.1, horizontal, false) && contains(leading, p) {
                     Some(false)
-                } else if contains(trailing, p) {
+                } else if !edge_borders_monitor(&self.displays, &k.1, horizontal, true) && contains(trailing, p) {
                     Some(true)
                 } else {
                     None
@@ -3475,6 +3481,21 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
         })
         .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
         .collect()
+}
+/// #80: true when another monitor lies beyond this strip edge (`trailing` = right/bottom): a drag there is
+/// heading to that monitor, so no ungroup band is offered on that edge.
+pub(crate) fn edge_borders_monitor(
+    displays: &[(String, Rect, Rect)],
+    monitor: &str,
+    horizontal: bool,
+    trailing: bool,
+) -> bool {
+    let bounds: Vec<Rect> = displays.iter().map(|m| m.2).collect();
+    let Some(at) = displays.iter().position(|m| m.0 == monitor) else {
+        return false;
+    };
+    let dir = if trailing { 1 } else { -1 };
+    planor::adjacent(bounds[at], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir }).is_some()
 }
 /// The visible part of the column holding `id`, full strip depth: the box the ungroup edge zones sit in
 /// (#90). Falls back to the whole strip area when the window is not in the strip.
