@@ -1413,6 +1413,22 @@ pub(crate) fn any_on_screen_target_moved(
                 })
         })
 }
+/// Latch whether any frame of `epoch` moved an on-screen window (or had forced/cover placement).
+/// On the final frame of an eased animation the remaining delta can be `<= 2 px`, so deciding
+/// per scene epoch ensures `VerifyState` still runs after animated moves while zero-movement
+/// focus-only scenes skip it.
+pub(crate) fn update_scene_moved(
+    scene_moved: &mut (u64, bool),
+    epoch: u64,
+    frame_moved: bool,
+) -> bool {
+    if scene_moved.0 == epoch {
+        scene_moved.1 |= frame_moved;
+    } else {
+        *scene_moved = (epoch, frame_moved);
+    }
+    scene_moved.1
+}
 fn interpolate(a: Rect, b: Rect, t: f64) -> Rect {
     let f = |a, b| (a as f64 + (b as f64 - a as f64) * t).round() as i32;
     Rect {
@@ -1522,6 +1538,7 @@ struct RenderState {
     settled: i64,
     gesture_recorded: bool,
     parked_checked_epoch: u64,
+    scene_moved: (u64, bool),
     verify: Option<VerifyState>,
     qpc_hz: i64,
     tag: Vec<u16>,
@@ -1568,6 +1585,7 @@ impl RenderState {
             settled: 0,
             gesture_recorded: false,
             parked_checked_epoch: 0,
+            scene_moved: (0, false),
             verify: None,
             qpc_hz,
             tag: wide("Planor.Recovery.Identity"),
@@ -1709,6 +1727,7 @@ impl RenderState {
 
     fn clear_state(&mut self) {
         self.verify = None;
+        self.scene_moved = (0, false);
         self.hosts.clear();
         self.scene = None;
         self.last_settled_scene = None;
@@ -2626,14 +2645,17 @@ impl RenderState {
                 &scratch.placements,
                 win32::frame,
             ) {
-                return (0, 0, false);
+                let scene_moved = update_scene_moved(&mut self.scene_moved, s.epoch, false);
+                return (0, 0, scene_moved);
             }
-            let any_moved = any_on_screen_target_moved(
-                park,
-                !scratch.cover_placements.is_empty(),
-                &scratch.placements,
-                win32::frame,
-            );
+            let frame_moved = s.force_place
+                || any_on_screen_target_moved(
+                    park,
+                    !scratch.cover_placements.is_empty(),
+                    &scratch.placements,
+                    win32::frame,
+                );
+            let scene_moved = update_scene_moved(&mut self.scene_moved, s.epoch, frame_moved);
             let mut retries = 0u32;
             let mut place_ok = false;
             scratch.rejected.clear();
@@ -2774,7 +2796,7 @@ impl RenderState {
                     }
                 }
             }
-            (retries, start.elapsed().as_micros() as u64, any_moved)
+            (retries, start.elapsed().as_micros() as u64, scene_moved)
         }
     }
 
@@ -3623,6 +3645,41 @@ mod tests {
         assert!(any_on_screen_target_moved(park, true, &placements, |id| {
             Some(if id == 1 { on_screen } else { parked })
         }));
+    }
+
+    #[test]
+    fn update_scene_moved_preserves_verify_after_small_final_animated_step_and_skips_focus_only() {
+        let park = 3584;
+        let target = Rect { x: 957, y: 0, w: 957, h: 1140 };
+        let parked = Rect { x: park, y: 0, w: 957, h: 1140 };
+        let placements = vec![(1, target), (2, parked)];
+        let mut scene_moved = (0u64, false);
+
+        // (a) Animated scene (epoch 10): earlier frame moved > 2 px, final eased frame has <= 2 px left.
+        let frame1 = any_on_screen_target_moved(park, false, &placements, |id| {
+            Some(if id == 1 { Rect { x: 0, ..target } } else { parked })
+        });
+        assert!(frame1);
+        assert!(update_scene_moved(&mut scene_moved, 10, frame1));
+
+        let final_frame = any_on_screen_target_moved(park, false, &placements, |id| {
+            Some(if id == 1 { Rect { x: 956, ..target } } else { parked })
+        });
+        assert!(!final_frame, "final eased frame within 1 px has frame_moved=false");
+        assert!(
+            update_scene_moved(&mut scene_moved, 10, final_frame),
+            "scene_moved must stay true for epoch 10 so VerifyState still runs at settle"
+        );
+
+        // (b) Subsequent zero-movement focus-only scene (epoch 11) must NOT schedule VerifyState.
+        let focus_only = any_on_screen_target_moved(park, false, &placements, |id| {
+            Some(if id == 1 { target } else { parked })
+        });
+        assert!(!focus_only);
+        assert!(
+            !update_scene_moved(&mut scene_moved, 11, focus_only),
+            "zero-movement focus-only epoch 11 must not schedule VerifyState"
+        );
     }
 
     #[test]
