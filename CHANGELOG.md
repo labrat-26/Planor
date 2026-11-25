@@ -2,6 +2,15 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.6.1] - 2026-11-24
+
+### Fixed
+- **Focus retention on rightmost window (#19, `N-002`)**: Stop dropping `EVENT_SYSTEM_FOREGROUND` during post-scroll `settle`; preserve `settle`/`inertia`/`wheel_mode` on self-activated and already-active foreground echoes via `self_activated` (250 ms TTL); gate `focus_follows_mouse` on actual cursor movement and idle engine state.
+- **Left app foreground desync (#40)**: Reconcile `Engine::active` / `strip.active()` in idle `Engine::tick()` when OS foreground diverges from Planor's selection (skipping while a Planor activation is in flight).
+- **Minimize autofocus (#41)**: Minimizing a focused window focuses the next window to the right (else left) on the same monitor, or the active window on the spatially nearest connected monitor when no windows remain on that monitor, revealing off-view targets and guarding `EVENT_OBJECT_HIDE` against Planor-parked windows.
+- **Win32 activation reliability**: Attach both foreground and target threads in `win32::activate()` and unlock Windows foreground lock on `SetForegroundWindow == 0` with unassigned VK `0xE8` (plus `VK_MENU` + `0xE8` fallback).
+- **Groups 1–4 stabilization**: GPU recovery, focus highlight, D2D holes, Z-order/UIPI, resize merge-box suppression, 1:1 WGC/DWM peeks, touchpad fling/symmetric scroll, and multi-finger tip-up lift detection.
+
 ## [0.6.0] - 2026-11-22
 
 ### Added
