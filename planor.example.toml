@@ -59,6 +59,8 @@ swipe_drag_accel = 0.15
 swipe_scroll_gain = 4.0
 # Momentum: a fast swipe keeps scrolling after the fingers lift and slows down.
 swipe_inertia = true
+# Automatically focus the window scrolled to when a 3-finger scroll settles (off by default).
+scroll_autofocus = false
 # Fling: a flick faster than swipe_fling_speed (units/s) at lift-off throws the window to the
 # neighbouring screen in that direction. The owner's recorded flicks ran at about 1000-1100 units/s.
 swipe_fling_enabled = true

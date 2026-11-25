@@ -1174,6 +1174,88 @@ pub(crate) fn is_capture_stale(
 /// vertically never triggers per-frame `DeferWindowPos` / `EVENT_OBJECT_LOCATIONCHANGE` storms
 /// (#46) and never emits an extra settle-time move that could drift `y` into another monitor's DPI
 /// band in mixed-DPI layouts.
+fn rect_dist_sq(a: Rect, b: Rect) -> i128 {
+    let dx = if a.x + a.w <= b.x {
+        (b.x - (a.x + a.w)) as i128
+    } else if b.x + b.w <= a.x {
+        (a.x - (b.x + b.w)) as i128
+    } else {
+        0
+    };
+    let dy = if a.y + a.h <= b.y {
+        (b.y - (a.y + a.h)) as i128
+    } else if b.y + b.h <= a.y {
+        (a.y - (b.y + b.h)) as i128
+    } else {
+        0
+    };
+    dx * dx + dy * dy
+}
+
+fn point_rect_dist_sq(px: i64, py: i64, b: Rect) -> i128 {
+    let dx = if px < b.x as i64 {
+        (b.x as i64 - px) as i128
+    } else if px > (b.x + b.w) as i64 {
+        (px - (b.x + b.w) as i64) as i128
+    } else {
+        0
+    };
+    let dy = if py < b.y as i64 {
+        (b.y as i64 - py) as i128
+    } else if py > (b.y + b.h) as i64 {
+        (py - (b.y + b.h) as i64) as i128
+    } else {
+        0
+    };
+    dx * dx + dy * dy
+}
+
+fn is_strictly_nearest_monitor(park_rect: Rect, monitor: Rect, all_monitors: &[Rect]) -> bool {
+    let cx = park_rect.x as i64 + park_rect.w as i64 / 2;
+    let cy = park_rect.y as i64 + park_rect.h as i64 / 2;
+    let my_r = rect_dist_sq(park_rect, monitor);
+    let my_c = point_rect_dist_sq(cx, cy, monitor);
+    all_monitors.iter().filter(|&&other| other != monitor).all(|&other| {
+        rect_dist_sq(park_rect, other) > my_r && point_rect_dist_sq(cx, cy, other) > my_c
+    })
+}
+
+/// Choose a constant off-screen `y` at `x = park_x` for `monitor` so `MonitorFromRect` /
+/// `MONITOR_DEFAULTTONEAREST` resolves to `monitor` instead of a neighboring different-DPI monitor
+/// (e.g. a wider monitor stacked above a narrower laptop screen), preventing `WM_DPICHANGED` storms
+/// on park/unpark (#75, #77, #78).
+pub(crate) fn park_y_for_monitor(
+    park_x: i32,
+    monitor: Rect,
+    bound: Rect,
+    all_monitors: &[Rect],
+) -> i32 {
+    if all_monitors.len() <= 1 {
+        return bound.y;
+    }
+    let ok = |y: i32| {
+        let small = Rect { x: park_x, y, w: 1, h: 1 };
+        let full = Rect { x: park_x, y, w: monitor.w.max(1), h: monitor.h.max(1) };
+        is_strictly_nearest_monitor(small, monitor, all_monitors)
+            && is_strictly_nearest_monitor(full, monitor, all_monitors)
+    };
+    if ok(bound.y) {
+        return bound.y;
+    }
+    for d in [512, 1024, 2048, 4096, 8192, 16384, 32768] {
+        let below = monitor.y.saturating_add(monitor.h).saturating_add(d);
+        if ok(below) {
+            return below;
+        }
+        let above = monitor.y.saturating_sub(monitor.h).saturating_sub(d);
+        if ok(above) {
+            return above;
+        }
+    }
+    bound.y
+}
+
+#[cfg(test)]
 pub(crate) fn parked_target_rect(
     park: i32,
     tile_rect: Rect,
@@ -1181,6 +1263,49 @@ pub(crate) fn parked_target_rect(
     _in_live_motion: bool,
 ) -> Rect {
     Rect { x: park, y: bound.y, ..tile_rect }
+}
+
+pub(crate) fn parked_target_rect_for_monitor(
+    park: i32,
+    tile_rect: Rect,
+    monitor: Rect,
+    bound: Rect,
+    all_monitors: &[Rect],
+) -> Rect {
+    let y = park_y_for_monitor(park, monitor, bound, all_monitors);
+    Rect { x: park, y, ..tile_rect }
+}
+
+/// Preserve a fullscreen window's OS dimensions when they are within 2 px of `tile_rect`
+/// (e.g. Chromium borderless fullscreen at `h - 1`) so parking/unparking does not force a
+/// swapchain resize (#77, #78).
+pub(crate) fn fullscreen_preserved_rect(
+    tile_rect: Rect,
+    cur_frame: Option<Rect>,
+    fullscreen: bool,
+) -> Rect {
+    if fullscreen
+        && let Some(f) = cur_frame
+        && (f.w - tile_rect.w).abs() <= 2
+        && (f.h - tile_rect.h).abs() <= 2
+    {
+        return Rect { w: f.w, h: f.h, ..tile_rect };
+    }
+    tile_rect
+}
+
+/// Only register settled parked proxies (thumbnails or WGC-backed peeks) for mouse-hook click
+/// interception: live-scrolling and open-handoff windows must not swallow clicks (#75), while
+/// settled WGC-backed peeks must remain clickable even if DWM thumbnail registration failed.
+pub(crate) fn should_register_peek_hit(
+    moving: bool,
+    live: bool,
+    open_handoff: bool,
+    park_window: bool,
+    thumb_ok: bool,
+    drew_backing: bool,
+) -> bool {
+    !moving && !live && !open_handoff && park_window && (thumb_ok || drew_backing)
 }
 
 /// Partition on-screen landing placements into `(sync_landing, async_landing)`.
@@ -2060,6 +2185,7 @@ impl RenderState {
             scratch.next.clear();
             let mut any_cover_active = false;
             let mut invalidated_device_gen: Option<u64> = None;
+            let all_monitors: Vec<Rect> = self.hosts.values().map(|h| h.b).collect();
             for (name, host) in &mut self.hosts {
                 if let Some(dead_gen) = invalidated_device_gen
                     && host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen)
@@ -2181,7 +2307,7 @@ impl RenderState {
                     if live_proxy {
                         self.live_ids.insert(tile.id);
                     }
-                    if !moving && tile.fullscreen && tile.rect == host.b {
+                    if !moving && !s.live && tile.fullscreen && tile.rect == host.b {
                         full = true
                     }
                     // Keep the drawing stand-in rect (`rs`) and the parking decision (`tile.rect` vs
@@ -2266,9 +2392,16 @@ impl RenderState {
                                 scratch.thumb_rects.push(c);
                             }
                             scratch.keep.insert(tile.id);
-                            if !moving {
-                                scratch.host_hits.push((c, tile.id))
-                            }
+                        }
+                        if should_register_peek_hit(
+                            moving,
+                            s.live,
+                            open_handoff,
+                            park_window,
+                            thumb_ok,
+                            drew_backing,
+                        ) {
+                            scratch.host_hits.push((c, tile.id));
                         }
                         if let Some(color) = tile.color {
                             // The border follows what is drawn: during motion that is the stand-in (`rs`,
@@ -2285,10 +2418,21 @@ impl RenderState {
                             ))
                         }
                     }
+                    let effective_rect = fullscreen_preserved_rect(
+                        tile.rect,
+                        if tile.fullscreen { win32::frame(tile.id) } else { None },
+                        tile.fullscreen,
+                    );
                     let target = if park_window {
-                        parked_target_rect(park, tile.rect, bound, s.live || moving)
+                        parked_target_rect_for_monitor(
+                            park,
+                            effective_rect,
+                            host.b,
+                            bound,
+                            &all_monitors,
+                        )
                     } else {
-                        tile.rect
+                        effective_rect
                     };
                     if !tile.pinned {
                         scratch.placements.push((tile.id, target));
@@ -3720,5 +3864,70 @@ mod tests {
         assert_eq!(scene.duration, 180);
         assert_eq!(scene.holes.as_ref(), new_holes.as_ref());
         assert_eq!(scene.tiles[0].color, None);
+    }
+
+    #[test]
+    fn park_y_for_monitor_keeps_mixed_dpi_stacked_monitor_nearest() {
+        // Exact 3-monitor layout from #75 / #77 / #78 Win+W bundles:
+        // Monitor 0 (laptop, 150% DPI) sits below wider Monitor 1 (120% DPI), with Portrait Monitor 2 on left.
+        let mon0 = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+        let mon1 = Rect { x: 0, y: -1440, w: 2560, h: 1440 };
+        let mon2 = Rect { x: -1440, y: -1859, w: 1440, h: 2560 };
+        let all = [mon0, mon1, mon2];
+        let park_x = 2560 + 1024; // 3584
+
+        // Monitor 0 at y=0 would be closer to Monitor 1 (dx=1024 vs 1664); park_y_for_monitor must shift y
+        // so Monitor 0 is strictly nearest (avoiding WM_DPICHANGED on park/unpark).
+        let y0 = super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &all);
+        assert_ne!(y0, 0, "mon0 must not park at y=0 where mon1 is closer");
+        let r0 = Rect { x: park_x, y: y0, w: 1920, h: 1140 };
+        assert!(super::is_strictly_nearest_monitor(r0, mon0, &all));
+
+        // Monitor 1 is already strictly nearest at its own bound.y (-1440).
+        let y1 = super::park_y_for_monitor(park_x, mon1, Rect { x: 0, y: -1440, w: 2560, h: 1392 }, &all);
+        assert_eq!(y1, -1440);
+
+        // Monitor 2 (portrait on left) must also get a y where mon2 is strictly nearest.
+        let y2 = super::park_y_for_monitor(park_x, mon2, Rect { x: -1440, y: -1859, w: 1440, h: 2512 }, &all);
+        let r2 = Rect { x: park_x, y: y2, w: 1440, h: 2512 };
+        assert!(super::is_strictly_nearest_monitor(r2, mon2, &all));
+
+        // Single-monitor fast path always keeps bound.y.
+        assert_eq!(
+            super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &[mon0]),
+            0
+        );
+    }
+
+    #[test]
+    fn fullscreen_preserved_rect_keeps_near_exact_size_without_resize() {
+        let want = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+        // Chromium borderless fullscreen often reports h - 1 (1199); preserve it when fullscreen.
+        let cur = Rect { x: 0, y: 0, w: 1920, h: 1199 };
+        assert_eq!(
+            super::fullscreen_preserved_rect(want, Some(cur), true),
+            Rect { x: 0, y: 0, w: 1920, h: 1199 }
+        );
+        // Non-fullscreen tiles always snap to exact tile_rect.
+        assert_eq!(super::fullscreen_preserved_rect(want, Some(cur), false), want);
+        // Larger size deltas (>2 px) are still corrected.
+        let smaller = Rect { x: 0, y: 0, w: 1920, h: 1140 };
+        assert_eq!(super::fullscreen_preserved_rect(want, Some(smaller), true), want);
+    }
+
+    #[test]
+    fn should_register_peek_hit_only_for_settled_parked_proxies() {
+        // Settled parked thumbnail -> clickable peek.
+        assert!(super::should_register_peek_hit(false, false, false, true, true, false));
+        // Settled parked WGC-only fallback (thumb_ok == false) -> still clickable peek (#75).
+        assert!(super::should_register_peek_hit(false, false, false, true, false, true));
+        // Live touchpad scroll -> must NOT intercept clicks as peeks (#75).
+        assert!(!super::should_register_peek_hit(false, true, false, true, true, true));
+        // Open/close handoff -> must NOT intercept clicks as peeks.
+        assert!(!super::should_register_peek_hit(false, false, true, true, true, true));
+        // Moving animation -> must NOT intercept clicks.
+        assert!(!super::should_register_peek_hit(true, false, false, true, true, true));
+        // On-screen unparked window -> never a peek hit.
+        assert!(!super::should_register_peek_hit(false, false, false, false, true, false));
     }
 }
