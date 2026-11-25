@@ -1197,9 +1197,9 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
             lock_released = true;
         }
         if let Some(p) = h.engine.pad.as_ref() {
-            // The lock's axis is that of the strip the carried window came from (it may have been dropped on
-            // another monitor by an earlier carry of the same gesture).
-            let home_horizontal = p.home.as_ref().and_then(|k| h.engine.strips.get(k)).map_or(horizontal_strip, |st| st.area.horizontal());
+            // The lock follows the axis of the strip under the cursor (#84): that of the home strip until the carry
+            // reaches a monitor of the other orientation, where the lock switches (and its line is re-based).
+            let home_horizontal = p.lock.unwrap_or_else(|| p.home.as_ref().and_then(|k| h.engine.strips.get(k)).map_or(horizontal_strip, |st| st.area.horizontal()));
             let cur = if home_horizontal { p.cursor.1 } else { p.cursor.0 };
             // Over the window's own group column the lock is off by design (members are reordered across the axis).
             let in_group = h.engine.strips.get(&key).is_some_and(|st| {
@@ -1211,8 +1211,9 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
             // (A grab point outside the monitors is clamped into them by the first move; that is not the lock.)
             let (lo, hi) = if home_horizontal { (p.limits.1, p.limits.3) } else { (p.limits.0, p.limits.2) };
             let base = carry_cross.unwrap_or(cur);
-            if before.is_some() && p.lock.is_some() && !in_group && base >= lo && base <= hi {
-                assert!((cur - base).abs() < 1e-6, "{mon}: carry left the strip axis ({base} -> {cur})");
+            if before.is_some() && before == p.lock && !in_group && base >= lo && base <= hi {
+                // Easing back onto the line (#84) is allowed; moving away from it across the strip axis is not.
+                assert!((cur - p.line).abs() <= (base - p.line).abs() + 1e-6, "{mon}: carry left the strip axis ({base} -> {cur}, line {})", p.line);
             }
             carry_cross = Some(cur);
         } else {
@@ -5562,6 +5563,69 @@ fn axis_lock_cross_travel_over_the_group_column_does_not_count_towards_release()
     let p = h.engine.pad.as_ref().expect("carrying");
     assert!(p.lock.is_some(), "lock must survive cross travel over the group column");
     assert!(p.cross.abs() < 7. * 12., "cross travel over the column is not accumulated: {}", p.cross);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+fn cross_cfg() -> toml::Value {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
+    cfg
+}
+
+#[test]
+fn axis_lock_stays_released_on_a_monitor_of_the_other_orientation_and_re_engages_at_home() {
+    // (#84) After the lock releases, the home axis means nothing on a monitor whose strip runs the other
+    // way: it stays released there (landscape->portrait and portrait->landscape). Back on the home
+    // monitor it re-engages with the home axis on the line the cursor re-entered at.
+    // portrait MON2 (301) -> landscape MON0 -> back.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 301);
+    let mut steps = vec![(0., 5.); 4];
+    steps.extend(vec![(10., 0.); 20]);
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying");
+    assert!(p.lock.is_none() && p.cursor.0 > 0., "released and on landscape MON0: {:?} {:?}", p.lock, p.cursor);
+    assert_eq!(p.home_lock, Some(false), "home axis is the portrait (vertical) strip");
+    let mut back = steps.clone();
+    back.extend(vec![(-10., 0.); 40]);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 301);
+    feed_steps(&mut h, &back);
+    let p = h.engine.pad.as_ref().expect("carrying");
+    assert!(p.cursor.0 < 0., "back on portrait MON2: {:?}", p.cursor);
+    assert_eq!(p.lock, Some(false), "lock re-engages on the home monitor");
+    let line = p.line;
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let _ = line;
+
+    // landscape MON0 (101) carried along its own axis onto portrait MON2 (nothing lies across MON0's axis,
+    // so the lock is never released): the lock switches to the portrait strip's (vertical) axis.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let mut steps = vec![(5., 0.); 4];
+    steps.extend(vec![(-10., 0.); 60]);
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying");
+    assert_eq!(p.home_lock, Some(true));
+    assert!(p.cursor.0 < 0., "carried onto portrait MON2: {:?}", p.cursor);
+    assert_eq!(p.lock, Some(false), "lock follows the portrait strip axis: cross {} line {} cur {:?} lh {}", p.cross, p.line, p.cursor, p.left_home);
+    assert_eq!(p.line, p.cursor.0, "pick-up line re-based onto the destination monitor");
+    // ...and back on the landscape home monitor the home axis returns.
+    let mut back = steps.clone();
+    back.extend(vec![(10., 0.); 80]);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    feed_steps(&mut h, &back);
+    let p = h.engine.pad.as_ref().expect("carrying");
+    assert!(p.cursor.0 > 0., "back on MON0: {:?}", p.cursor);
+    assert_eq!(p.lock, Some(true), "home lock returns on the home monitor");
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
 }

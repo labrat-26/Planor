@@ -345,6 +345,10 @@ pub(crate) struct PadDrag {
     pub home: Option<Key>,
     /// Net finger travel across the lock axis since pick-up.
     pub cross: f64,
+    /// The lock this drag started with (kept when it is released), so it can re-engage on the home monitor.
+    pub home_lock: Option<bool>,
+    /// The cursor has been on another monitor since the lock was released or pick-up.
+    pub left_home: bool,
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
@@ -2505,6 +2509,8 @@ impl<B: WindowBackend> Engine<B> {
             line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
             home,
             cross: 0.,
+            home_lock: lock,
+            left_home: false,
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
@@ -2532,6 +2538,18 @@ impl<B: WindowBackend> Engine<B> {
             let name = &p.home.as_ref()?.1;
             self.displays.iter().find(|m| &m.0 == name).map(|m| m.2)
         });
+        // Every monitor with the axis of its strip (true = horizontal) on the home strip's desktop.
+        let monitor_axes = self
+            .pad
+            .as_ref()
+            .and_then(|p| p.home.as_ref())
+            .map(|k| {
+                self.displays
+                    .iter()
+                    .filter_map(|m| self.strips.get(&(k.0, m.0.clone())).map(|s| (m.2, s.area.horizontal())))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let Some(p) = self.pad.as_mut() else { return };
         let inside = |r: Rect, c: (f64, f64)| c.0 >= r.x as f64 && c.0 < (r.x + r.w) as f64 && c.1 >= r.y as f64 && c.1 < (r.y + r.h) as f64;
         let in_column = column.is_some_and(|r| inside(r, p.cursor));
@@ -2545,7 +2563,9 @@ impl<B: WindowBackend> Engine<B> {
                 p.cross += if h { raw_dy } else { raw_dx };
             }
             let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
-            let monitor_that_way = home_bounds.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
+            // Whether another monitor lies that way is judged from the monitor the cursor is on now.
+            let at = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, _)| *r).or(home_bounds);
+            let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
             if cross_ok && monitor_that_way && p.cross.abs() >= relax {
                 p.lock = None;
             } else if !in_column {
@@ -2576,6 +2596,31 @@ impl<B: WindowBackend> Engine<B> {
             let c = if h { &mut p.cursor.1 } else { &mut p.cursor.0 };
             let gap = p.line - *c;
             *c = if gap.abs() < 2. { p.line } else { *c + gap * 0.5 };
+        }
+        // Carried onto a monitor whose strip runs the other way, the home axis means nothing: the lock
+        // follows the destination strip's axis (a released lock stays released). Back on the home monitor
+        // the home lock re-engages on the line the cursor re-entered at (#84). Same-orientation monitors
+        // keep the lock and its line.
+        if let (Some(hl), Some(hb)) = (p.home_lock, home_bounds) {
+            let here = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, h)| (*r, *h));
+            if let Some((r, dest_h)) = here {
+                let line_for = |h: bool| if h { p.cursor.1 } else { p.cursor.0 };
+                if r == hb {
+                    if p.left_home {
+                        p.left_home = false;
+                        p.lock = Some(hl);
+                        p.line = line_for(hl);
+                        p.cross = 0.;
+                    }
+                } else {
+                    p.left_home = true;
+                    if p.lock.is_some() && p.lock != Some(dest_h) {
+                        p.lock = Some(dest_h);
+                        p.line = line_for(dest_h);
+                        p.cross = 0.;
+                    }
+                }
+            }
         }
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
