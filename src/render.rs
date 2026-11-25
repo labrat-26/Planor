@@ -1740,9 +1740,11 @@ impl RenderState {
     }
 
     fn invalidate_device_generation(&mut self, dead_gen: u64) {
-        reset_shared_devices_if_generation(dead_gen);
+        let reset = reset_shared_devices_if_generation(dead_gen);
+        diag::trace(format!("DEVICE invalidate gen={dead_gen} shared_reset={reset} hosts={}", self.hosts.len()));
         for host in self.hosts.values_mut() {
             if host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen) {
+                diag::trace(format!("DEVICE host {:?} surface dropped (gen {dead_gen}); overlay blank until recovery", host.b));
                 host.invalidate_gpu(&mut self.next_host_gen);
             }
         }
@@ -2602,6 +2604,7 @@ impl RenderState {
                                 let dead_gen = surface.device_gen;
                                 let picture_only = !device_lost && !scratch.backing.is_empty();
                                 if device_lost {
+                                    diag::trace(format!("DEVICE draw failed gen={dead_gen} err={e} removed={removed_reason:?}"));
                                     reset_shared_devices_if_generation(dead_gen);
                                     invalidated_device_gen = Some(dead_gen);
                                     host.invalidate_gpu(&mut self.next_host_gen);
