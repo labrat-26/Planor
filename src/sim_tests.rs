@@ -1130,25 +1130,36 @@ fn start_offset(frames: &[Vec<(f64, f64)>], horizontal_strip: bool, deadzone: f6
             }
         }
     }
-    // A finger-count change after the start (a finger lifting and landing again) ends the gesture and the
-    // recogniser begins a new one, so the first start no longer decides pick-up for the recording.
-    let last4 = frames.iter().rposition(|f| f.len() == 4)?;
-    if frames[first..=last4].iter().any(|f| f.len() != 4) {
-        return None;
-    }
+    // Only the FIRST four-finger segment decides pick-up (#84): once the dead zone was crossed, 3<->4 finger
+    // changes keep the recogniser's verdict (drag or rejected start) until the hand drops below three
+    // fingers. A count change BEFORE the crossing restarts the recogniser (start unknown, `None`), and so
+    // does a later four-finger touch after the hand dropped below three (a second gesture).
     let o = c(&frames[first]);
-    for f in &frames[first + 1..] {
+    let mut crossed = None;
+    for (i, f) in frames.iter().enumerate().skip(first + 1) {
         if f.len() != 4 {
-            return None;
+            if crossed.is_none() {
+                return None;
+            }
+            if f.len() < 3 {
+                // The first segment is over: a later four-finger touch is a different gesture.
+                return if frames[i..].iter().any(|g| g.len() == 4) { None } else { crossed };
+            }
+            continue;
         }
-        let p = c(f);
-        let (dx, dy) = (p.0 - o.0, p.1 - o.1);
-        if dx.hypot(dy) >= deadzone {
-            return Some(if horizontal_strip { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) });
+        if crossed.is_none() {
+            let p = c(f);
+            let (dx, dy) = (p.0 - o.0, p.1 - o.1);
+            if dx.hypot(dy) >= deadzone {
+                crossed = Some(if horizontal_strip { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) });
+            }
         }
     }
-    None
+    crossed
 }
+
+/// Four-finger recordings whose pick-up could not be checked (start unknown); reported and capped.
+static SKIPPED_PICKUP_CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
     let (fingers, dx, dy) = describe_gesture(frames);
