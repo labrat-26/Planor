@@ -2,6 +2,16 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.7.0] - 2026-11-25
+
+### Added
+- **Disable 3-finger scroll autofocus by default (#76)**: Added `[touchpad] scroll_autofocus = false` in `planor.example.toml` (exposed in Settings UI) and `HotCfg`; 3-finger scroll/fling no longer steals focus unless enabled, while wheel and hotkey focus remain unchanged.
+- **In-group drag edge dropboxes (#79)**: Dragging a window from a group displays side dropboxes (left/right on landscape, top/bottom on portrait) that ungroup the window onto that closest side of the screen (`ungroup_edge_zones` + `Strip::ungroup_to_side`).
+
+### Fixed
+- **Window off-position & inconsistent click-through (#75)**: Gate peek hit-registration on settled, non-live, parked tiles (`should_register_peek_hit`) and choose park `y` strictly nearest to the owning monitor (`park_y_for_monitor`) to avoid `WM_DPICHANGED` storms on mixed-DPI stacked monitors.
+- **Video playback & fullscreen video during scroll (#77, #78)**: Preserve fullscreen OS frame size within 2 px (`fullscreen_preserved_rect`) to avoid swapchain resizes on park/unpark and skip fullscreen cover during live scroll.
+
 ## [0.6.2] - 2026-11-24
 
 ### Fixed
