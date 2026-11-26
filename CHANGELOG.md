@@ -2,6 +2,15 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.9.1] - 2026-11-26
+
+### Fixed
+- **Axis lock after a cross-axis start (#94)**: a drag that started across the axis now re-locks when the cursor returns to the home monitor.
+- **`live::bounded_rejection_backoff` flake (#96)**: the test pins `spawn_on_cursor_monitor = false`, so the second window always lands in the first one's strip regardless of where the real cursor is.
+
+### Tests
+- Portrait stacked-pair case for `ungroup_bands`, sim harness uses `DEFAULT_STACK_PEEK`, `replay_on` keys its MON2 skip on the start direction and reports the skipped count, `claim_focus` doc updated.
+
 ## [0.9.0] - 2026-11-26
 
 ### Fixed
