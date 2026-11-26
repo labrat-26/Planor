@@ -115,6 +115,13 @@ impl Sentinel {
         });
         let hwnd = rx.recv().unwrap();
         assert_ne!(hwnd, 0);
+        // A new visible window normally becomes the foreground window, and every scenario relies on that (#93).
+        // Under a foreground lock (another process received the last input inside the lock timeout, as with a
+        // keep-awake helper that injects input) Windows leaves it behind the foreground window instead. Restore
+        // the normal outcome rather than letting an unrelated window cover the sentinels and keep the focus.
+        if unsafe { GetForegroundWindow() } as isize != hwnd {
+            let _ = take_foreground(hwnd);
+        }
         Self {
             hwnd,
             join: Some(join),
@@ -707,6 +714,31 @@ fn fg() -> isize {
 fn fg_index(ws: &[Sentinel]) -> Option<usize> {
     let f = fg();
     ws.iter().position(|w| w.hwnd == f)
+}
+/// Make `h` (a window of this test process) the foreground window even when another process holds the
+/// foreground lock (issue #93: after Modern Standby the live foreground-lock timeout was infinite, so newly created
+/// sentinels never got focus and a plain `SetForegroundWindow` from the test was refused). An Alt tap with the
+/// unassigned VK 0xE8 in between (no menu bar opens; same technique as the daemon's `win32::activate`) counts as
+/// user input and lifts the lock. Up to 4 tries, 100 ms apart; returns whether `h` is the foreground window.
+fn take_foreground(h: isize) -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+    for attempt in 0..4 {
+        unsafe {
+            keybd_event(VK_MENU as u8, 0, 0, 0);
+            keybd_event(0xE8, 0, 0, 0);
+            keybd_event(0xE8, 0, KEYEVENTF_KEYUP, 0);
+            keybd_event(VK_MENU as u8, 0, KEYEVENTF_KEYUP, 0);
+            SetForegroundWindow(h as _);
+            BringWindowToTop(h as _);
+        }
+        if fg() == h {
+            return true;
+        }
+        if attempt < 3 {
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    fg() == h
 }
 /// Physical monitor list: (monitor rect, work rect), primary first. Orientation: w>=h landscape.
 fn mons() -> Vec<(RECT, RECT)> {

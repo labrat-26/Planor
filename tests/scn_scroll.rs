@@ -144,8 +144,7 @@ fn describe_window(h: isize) -> String {
 /// if every try fails.
 fn claim_focus(ws: &[Sentinel], target: usize) {
     for attempt in 1..=4 {
-        press(&[], ALT);
-        unsafe { SetForegroundWindow(ws[target].hwnd as _) };
+        let _ = take_foreground(ws[target].hwnd);
         if fg_index(ws).is_some() {
             return;
         }
@@ -175,11 +174,13 @@ fn open_primary(mon: Rect4) -> Capture {
 /// Sentinel 2 (the last window) is focused at start; sentinel 0 is parked until something scrolls it into view.
 /// If another application holds the foreground (common right after the daemon starts), focus is claimed first.
 fn focus_to(ws: &[Sentinel], target: usize) {
+    let mut claimed = false;
     for _ in 0..2 * N {
         let cur = match fg_index(ws) {
             Some(c) => c,
             None => {
                 claim_focus(ws, target);
+                claimed = true;
                 fg_index(ws).expect("claim_focus returned with a sentinel focused")
             }
         };
@@ -187,6 +188,11 @@ fn focus_to(ws: &[Sentinel], target: usize) {
             break;
         }
         press(&[ALT], if cur < target { RIGHT } else { LEFT });
+    }
+    if claimed && fg_index(ws) == Some(target) {
+        // Claiming focus changes the foreground directly; the daemon scrolls the strip to the new focus
+        // asynchronously (#93), so give that scroll the same settle time `press` gives a hotkey step.
+        let _ = eventually(2, || reachable(&ws[target]));
     }
     assert_eq!(
         fg_index(ws),
