@@ -716,8 +716,8 @@ fn fg_index(ws: &[Sentinel]) -> Option<usize> {
     ws.iter().position(|w| w.hwnd == f)
 }
 /// Make `h` (a window of this test process) the foreground window even when another process holds the
-/// foreground lock (issue #93: after Modern Standby the live foreground-lock timeout was infinite, so newly created
-/// sentinels never got focus and a plain `SetForegroundWindow` from the test was refused). An Alt tap with the
+/// foreground lock (issue #93: newly created sentinels were left behind an unrelated foreground window and a plain
+/// `SetForegroundWindow` from the test was refused). An Alt tap with the
 /// unassigned VK 0xE8 in between (no menu bar opens; same technique as the daemon's `win32::activate`) counts as
 /// user input and lifts the lock. Up to 4 tries, 100 ms apart; returns whether `h` is the foreground window.
 fn take_foreground(h: isize) -> bool {
