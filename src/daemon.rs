@@ -2485,7 +2485,8 @@ impl<B: WindowBackend> Engine<B> {
         );
         let now = Instant::now();
         let home = self.owning(id);
-        let lock = self.gesture.axis_lock.filter(|_| !self.gesture.started_cross).and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
+        let home_lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
+        let lock = home_lock.filter(|_| !self.gesture.started_cross);
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2502,7 +2503,7 @@ impl<B: WindowBackend> Engine<B> {
             line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
             home,
             cross: 0.,
-            home_lock: lock,
+            home_lock,
             left_home: false,
         });
     }
