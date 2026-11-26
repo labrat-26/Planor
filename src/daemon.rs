@@ -310,6 +310,9 @@ pub(crate) struct DragSession {
     pub lbutton_up_since: Option<Instant>,
     pub visuals_cleared: bool,
     pub movesize_exit_since: Option<Instant>,
+    /// #67: `WindowBackend::last_release` sequence when the drag began. A newer release is this drag's button-up,
+    /// and its hook point is the drop position (the cursor may have moved on before the next tick sampled it).
+    pub release_seq: u64,
 }
 /// A window being carried by a four-finger touchpad swipe. Planor moves it itself (there is no OS move
 /// loop without a mouse button) and moves the cursor with it, so the normal drag logic sees an
@@ -2097,6 +2100,7 @@ impl<B: WindowBackend> Engine<B> {
                 lbutton_up_since: None,
                 visuals_cleared: false,
                 movesize_exit_since: None,
+                release_seq: self.backend.last_release().0,
             });
             self.dirty = true
         } else if self.drag.take().is_some() {
@@ -2775,7 +2779,15 @@ impl<B: WindowBackend> Engine<B> {
             }
             return;
         }
-        let p = self.backend.cursor_pos();
+        // #67: once the button is up, the drop point is where the low-level hook saw it come up, not where the
+        // cursor is now (the tick runs up to ~32 ms later, and a flick keeps moving). Without a hook sample (test
+        // mode, missed try_lock) the current cursor is the fallback, as before.
+        let release = self.backend.last_release();
+        let p = if !d.pad_drag && release.0 > d.release_seq && !self.backend.primary_button_down() {
+            release.1
+        } else {
+            self.backend.cursor_pos()
+        };
         let elapsed = d.sampled.elapsed().as_secs_f64().max(0.001);
         let velocity = ((p.0 - d.point.0) as f64).hypot((p.1 - d.point.1) as f64) / elapsed;
         d.point = p;

@@ -3859,15 +3859,40 @@ fn cancelled_latched_resize_preserves_frame_mismatched_slot_and_neighbour() {
 
 #[test]
 fn release_before_first_motion_tick_transfers_to_sampled_monitor() {
-    exercise_release_tick(false);
+    exercise_release_tick(false, HookRelease::None);
 }
 
 #[test]
 fn release_tick_retargets_from_previous_window_and_stacks_on_final_target() {
-    exercise_release_tick(true);
+    exercise_release_tick(true, HookRelease::None);
 }
 
-fn exercise_release_tick(sample_previous: bool) {
+/// #67: the cursor moves on (back onto the previous target) after the button came up and before the first
+/// release tick. The drop must use the hook's button-up point, so the window still stacks on the final target.
+#[test]
+fn release_point_from_hook_wins_over_cursor_moved_before_tick() {
+    exercise_release_tick(false, HookRelease::ThenDrift);
+    exercise_release_tick(true, HookRelease::ThenDrift);
+}
+
+/// #67: a button release recorded before the drag began (an earlier click) is not this drag's drop point; the
+/// release tick samples the cursor as before.
+#[test]
+fn release_point_from_before_drag_is_ignored() {
+    exercise_release_tick(true, HookRelease::Stale);
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum HookRelease {
+    /// No low-level hook sample (test mode): the release tick samples the cursor.
+    None,
+    /// The hook records the release on the final target, then the cursor drifts to the previous target.
+    ThenDrift,
+    /// The hook's only sample predates the drag and points at the previous target.
+    Stale,
+}
+
+fn exercise_release_tick(sample_previous: bool, hook: HookRelease) {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
     to_start(&mut h, "MON0");
     to_start(&mut h, "MON1");
@@ -3876,12 +3901,17 @@ fn exercise_release_tick(sample_previous: bool) {
     let key = (1, "MON1".to_owned());
     let (_, _, zone) = crate::daemon::drop_zones(&h.engine.strips[&key], 96, h.engine.hot.stack_zone_percent, 101)
         .into_iter().find(|z| z.0 == 201).unwrap();
+    let a_centre = (a.x + a.w / 2, a.y + a.h / 2);
+    let zone_centre = (zone.x + zone.w / 2, zone.y + zone.h / 2);
+    if hook == HookRelease::Stale {
+        h.desktop.0.lock().unwrap().release = (7, a_centre);
+    }
     h.desktop.0.lock().unwrap().keys_down.insert(0x01);
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
     {
         let mut g = h.desktop.0.lock().unwrap();
         g.windows.get_mut(&101).unwrap().rect.x += 50;
-        g.cursor = (a.x + a.w / 2, a.y + a.h / 2);
+        g.cursor = a_centre;
     }
     if sample_previous {
         h.engine.tick().unwrap();
@@ -3890,9 +3920,21 @@ fn exercise_release_tick(sample_previous: bool) {
     {
         let mut g = h.desktop.0.lock().unwrap();
         g.keys_down.remove(&0x01);
-        g.cursor = (zone.x + zone.w / 2, zone.y + zone.h / 2);
+        g.cursor = zone_centre;
+        if hook == HookRelease::ThenDrift {
+            g.release = (g.release.0 + 1, zone_centre);
+            g.cursor = a_centre;
+        }
     }
     h.engine.tick().unwrap();
+    if hook == HookRelease::ThenDrift {
+        let d = h.engine.drag.as_ref().unwrap();
+        assert_eq!(
+            (d.target, d.destination.as_ref().map(|k| k.1.as_str())),
+            (Some(201), Some("MON1")),
+            "release tick must aim at the hook's button-up point {zone_centre:?}, not the drifted cursor {a_centre:?}"
+        );
+    }
     {
         let mut g = h.desktop.0.lock().unwrap();
         g.cursor = (home.x, home.y);
