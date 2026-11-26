@@ -395,6 +395,9 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub last_cursor: Option<(i32, i32)>,
     pub self_activated: Option<(isize, Instant)>,
     pub holes_checked: Instant,
+    /// #67: an unmanaged occluder (Task Manager, a rule-ignored app) moved or resized: re-read holes on the next
+    /// tick instead of waiting for the 200 ms poll, so the overlay stops painting over it sooner.
+    pub holes_stale: bool,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
     pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
@@ -477,6 +480,7 @@ impl<B: WindowBackend> Engine<B> {
             last_cursor: None,
             self_activated: None,
             holes_checked: Instant::now(),
+            holes_stale: false,
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
             scroll_samples: Default::default(),
@@ -1230,7 +1234,7 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         // An unmanaged window appearing, moving or closing changes what the overlay must stay clear of.
-        if self.holes_checked.elapsed() >= Duration::from_millis(200) {
+        if std::mem::take(&mut self.holes_stale) || self.holes_checked.elapsed() >= Duration::from_millis(200) {
             self.holes_checked = Instant::now();
             if self.holes() != self.last_holes {
                 self.dirty = true
@@ -3397,7 +3401,16 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 EVENT_SYSTEM_MOVESIZESTART => self.drag_begin(id),
                 EVENT_SYSTEM_MOVESIZEEND => self.drag_end(id),
-                EVENT_OBJECT_LOCATIONCHANGE => self.window_state(id),
+                EVENT_OBJECT_LOCATIONCHANGE => {
+                    if self.owning(id).is_none()
+                        && !self.pinned.contains(&id)
+                        && !self.holes_stale
+                        && self.backend.overlay_occluder(id)
+                    {
+                        self.holes_stale = true;
+                    }
+                    self.window_state(id)
+                }
                 _ => (),
             },
             Event::Wheel { delta, tilt, shift, x, y } => self.wheel(delta, tilt, shift, (x, y)),
@@ -3742,6 +3755,7 @@ pub fn run() -> Result<()> {
         last_cursor: None,
         self_activated: None,
         holes_checked: Instant::now(),
+        holes_stale: false,
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),
         scroll_samples: Default::default(),

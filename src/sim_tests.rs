@@ -1460,6 +1460,39 @@ fn non_dirtying_contacts_do_not_leave_stale_input_timestamp_on_both_orientations
     }
 }
 
+/// #67: an unmanaged occluder moving (EVENT_OBJECT_LOCATIONCHANGE) refreshes the overlay holes on the next tick,
+/// not after the 200 ms poll; a managed window's location change does not force a holes re-read.
+#[test]
+fn unmanaged_window_move_refreshes_holes_on_next_tick() {
+    let hole_rect = Rect { x: 200, y: 200, w: 300, h: 300 };
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+        three_per_monitor(sim);
+        let mut ext = SimWindow::new(901, hole_rect);
+        ext.elevated = true;
+        sim.add_window(ext);
+    });
+    focus(&mut h, 101);
+    let holes = |h: &SimHarness| h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert!(holes(&h).contains(&hole_rect), "initial scene includes hole {hole_rect:?}");
+
+    // A managed window moving does not mark holes stale.
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, 101));
+    assert!(!h.engine.holes_stale, "a managed window's move must not force a holes re-read");
+
+    // The unmanaged window moves right after a holes poll: without the event the cache would hold for 200 ms.
+    let moved = Rect { x: 260, y: 220, w: 360, h: 300 };
+    h.desktop.0.lock().unwrap().windows.get_mut(&901).unwrap().rect = moved;
+    h.engine.holes_checked = Instant::now();
+    h.engine.event(Event::Window(EVENT_OBJECT_LOCATIONCHANGE, 901));
+    assert!(h.engine.holes_stale, "an unmanaged occluder's move marks holes stale");
+    h.engine.tick().unwrap();
+    h.settle();
+    let now = holes(&h);
+    assert!(now.contains(&moved), "next tick must carve the moved occluder {moved:?}: {now:?}");
+    assert!(!now.contains(&hole_rect), "stale hole {hole_rect:?} must be gone: {now:?}");
+    assert!(!h.engine.holes_stale);
+    h.stop_clean();
+}
 #[test]
 fn live_scroll_caches_holes_during_continuous_motion_on_both_orientations() {
     for (mon, id, hole_id, hole_rect, p0, p1, p2) in [
