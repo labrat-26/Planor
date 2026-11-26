@@ -261,7 +261,7 @@ fn record_visible_frame_state(
     last_draw_valid: &mut bool,
     fills: &[(Rect, u32, f32)],
     cards: &[CardDraw],
-    lines: &[(Rect, u32)],
+    lines: &[BorderLine],
     holes: &[Rect],
     width: f32,
     radius: f32,
@@ -418,11 +418,26 @@ struct CardDraw {
     spinner_alpha: f32,
     spinner_angle_rad: f32,
 }
+/// A tile border: its rectangle, colour, and the area it may paint in (#36), all in host-local pixels. The clip is
+/// the tile's `bound` (the strip's work area): a grouped window's border is drawn around the whole window, which
+/// can reach past the work area into the taskbar while it glides or while its deck is taller than the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BorderLine {
+    pub rect: Rect,
+    pub color: u32,
+    pub clip: Rect,
+}
+/// #36: host-local border for `drawn` (screen) clipped to `bound` (screen): the rectangle is kept whole so the
+/// rounded corners stay where they are, and only the part inside `bound` is painted.
+pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> BorderLine {
+    let local = |r: Rect| Rect { x: r.x - host.x, y: r.y - host.y, ..r };
+    BorderLine { rect: local(drawn), color, clip: local(bound) }
+}
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
     fills: Vec<(Rect, u32, u32)>,
     cards: Vec<(Rect, u32, u32)>,
-    lines: Vec<(Rect, u32)>,
+    lines: Vec<BorderLine>,
     holes: Vec<Rect>,
     width_bits: u32,
     radius_bits: u32,
@@ -433,7 +448,7 @@ impl DrawSig {
         &self,
         fills: &[(Rect, u32, f32)],
         cards: &[CardDraw],
-        lines: &[(Rect, u32)],
+        lines: &[BorderLine],
         holes: &[Rect],
         width: f32,
         radius: f32,
@@ -462,7 +477,7 @@ impl DrawSig {
         &mut self,
         fills: &[(Rect, u32, f32)],
         cards: &[CardDraw],
-        lines: &[(Rect, u32)],
+        lines: &[BorderLine],
         holes: &[Rect],
         width: f32,
         radius: f32,
@@ -502,7 +517,7 @@ struct DrawFrame<'a> {
     pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
     fills: &'a [(Rect, u32, f32)],
     cards: &'a [CardDraw],
-    lines: &'a [(Rect, u32)],
+    lines: &'a [BorderLine],
     holes: &'a [Rect],
     width: f32,
     radius: f32,
@@ -707,7 +722,17 @@ impl Surface {
                         }
                     }
                 }
-                for &(r, c) in *lines {
+                for &BorderLine { rect: r, color: c, clip } in *lines {
+                    // #36: never paint a border outside its strip's work area (over the taskbar).
+                    rt.PushAxisAlignedClip(
+                        &D2D_RECT_F {
+                            left: (clip.x + off.x) as f32,
+                            top: (clip.y + off.y) as f32,
+                            right: (clip.x + clip.w + off.x) as f32,
+                            bottom: (clip.y + clip.h + off.y) as f32,
+                        },
+                        D2D1_ANTIALIAS_MODE_ALIASED,
+                    );
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -727,7 +752,8 @@ impl Surface {
                         brush,
                         width,
                         None,
-                    )
+                    );
+                    rt.PopAxisAlignedClip();
                 }
                 if !holes.is_empty() {
                     // Punch holes for unmanaged windows / system flyouts directly in Direct2D
@@ -1643,7 +1669,7 @@ struct FrameScratch {
     rejected: Vec<Placement>,
     actuals: Vec<Placement>,
     verify_items: Vec<Placement>,
-    lines: Vec<(Rect, u32)>,
+    lines: Vec<BorderLine>,
     backing: Vec<(Rect, Rect, ID2D1Bitmap1)>,
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
@@ -2286,14 +2312,7 @@ impl RenderState {
                                     spinner_angle_rad: vis.spinner_angle_rad,
                                 });
                                 if let Some(color) = tile.color {
-                                    scratch.lines.push((
-                                        Rect {
-                                            x: tile.rect.x - host.b.x,
-                                            y: tile.rect.y - host.b.y,
-                                            ..tile.rect
-                                        },
-                                        color,
-                                    ));
+                                    scratch.lines.push(border_line(tile.rect, color, bound, host.b));
                                 }
                                 scratch.cover_placements.push((tile.id, tile.rect));
                                 if t >= 1. && !s.live {
@@ -2432,14 +2451,7 @@ impl RenderState {
                             // the window's real size gliding), not the in-between rectangle, which grew or
                             // shrank ahead of the picture ("border grows faster than the animation").
                             let b = if proxy { rs } else { r };
-                            scratch.lines.push((
-                                Rect {
-                                    x: b.x - host.b.x,
-                                    y: b.y - host.b.y,
-                                    ..b
-                                },
-                                color,
-                            ))
+                            scratch.lines.push(border_line(b, color, bound, host.b))
                         }
                     }
                     let effective_rect = fullscreen_preserved_rect(
@@ -3536,7 +3548,7 @@ mod tests {
     #[test]
     fn draw_sig_detects_hole_changes() {
         let mut sig = DrawSig::default();
-        let lines = vec![(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6)];
+        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
         let holes_a = vec![Rect { x: 100, y: 100, w: 400, h: 400 }];
         let holes_b = vec![Rect { x: 150, y: 120, w: 400, h: 400 }];
         sig.set_from(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0);
@@ -3571,7 +3583,7 @@ mod tests {
         let mut want_visible = false;
         let mut valid = false;
         let mut rgn_holes = vec![Rect { x: 10, y: 10, w: 100, h: 100 }];
-        let lines = vec![(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6)];
+        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
 
         // Scene with pictures (settled peek/clipped proxy) updates `last_draw` even while keeping
         // `last_draw_valid == false`, so idle recovery restores the latest border.
@@ -3714,6 +3726,57 @@ mod tests {
         );
         assert_eq!(p_grow_rs, p_grow_f, "portrait parked tile at t>=1 must draw at final rect");
         assert!(p_grow_park, "portrait growing tile overflowing bottom bound must park");
+    }
+
+    /// #36 (bundle 000644700 "in groups, the taskbar should remain in the foreground"): a 2-window group on a
+    /// 2560x1440 monitor with a 48 px bottom taskbar (work area h=1392). The bottom peek's tile rect is
+    /// (0,1364,1277,1364). v0.6.0 drew its WGC picture at the whole rect, so 76 px of it (y 1364..1440) covered
+    /// the taskbar. Every drawn part of a peek must stay inside the strip's work area.
+    #[test]
+    fn group_peek_never_draws_over_the_taskbar() {
+        let host = Rect { x: 0, y: 0, w: 2560, h: 1440 };
+        let bound = Rect { x: 0, y: 0, w: 2560, h: 1392 };
+        let peek = Rect { x: 0, y: 1364, w: 1277, h: 1364 };
+        let inside = |r: Rect| r.x >= bound.x && r.y >= bound.y && r.x + r.w <= bound.x + bound.w && r.y + r.h <= bound.y + bound.h;
+        // Settled (t = 1), moving (t = 0.5 from one row lower) and mid-roll from above the strip.
+        for (origin, t, moving) in [(peek, 1.0, false), (Rect { y: 1500, ..peek }, 0.5, true), (Rect { y: 1000, ..peek }, 0.5, true), (Rect { y: -1300, ..peek }, 0.3, true)] {
+            let current = interpolate(origin, peek, t);
+            let (rs, clip, park, proxy) =
+                tile_stand_in_and_park(origin, current, peek, bound, t, false, moving, false, false, true, false);
+            assert!(park && proxy, "a group peek is parked and drawn as a proxy");
+            // A stand-in entirely outside the strip draws nothing; the settled sliver is always visible.
+            let Some(clip) = clip else {
+                assert!(moving, "the settled peek sliver is visible");
+                continue;
+            };
+            assert!(inside(clip), "peek clip {clip:?} (stand-in {rs:?}) must lie inside the work area {bound:?}");
+            // WGC backing (any source size, with or without a live thumbnail) and the DWM thumbnail use the same
+            // 1:1 blit: the destination never leaves the clip.
+            for src in [(1277, 1364), (1293, 1372), (2576, 1400), (600, 400)] {
+                for thumb_ok in [false, true] {
+                    if let Some((_, dst)) = choose_proxy_backing(rs, clip, src, (8, 0), (host.x, host.y), moving, false, false, thumb_ok) {
+                        assert!(inside(dst), "backing dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                    }
+                }
+                if let Some((_, dst)) = proxy_blit_rects(rs, clip, src, (8, 0), (host.x, host.y)) {
+                    assert!(inside(dst), "thumbnail dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                }
+            }
+        }
+    }
+
+    /// #36: a border is clipped to the tile's bound, so a coloured window gliding past the work area (a group roll,
+    /// a deck taller than the strip) never strokes over the taskbar; host-local coordinates on a negative-origin host.
+    #[test]
+    fn border_lines_carry_the_work_area_clip() {
+        let host = Rect { x: -1440, y: -419, w: 1440, h: 2560 };
+        let bound = Rect { x: -1440, y: -419, w: 1440, h: 2512 };
+        let drawn = Rect { x: -1440, y: 2000, w: 1440, h: 1200 };
+        let l = border_line(drawn, 0xA855F7, bound, host);
+        assert_eq!(l.rect, Rect { x: 0, y: 2419, w: 1440, h: 1200 });
+        assert_eq!(l.clip, Rect { x: 0, y: 0, w: 1440, h: 2512 });
+        assert_eq!(l.color, 0xA855F7);
+        assert!(l.clip.y + l.clip.h <= host.h - 48, "the clip stops at the taskbar");
     }
 
     #[test]
