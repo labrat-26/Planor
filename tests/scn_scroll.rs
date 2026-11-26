@@ -139,9 +139,10 @@ fn describe_window(h: isize) -> String {
     format!("hwnd 0x{h:x} class '{class}' pid {pid} process '{process}'")
 }
 
-/// Make sentinel `target` the foreground window: tap Alt (so Windows lets this process take focus), then
-/// SetForegroundWindow on it. Up to 4 tries, 400 ms apart. Panics with the foreground window's class/process
-/// if every try fails.
+/// Make sentinel `target` the foreground window via `take_foreground` (which itself makes up to 4
+/// Alt+VK 0xE8 + `SetForegroundWindow` attempts, 100 ms apart). Retries up to 4 rounds, 400 ms apart,
+/// returning as soon as any sentinel is foreground; panics with the foreground window's class/process
+/// if every round fails.
 fn claim_focus(ws: &[Sentinel], target: usize) {
     for attempt in 1..=4 {
         let _ = take_foreground(ws[target].hwnd);

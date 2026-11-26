@@ -254,6 +254,11 @@ fn bounded_rejection_backoff() {
         .replace(
             "[diagnostics]\nenabled = false",
             "[diagnostics]\nenabled = true",
+        )
+        // Keep `_second` on the primary monitor with `w` even if the real cursor sits elsewhere (#96).
+        .replace(
+            "spawn_on_cursor_monitor = true",
+            "spawn_on_cursor_monitor = false",
         );
     fs::write(p, config).unwrap();
     d.start();

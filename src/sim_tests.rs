@@ -228,7 +228,7 @@ impl SimHarness {
         }
         let stack_peek = self.engine.cfg["layout"]["stack_peek_px"]
             .as_integer()
-            .unwrap_or(28) as i32;
+            .unwrap_or(crate::daemon::DEFAULT_STACK_PEEK as i64) as i32;
         for ((desk, _), strip) in &self.engine.strips {
             if Some(*desk) != self.engine.desktop {
                 continue;
@@ -1151,7 +1151,7 @@ fn start_offset(frames: &[Vec<(f64, f64)>], horizontal_strip: bool, deadzone: f6
             let p = c(f);
             let (dx, dy) = (p.0 - o.0, p.1 - o.1);
             if dx.hypot(dy) >= deadzone {
-                crossed = Some(if horizontal_strip { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) });
+                crossed = Some(if horizontal_strip { (dx, dy) } else { (dy, dx) });
             }
         }
     }
@@ -1252,16 +1252,16 @@ fn feed_replay_frames(h: &mut SimHarness, key: &(u128, String), mon: &str, horiz
 }
 
 /// Verdict for a four-finger gesture: pick-up must follow the axis lock, and nothing may be left over.
-fn judge_four_fingers(what: &str, mon: &str, dx: f64, frames: &[Vec<(f64, f64)>], offset: Option<(f64, f64)>, o: &Observed) -> String {
+fn judge_four_fingers(what: &str, mon: &str, frames: &[Vec<(f64, f64)>], offset: Option<(f64, f64)>, o: &Observed) -> String {
     // Drag axis lock (#83, on by default): a start with 1.5x more travel along the strip axis than
     // across it picks the window up; one with 1.5x more across is ignored.
     match offset {
-        Some((along_t, cross_t)) if along_t >= 1.5 * cross_t => {
-            assert!(o.dragged, "{what}: a start along the strip ({along_t:.0} vs {cross_t:.0}) must pick the window up");
+        Some((along, cross)) if along.abs() >= 1.5 * cross.abs() => {
+            assert!(o.dragged, "{what}: a start along the strip ({:.0} vs {:.0}) must pick the window up", along.abs(), cross.abs());
         }
         // (MON0 lies right of the portrait MON2, so a rightward cross start there is a carry to it, #87.)
-        Some((along_t, cross_t)) if cross_t >= 1.5 * along_t && !(mon == "MON2" && dx > 0.) => {
-            assert!(!o.dragged, "{what}: a start across the strip ({along_t:.0} vs {cross_t:.0}) must be ignored; counts {:?}", frames.iter().take(12).map(|f| (f.len(), f.iter().map(|p| p.0).sum::<f64>() as i64 / f.len().max(1) as i64, f.iter().map(|p| p.1).sum::<f64>() as i64 / f.len().max(1) as i64)).collect::<Vec<_>>());
+        Some((along, cross)) if cross.abs() >= 1.5 * along.abs() && !(mon == "MON2" && cross > 0.) => {
+            assert!(!o.dragged, "{what}: a start across the strip ({:.0} vs {:.0}) must be ignored; counts {:?}", along.abs(), cross.abs(), frames.iter().take(12).map(|f| (f.len(), f.iter().map(|p| p.0).sum::<f64>() as i64 / f.len().max(1) as i64, f.iter().map(|p| p.1).sum::<f64>() as i64 / f.len().max(1) as i64)).collect::<Vec<_>>());
         }
         Some(_) => {}
         None => {
@@ -1329,7 +1329,7 @@ fn replay_on(frames: &[Vec<(f64, f64)>], mon: &str) -> String {
         }
         4 => {
             assert!(!o.moved || !h.engine.pad_scrolling, "{what}: no stray scroll after the drop");
-            judge_four_fingers(&what, mon, dx, frames, offset, &o)
+            judge_four_fingers(&what, mon, frames, offset, &o)
         }
         _ => format!("{what}: no gesture for this many fingers"),
     }
@@ -1393,9 +1393,11 @@ fn recorded_gestures_replay_on_landscape_and_portrait() {
     assert!(carried[0] >= 5 && carried[1] >= 5, "too few carried drags (landscape, portrait): {carried:?}");
     let skipped = SKIPPED_PICKUP_CHECKS.load(std::sync::atomic::Ordering::Relaxed);
     let releases = LOCK_RELEASES.load(std::sync::atomic::Ordering::Relaxed);
-    report.push(format!("pick-up unchecked (start unknown) for {skipped} four-finger replays; {releases} lock releases (none on MON0, asserted per replay)"));
+    const MAX_SKIPPED_PICKUP_CHECKS: usize = 40;
+    report.push(format!("pick-up unchecked (start unknown) for {skipped}/{MAX_SKIPPED_PICKUP_CHECKS} four-finger replays; {releases} lock releases (none on MON0, asserted per replay)"));
+    eprintln!("recorded_gestures_replay: skipped_pickup_checks={skipped}/{MAX_SKIPPED_PICKUP_CHECKS} lock_releases={releases} carried={carried:?}");
     // Skipped checks are capped so a parser change cannot silently stop verifying pick-up.
-    assert!(skipped <= 40, "too many four-finger replays with an unchecked pick-up: {skipped}");
+    assert!(skipped <= MAX_SKIPPED_PICKUP_CHECKS, "too many four-finger replays with an unchecked pick-up: {skipped}");
     println!("{}", report.join("\n"));
 }
 
@@ -4912,7 +4914,7 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     h.settle();
     assert_eq!(h.engine.strips[&key].columns.len(), 1);
     assert_eq!(h.engine.strips[&key].columns[0].members, vec![102, 101]);
-    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&h.engine.strips[&key], 101, h.engine.hot.stack_peek_px.unwrap_or(96)), true);
+    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&h.engine.strips[&key], 101, h.engine.hot.stack_peek_px.unwrap_or(crate::daemon::DEFAULT_STACK_PEEK)), true);
     assert!(left_box.x >= area.x && right_box.x + right_box.w <= area.x + area.w);
 
     {
@@ -4976,7 +4978,7 @@ fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
     let area_p = hp.engine.strips[&key_p].area;
     assert!(!area_p.horizontal());
     hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
-    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&hp.engine.strips[&key_p], 301, hp.engine.hot.stack_peek_px.unwrap_or(96)), false);
+    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(crate::daemon::group_column_rect(&hp.engine.strips[&key_p], 301, hp.engine.hot.stack_peek_px.unwrap_or(crate::daemon::DEFAULT_STACK_PEEK)), false);
     hp.engine.dirty = true;
     hp.settle();
 
@@ -5482,6 +5484,31 @@ fn ungroup_bands_only_hidden_at_strip_edge_bordering_a_monitor() {
 }
 
 #[test]
+fn ungroup_bands_portrait_stacked_pair() {
+    // Two portrait monitors stacked vertically: TOP above BOT.
+    let top_area = Rect { x: 0, y: 0, w: 1440, h: 2512 };
+    let top_bounds = Rect { x: 0, y: 0, w: 1440, h: 2560 };
+    let bot_area = Rect { x: 0, y: 2560, w: 1440, h: 2512 };
+    let bot_bounds = Rect { x: 0, y: 2560, w: 1440, h: 2560 };
+    let rig = vec![
+        ("TOP".into(), top_area, top_bounds),
+        ("BOT".into(), bot_area, bot_bounds),
+    ];
+    let mid = Rect { x: top_area.x, y: 600, w: top_area.w, h: 900 };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, mid);
+    assert!(l.is_some() && t.is_some(), "middle portrait row keeps both bands");
+    let bot_flush = Rect { x: top_area.x, y: top_area.y + top_area.h - 900, w: top_area.w, h: 900 };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, bot_flush);
+    assert!(l.is_some() && t.is_none(), "bottom edge next to BOT suppressed");
+    let top_flush = Rect { x: top_area.x, y: top_area.y, w: top_area.w, h: 900 };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, top_flush);
+    assert!(l.is_some() && t.is_some(), "top edge with no monitor above keeps both bands");
+    let bot_top_flush = Rect { x: bot_area.x, y: bot_area.y, w: bot_area.w, h: 900 };
+    let (l, t) = crate::daemon::ungroup_bands(&rig, "BOT", bot_area, bot_top_flush);
+    assert!(l.is_none() && t.is_some(), "top edge on BOT next to TOP suppressed");
+}
+
+#[test]
 fn fullscreen_tile_carries_backend_frame_into_scene_for_preserved_rect() {
     // #80: the renderer used to call win32::frame per pass; the scene now carries the backend frame.
     let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
@@ -5708,6 +5735,36 @@ fn axis_lock_stays_released_on_a_monitor_of_the_other_orientation_and_re_engages
     let p = h.engine.pad.as_ref().expect("carrying");
     assert!(p.cursor.0 > 0., "back on MON0: {:?}", p.cursor);
     assert_eq!(p.lock, Some(true), "home lock returns on the home monitor");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+#[test]
+fn axis_lock_cross_start_re_engages_on_return_home() {
+    // (#94) A four-finger drag started across the axis towards an adjacent monitor begins unlocked
+    // (`lock = None`), carries onto that monitor (`left_home = true`), and re-engages the home axis
+    // lock when the cursor returns to the home monitor.
+    // Portrait MON2 (301) -> cross-axis rightward start towards landscape MON0 -> back onto MON2.
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 301);
+    let mut steps = vec![(10., 0.); 25];
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying after cross-axis start");
+    assert_eq!(p.home_lock, Some(false), "home_lock preserves portrait home axis");
+    assert!(p.lock.is_none(), "cross-axis start stays unlocked on destination MON0");
+    assert!(p.cursor.0 > 0. && p.left_home, "carried onto MON0: cur={:?} lh={}", p.cursor, p.left_home);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+
+    // Now carry back onto portrait MON2: home lock must re-engage at the re-entry line.
+    steps.extend(vec![(-10., 0.); 45]);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
+    focus(&mut h, 301);
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying back on MON2");
+    assert!(p.cursor.0 < 0. && !p.left_home, "back on portrait MON2: cur={:?} lh={}", p.cursor, p.left_home);
+    assert_eq!(p.lock, Some(false), "home axis lock re-engages on returning to MON2");
+    assert_eq!(p.line, p.cursor.0, "re-engaged lock line anchored at re-entry x");
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
 }
