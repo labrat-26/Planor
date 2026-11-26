@@ -2,6 +2,22 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.9.0] - 2026-11-26
+
+### Fixed
+- **Axis-lock regressions (#87, #88, #89, #92)**: a clearly cross-axis four-finger start toward a side that has a monitor now picks the window up with the carry unlocked, so windows can be pushed up/down on landscape strips, moved back and to other screens, and regrouped. Cross-axis starts toward a side with no monitor are still ignored.
+- **Ungroup edge zones (#90)**: the zones sit within the sides of the dragged window's own group column (render and hit-test share `ungroup_bands`). A band is hidden only at a strip edge that borders another monitor (#80).
+- **Leave group by dragging past its border (#91)**: a grouped window dropped beyond its group's border over no window or zone leaves the group onto that side.
+- **Tray-hide ghost tile and injected keys (#71)**: windows that hide themselves off view are removed. The low-level keyboard hook ignores injected keys, so Win+W from key-injecting tools is ignored.
+- **Axis-lock follow-ups (#84)**: easing back onto the pick-up line, cross travel over the group column no longer counts toward release, and the lock switches axis on a monitor of the other orientation and re-engages at home.
+- **#80**: fullscreen tiles carry the backend frame, `park_y_for_monitor` clamps to Win32 limits, and `scroll_hold_fg` resume is pinned.
+
+### Diagnostics
+- `DEVICE ...` trace lines for overlay GPU device loss (#86, black left window). The cause was not found, so the issue stays open.
+
+### Tests
+- The live harness takes foreground under a Windows foreground lock (#93). Full suite 65/65.
+
 ## [0.8.0] - 2026-11-25
 
 ### Added
