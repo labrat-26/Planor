@@ -284,6 +284,27 @@ fn clear_hidden_frame_state(
     *last_draw_valid = false;
     desired_rgn_holes.clear();
 }
+/// #67: turn the last settled scene into a static frame again. Windows are already where they belong, so it
+/// repaints (and re-requests the WGC capture sources `Host::invalidate_gpu` dropped) without animating, going
+/// live, or forcing OS placement.
+pub(crate) fn idle_scene_from_settled(mut settled: Scene) -> Scene {
+    settled.action = "idle";
+    settled.duration = 0;
+    settled.live = false;
+    settled.force_place = false;
+    settled.zones.clear();
+    settled
+}
+/// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
+/// device, a scene already queued, or no settled scene means there is nothing to do.
+pub(crate) fn needs_scene_rearm(
+    recovered: bool,
+    dead_gen: Option<u64>,
+    scene_queued: bool,
+    has_settled: bool,
+) -> bool {
+    recovered && dead_gen.is_none() && !scene_queued && has_settled
+}
 fn should_draw_on_recovery(want_visible: bool, last_draw: &DrawSig) -> bool {
     want_visible && !last_draw.is_empty()
 }
@@ -1820,6 +1841,7 @@ impl RenderState {
     unsafe fn try_recover_surfaces(&mut self) {
         let now = Instant::now();
         let mut dead_gen: Option<u64> = None;
+        let mut recovered = false;
         for host in self.hosts.values_mut() {
             if host.surface.is_some() || !host.recovery.can_try(now) {
                 continue;
@@ -1868,6 +1890,7 @@ impl RenderState {
                                 }
                                 host.last_draw_valid = true;
                                 host.surface = Some(s);
+                                recovered = true;
                                 if was_outage {
                                     diag::trace("overlay GPU surface recovered");
                                 }
@@ -1886,6 +1909,7 @@ impl RenderState {
                         // Do not reset backoff until a full normal draw succeeds, and never show
                         // a hidden host (e.g. fullscreen or #48 unfocused) during idle recovery.
                         host.surface = Some(s);
+                        recovered = true;
                     }
                 }
                 Err(e) => {
@@ -1894,6 +1918,15 @@ impl RenderState {
                     }
                 }
             }
+        }
+        if needs_scene_rearm(recovered, dead_gen, self.scene.is_some(), self.last_settled_scene.is_some())
+            && let Some(settled) = self.last_settled_scene.take()
+        {
+            // #67: the static frame above is drawn with `pictures: &[]`, so a settled peek stays blank after a
+            // device loss until some new scene arrives — an idle desktop may never send one. Re-arm the settled
+            // scene so `build_all_hosts` re-requests the capture sources for its tiles.
+            diag::trace("overlay recovery: re-arming settled scene to rebuild WGC pictures");
+            self.scene = Some(idle_scene_from_settled(settled));
         }
         if let Some(dg) = dead_gen {
             self.invalidate_device_generation(dg);
@@ -3145,12 +3178,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         apply_overlay_update(active, holes, &colors);
                     } else if let Some(mut settled) = state.last_settled_scene.take().filter(|s| s.epoch == seq) {
                         apply_overlay_update(&mut settled, holes, &colors);
-                        settled.action = "idle";
-                        settled.duration = 0;
-                        settled.live = false;
-                        settled.force_place = false;
-                        settled.zones.clear();
-                        state.scene = Some(settled);
+                        state.scene = Some(idle_scene_from_settled(settled));
                     }
                 }
                 Ok(Message::Scene(mut s)) => {
@@ -3953,6 +3981,65 @@ mod tests {
         assert_eq!(scene.tiles[0].color, None);
     }
 
+
+    /// #67: after a GPU device loss the settled scene is re-armed so the WGC pictures the device took with it are
+    /// rebuilt; it must come back as a static idle frame (no motion, no zones, no forced placement) while keeping
+    /// its epoch, tiles and monitors, so nothing moves and the daemon's epoch accounting still matches.
+    #[test]
+    fn recovery_rearms_the_settled_scene_as_a_static_idle_frame() {
+        let settled = Scene {
+            epoch: 77,
+            input: None,
+            input_qpc_us: None,
+            diagnostics: false,
+            monitors: std::sync::Arc::from([("MON0".to_owned(), Rect { x: 0, y: 0, w: 1920, h: 1140 }, Rect { x: 0, y: 0, w: 1920, h: 1200 })]),
+            tiles: vec![Tile {
+                pinned: false,
+                hidden: false,
+                bound: Rect { x: 0, y: 0, w: 1920, h: 1140 },
+                fullscreen: false,
+                os_frame: None,
+                preview: true,
+                id: 101,
+                rect: Rect { x: 0, y: 0, w: 28, h: 1140 },
+                monitor: "MON0".into(),
+                color: Some(0x3B82F6),
+                cookie: 3,
+                cover: None,
+            }],
+            duration: 180,
+            spring: true,
+            width: 2.0,
+            radius: 8.0,
+            holes: std::sync::Arc::from([]),
+            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5 }],
+            action: "open_close",
+            live: true,
+            force_place: true,
+        };
+        let idle = idle_scene_from_settled(settled);
+        assert_eq!(idle.action, "idle");
+        assert_eq!(idle.duration, 0, "a re-armed scene must not animate");
+        assert!(!idle.live, "a re-armed scene must not park the real windows");
+        assert!(!idle.force_place, "windows are already placed; no OS move");
+        assert!(idle.zones.is_empty(), "stale drop zones must not be redrawn");
+        assert_eq!(idle.epoch, 77, "the epoch must survive so the daemon's overlay patches still match");
+        assert_eq!(idle.tiles.len(), 1);
+        assert_eq!(idle.tiles[0].id, 101);
+        assert_eq!(idle.tiles[0].cookie, 3, "the capture source key (id, cookie) must survive to be re-requested");
+        assert_eq!(idle.monitors.len(), 1);
+    }
+
+    /// #67: the re-arm only happens once a surface actually came back, the device is not still dead, no scene is
+    /// already queued, and there is a settled scene to replay.
+    #[test]
+    fn scene_rearm_after_recovery_is_gated() {
+        assert!(needs_scene_rearm(true, None, false, true));
+        assert!(!needs_scene_rearm(false, None, false, true), "no surface recovered: nothing was dropped");
+        assert!(!needs_scene_rearm(true, Some(4), false, true), "device still dead: re-arming would just fail again");
+        assert!(!needs_scene_rearm(true, None, true, true), "a newer scene is already queued");
+        assert!(!needs_scene_rearm(true, None, false, false), "nothing settled to replay");
+    }
     #[test]
     fn park_y_for_monitor_keeps_mixed_dpi_stacked_monitor_nearest() {
         // Exact 3-monitor layout from #75 / #77 / #78 Win+W bundles:
