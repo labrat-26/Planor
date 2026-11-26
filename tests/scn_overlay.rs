@@ -92,6 +92,10 @@ impl Cover {
             // keep the border off the screen is the cut-out under test, not the "unmanaged window has
             // focus" rule.
             ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+            // Shown without activation it lands just above the foreground window, which is a sentinel when the
+            // desktop is as the scenario expects. Under a foreground lock (#93) the foreground window is an unrelated
+            // one covering the primary, so put the cover on top of the non-topmost windows, still without activating it.
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             tx.send(hwnd as isize).unwrap();
             let mut m = MSG::default();
             while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
@@ -154,6 +158,13 @@ fn border_never_paints_over_an_unmanaged_window() {
                 worst = worst.max(border);
             }
         }
+        // Desktop duplication only delivers a frame when something on screen changes. Once the border is cut out
+        // nothing does, unless unrelated windows happen to animate (#93: on a quiet desktop only one covered frame
+        // ever arrived). Repaint the cover so the next frame is a fresh composition of the whole desktop.
+        unsafe {
+            RedrawWindow(cover.hwnd as _, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+        }
+        thread::sleep(Duration::from_millis(50));
     }
     assert!(checked >= 3, "no captured frame showed the cover window; cannot judge the border");
     assert_eq!(

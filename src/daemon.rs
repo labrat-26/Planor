@@ -345,6 +345,10 @@ pub(crate) struct PadDrag {
     pub home: Option<Key>,
     /// Net finger travel across the lock axis since pick-up.
     pub cross: f64,
+    /// The lock this drag started with (kept when it is released), so it can re-engage on the home monitor.
+    pub home_lock: Option<bool>,
+    /// The cursor has been on another monitor since the lock was released or pick-up.
+    pub left_home: bool,
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
@@ -542,33 +546,15 @@ impl<B: WindowBackend> Engine<B> {
         self.self_activated
             .is_some_and(|(_, at)| at.elapsed() <= Duration::from_millis(250))
     }
-    /// True when `id` is currently parked off-screen, orphaned, hidden in a group, or on another
-    /// virtual desktop by Planor itself, so a transient `EVENT_OBJECT_HIDE` must not remove it
-    /// or move focus away from it (a real close still removes it via `EVENT_OBJECT_DESTROY`).
-    fn is_parked_or_hidden_by_planor(&self, id: isize) -> bool {
+    /// #71: the narrow check used by the HIDE guard. Only an orphan or a window sitting at the park position is
+    /// Planor's own doing; a window that is merely off-view / on another desktop yet neither visible nor iconic hid
+    /// itself (tray-hide) and must not stay behind as a ghost tile.
+    fn is_parked_by_planor(&self, id: isize) -> bool {
         if self.orphans.contains(&id) {
             return true;
         }
         let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-        if self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2) {
-            return true;
-        }
-        let Some(k) = self.owning(id) else {
-            return false;
-        };
-        if Some(k.0) != self.desktop {
-            return true;
-        }
-        let Some(strip) = self.strips.get(&k) else {
-            return false;
-        };
-        let Some((ci, member_idx)) = strip.locate(id) else {
-            return false;
-        };
-        let preview = strip.columns[ci].members[strip.columns[ci].active] != id;
-        let hidden = !strip.columns[ci].shown(member_idx);
-        let clipped = strip.fullscreen_id() != Some(id) && !strip.in_view(id);
-        preview || hidden || clipped
+        self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2)
     }
     /// Pick the spatially nearest other monitor on the same desktop that still has an active window.
     fn nearest_other_active_monitor(&self, from: &Key) -> Option<(String, isize)> {
@@ -903,7 +889,7 @@ impl<B: WindowBackend> Engine<B> {
     /// isolated instance carves out only windows of the class named in PLANOR_HOLES (none if unset).
     pub(crate) fn state_snapshot(&self, json: bool) -> Result<String> {
         let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(28) as i32;
+        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(DEFAULT_STACK_PEEK as i64) as i32;
         let monitors: Vec<serde_json::Value> = self
             .displays
             .iter()
@@ -1540,7 +1526,7 @@ impl<B: WindowBackend> Engine<B> {
             && self.settle.is_none()
             && self.inertia.is_none();
         if settled_state {
-            let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+            let stack_peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
             for ((desk, _), strip) in &self.strips {
                 if Some(*desk) != self.desktop {
                     continue;
@@ -1595,7 +1581,7 @@ impl<B: WindowBackend> Engine<B> {
             && let (Some(k), Some(c)) = (&d.destination, hot.drop_target_color)
             && let Some(s) = self.strips.get(k).filter(|_| Some(k.0) == self.desktop)
         {
-            let peek = hot.stack_peek_px.unwrap_or(96);
+            let peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
             let side = hot.stack_zone_percent;
             for (id, _, z) in drop_zones(s, peek, side, d.id) {
                 let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
@@ -1604,22 +1590,20 @@ impl<B: WindowBackend> Engine<B> {
             if k == &d.key
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             {
-                let (leading, trailing) = ungroup_edge_zones(s.area);
-                zones.push(render::Zone {
-                    rect: leading,
-                    monitor: k.1.clone(),
-                    color: c,
-                    alpha: if d.ungroup_edge == Some(false) { 0.85 } else { 0.35 },
-                });
-                zones.push(render::Zone {
-                    rect: trailing,
-                    monitor: k.1.clone(),
-                    color: c,
-                    alpha: if d.ungroup_edge == Some(true) { 0.85 } else { 0.35 },
-                });
+                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                for (band, edge) in [(leading, false), (trailing, true)] {
+                    if let Some(rect) = band {
+                        zones.push(render::Zone {
+                            rect,
+                            monitor: k.1.clone(),
+                            color: c,
+                            alpha: if d.ungroup_edge == Some(edge) { 0.85 } else { 0.35 },
+                        });
+                    }
+                }
             }
         }
-        let stack_peek = hot.stack_peek_px.unwrap_or(96);
+        let stack_peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         for ((desk, name), strip) in &self.strips {
             if Some(*desk) != self.desktop {
                 continue;
@@ -1681,6 +1665,7 @@ impl<B: WindowBackend> Engine<B> {
                         monitor: name.clone(),
                         pinned: false,
                         fullscreen,
+                        os_frame: if fullscreen { self.backend.frame(id) } else { None },
                         preview,
                         hidden,
                         bound: if fullscreen {
@@ -1713,6 +1698,7 @@ impl<B: WindowBackend> Engine<B> {
                     cookie: saved.cookie,
                     pinned: true,
                     fullscreen: false,
+                    os_frame: None,
                     preview: false,
                     hidden: false,
                     bound: rect,
@@ -1887,6 +1873,21 @@ impl<B: WindowBackend> Engine<B> {
                     .map(|s| s.area.horizontal())
             } else {
                 None
+            };
+            // A monitor across that axis on either side makes a cross-axis start a carry there.
+            let home_bounds = self
+                .owning(self.backend.foreground())
+                .or_else(|| self.key())
+                .and_then(|k| self.displays.iter().find(|m| m.0 == k.1).map(|m| m.2));
+            self.gesture.cross_ok = match (self.gesture.axis_lock, home_bounds) {
+                (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
+                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                    let side = |d: i32| {
+                        if h { planor::adjacent(b, &bounds, 0, d) } else { planor::adjacent(b, &bounds, d, 0) }.is_some()
+                    };
+                    (side(-1), side(1))
+                }
+                _ => (false, false),
             };
         }
         let swipe = self.gesture.sample(
@@ -2484,7 +2485,7 @@ impl<B: WindowBackend> Engine<B> {
         );
         let now = Instant::now();
         let home = self.owning(id);
-        let lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
+        let lock = self.gesture.axis_lock.filter(|_| !self.gesture.started_cross).and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2501,13 +2502,15 @@ impl<B: WindowBackend> Engine<B> {
             line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
             home,
             cross: 0.,
+            home_lock: lock,
+            left_home: false,
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
         let (relax, cross_ok) = (7. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
-        let stack_peek = self.hot.stack_peek_px.unwrap_or(28);
+        let stack_peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
         // The visible rect of the window's own group column (None for a lone window or a gone strip).
         let column = self.pad.as_ref().and_then(|p| {
@@ -2528,6 +2531,18 @@ impl<B: WindowBackend> Engine<B> {
             let name = &p.home.as_ref()?.1;
             self.displays.iter().find(|m| &m.0 == name).map(|m| m.2)
         });
+        // Every monitor with the axis of its strip (true = horizontal) on the home strip's desktop.
+        let monitor_axes = self
+            .pad
+            .as_ref()
+            .and_then(|p| p.home.as_ref())
+            .map(|k| {
+                self.displays
+                    .iter()
+                    .filter_map(|m| self.strips.get(&(k.0, m.0.clone())).map(|s| (m.2, s.area.horizontal())))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let Some(p) = self.pad.as_mut() else { return };
         let inside = |r: Rect, c: (f64, f64)| c.0 >= r.x as f64 && c.0 < (r.x + r.w) as f64 && c.1 >= r.y as f64 && c.1 < (r.y + r.h) as f64;
         let in_column = column.is_some_and(|r| inside(r, p.cursor));
@@ -2535,9 +2550,15 @@ impl<B: WindowBackend> Engine<B> {
         let (raw_dx, raw_dy) = (dx, dy);
         let (mut dx, mut dy) = (dx, dy);
         if let Some(h) = p.lock {
-            p.cross += if h { raw_dy } else { raw_dx };
+            // Travel over the window's own group column is a regroup/reorder across the axis, not an
+            // intent to leave for another monitor: it does not count towards the lock release (#84).
+            if !in_column {
+                p.cross += if h { raw_dy } else { raw_dx };
+            }
             let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
-            let monitor_that_way = home_bounds.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
+            // Whether another monitor lies that way is judged from the monitor the cursor is on now.
+            let at = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, _)| *r).or(home_bounds);
+            let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
             if cross_ok && monitor_that_way && p.cross.abs() >= relax {
                 p.lock = None;
             } else if !in_column {
@@ -2562,8 +2583,37 @@ impl<B: WindowBackend> Engine<B> {
             && column.is_some()
             && !column.is_some_and(|r| inside(r, p.cursor))
         {
-            // Left the group column: back onto the pick-up line (the lock holds from here on).
-            if h { p.cursor.1 = p.line } else { p.cursor.0 = p.line }
+            // Left the group column: ease back onto the pick-up line over a few frames instead of
+            // snapping there in one (#84). The lock holds from here on, so the remaining gap closes
+            // by half each report and snaps once it is under 2 px.
+            let c = if h { &mut p.cursor.1 } else { &mut p.cursor.0 };
+            let gap = p.line - *c;
+            *c = if gap.abs() < 2. { p.line } else { *c + gap * 0.5 };
+        }
+        // Carried onto a monitor whose strip runs the other way, the home axis means nothing: the lock
+        // follows the destination strip's axis (a released lock stays released). Back on the home monitor
+        // the home lock re-engages on the line the cursor re-entered at (#84). Same-orientation monitors
+        // keep the lock and its line.
+        if let (Some(hl), Some(hb)) = (p.home_lock, home_bounds) {
+            let here = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, h)| (*r, *h));
+            if let Some((r, dest_h)) = here {
+                let line_for = |h: bool| if h { p.cursor.1 } else { p.cursor.0 };
+                if r == hb {
+                    if p.left_home {
+                        p.left_home = false;
+                        p.lock = Some(hl);
+                        p.line = line_for(hl);
+                        p.cross = 0.;
+                    }
+                } else {
+                    p.left_home = true;
+                    if p.lock.is_some() && p.lock != Some(dest_h) {
+                        p.lock = Some(dest_h);
+                        p.line = line_for(dest_h);
+                        p.cross = 0.;
+                    }
+                }
+            }
         }
         self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
@@ -2802,7 +2852,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_frac = 0.0;
         }
         let _ = velocity;
-        let peek = self.hot.stack_peek_px.unwrap_or(96);
+        let peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let side = self.hot.stack_zone_percent;
         // Hit-test the visible part of each window (a group member beyond its peek is clipped away).
         let target = self.strips.get(&k).and_then(|s| {
@@ -2837,10 +2887,10 @@ impl<B: WindowBackend> Engine<B> {
         let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
         let ungroup_edge = if !held && grouped && k == d.key {
             self.strips.get(&k).and_then(|s| {
-                let (leading, trailing) = ungroup_edge_zones(s.area);
-                if contains(leading, p) {
+                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                if leading.is_some_and(|r| contains(r, p)) {
                     Some(false)
-                } else if contains(trailing, p) {
+                } else if trailing.is_some_and(|r| contains(r, p)) {
                     Some(true)
                 } else {
                     None
@@ -2979,6 +3029,34 @@ impl<B: WindowBackend> Engine<B> {
             self.action = "drag_reflow";
             self.reveal();
             return;
+        }
+        if !flung
+            && dest == d.key
+            && d.ungroup_edge.is_none()
+            && d.target.is_none()
+            && d.mode == planor::Drag::None
+            && let Some(s) = self.strips.get(&dest)
+            && s.locate(id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
+            && !self.backend.key_down(self.hot.drag_stack_modifier_vk)
+        {
+            // #91: a grouped window dropped beyond its group's shared border (the cursor outside the group's
+            // column along the strip axis, over no window) leaves the group onto that side, the way a
+            // fullscreen window sits beside, not inside, the other columns.
+            let col = group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK));
+            let (pos, lo, hi) = if s.area.horizontal() {
+                (d.point.0, col.x, col.x + col.w)
+            } else {
+                (d.point.1, col.y, col.y + col.h)
+            };
+            if pos < lo || pos >= hi {
+                let s = self.strips.get_mut(&dest).unwrap();
+                s.ungroup_to_side(id, pos >= hi);
+                self.active = dest.1.clone();
+                s.select(id);
+                self.action = "drag_reflow";
+                self.reveal();
+                return;
+            }
         }
         if let (planor::Drag::Swap, Some(target), true) = (d.mode, d.target, dest == d.key) {
             // Dropped on a window of the same monitor (not in its stack zone): the two exchange places.
@@ -3222,7 +3300,7 @@ impl<B: WindowBackend> Engine<B> {
                     if self.backend.is_visible(id)
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none()
-                        || self.is_parked_or_hidden_by_planor(id) => {}
+                        || self.is_parked_by_planor(id) => {}
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         self.drag = None;
@@ -3451,20 +3529,74 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
         .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
         .collect()
 }
-/// Two side edge dropboxes shown when dragging a window that belongs to a group (#79):
-/// `(leading, trailing)` = `(left, right)` on landscape monitors, `(top, bottom)` on portrait.
-pub(crate) fn ungroup_edge_zones(area: Rect) -> (Rect, Rect) {
-    if area.horizontal() {
-        let band = (area.w / 10).clamp(64, 160).min((area.w / 3).max(1));
+/// #80: true when another monitor lies beyond this strip edge (`trailing` = right/bottom): a drag there is
+/// heading to that monitor, so no ungroup band is offered on that edge.
+pub(crate) fn edge_borders_monitor(
+    displays: &[(String, Rect, Rect)],
+    monitor: &str,
+    horizontal: bool,
+    trailing: bool,
+) -> bool {
+    let bounds: Vec<Rect> = displays.iter().map(|m| m.2).collect();
+    let Some(at) = displays.iter().position(|m| m.0 == monitor) else {
+        return false;
+    };
+    let dir = if trailing { 1 } else { -1 };
+    planor::adjacent(bounds[at], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir }).is_some()
+}
+/// Fallback stack peek (matches `planor.example.toml`) shared by every consumer.
+pub(crate) const DEFAULT_STACK_PEEK: i32 = 96;
+/// The ungroup bands actually offered for a group column (#80, #90): a band is dropped only when its outer
+/// edge sits on the strip area edge AND another monitor lies beyond that side. Shared by the render zones and
+/// the drag hit-test so both agree.
+pub(crate) fn ungroup_bands(
+    displays: &[(String, Rect, Rect)],
+    monitor: &str,
+    area: Rect,
+    column: Rect,
+) -> (Option<Rect>, Option<Rect>) {
+    let horizontal = area.horizontal();
+    let (leading, trailing) = ungroup_edge_zones(column, horizontal);
+    let (at_lead, at_trail) = if horizontal {
+        (column.x <= area.x, column.x + column.w >= area.x + area.w)
+    } else {
+        (column.y <= area.y, column.y + column.h >= area.y + area.h)
+    };
+    let keep = |at_edge: bool, trailing: bool| !(at_edge && edge_borders_monitor(displays, monitor, horizontal, trailing));
+    (keep(at_lead, false).then_some(leading), keep(at_trail, true).then_some(trailing))
+}
+/// The visible part of the column holding `id`, full strip depth: the box the ungroup edge zones sit in
+/// (#90). Falls back to the whole strip area when the window is not in the strip.
+pub(crate) fn group_column_rect(s: &Strip, id: isize, peek: i32) -> Rect {
+    s.rects(peek)
+        .into_iter()
+        .find(|(w, _)| *w == id)
+        .map(|(_, r)| {
+            if s.area.horizontal() {
+                Rect { x: r.x, y: s.area.y, w: r.w, h: s.area.h }
+            } else {
+                Rect { x: s.area.x, y: r.y, w: s.area.w, h: r.h }
+            }
+        })
+        .and_then(|r| clip(r, s.area))
+        .unwrap_or(s.area)
+}
+/// Two side edge dropboxes shown when dragging a window that belongs to a group (#79), placed inside the
+/// sides of the group's own column (#90) instead of at the monitor edges. `column` is that column's visible
+/// rect and `horizontal` the strip's axis; the result is `(leading, trailing)` = `(left, right)` on
+/// landscape, `(top, bottom)` on portrait.
+pub(crate) fn ungroup_edge_zones(column: Rect, horizontal: bool) -> (Rect, Rect) {
+    if horizontal {
+        let band = (column.w / 10).clamp(64, 160).min((column.w / 4).max(1));
         (
-            Rect { x: area.x, y: area.y, w: band, h: area.h },
-            Rect { x: area.x + area.w - band, y: area.y, w: band, h: area.h },
+            Rect { x: column.x, y: column.y, w: band, h: column.h },
+            Rect { x: column.x + column.w - band, y: column.y, w: band, h: column.h },
         )
     } else {
-        let band = (area.h / 10).clamp(64, 160).min((area.h / 3).max(1));
+        let band = (column.h / 10).clamp(64, 160).min((column.h / 4).max(1));
         (
-            Rect { x: area.x, y: area.y, w: area.w, h: band },
-            Rect { x: area.x, y: area.y + area.h - band, w: area.w, h: band },
+            Rect { x: column.x, y: column.y, w: column.w, h: band },
+            Rect { x: column.x, y: column.y + column.h - band, w: column.w, h: band },
         )
     }
 }

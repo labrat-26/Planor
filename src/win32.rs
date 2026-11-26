@@ -115,12 +115,31 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
     }
     unsafe { CallNextHookEx(null_mut(), code, w, l) }
 }
+/// LLKHF_INJECTED (0x10) or LLKHF_LOWER_IL_INJECTED (0x02): the key press was synthesised, not typed.
+pub(crate) fn is_injected_key(flags: u32) -> bool {
+    flags & 0x12 != 0
+}
+#[cfg(test)]
+mod injected_key_tests {
+    use super::is_injected_key;
+    #[test]
+    fn injected_flags_are_recognised() {
+        assert!(is_injected_key(0x10));
+        assert!(is_injected_key(0x02));
+        assert!(!is_injected_key(0));
+        assert!(!is_injected_key(0x01 | 0x20));
+    }
+}
 /// Win+W (diagnostics builds only): open the note box instead of the Widgets panel. Runs in a low-level
 /// hook, so it only spawns a thread and returns.
 unsafe extern "system" fn keyboard(code: i32, w: usize, l: isize) -> isize {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::HookKeyboard);
     if code >= 0 && (w == WM_KEYDOWN as usize || w == WM_SYSKEYDOWN as usize) {
         let k = unsafe { &*(l as *const KBDLLHOOKSTRUCT) };
+        if is_injected_key(k.flags) {
+            // #71: Planor's own synthetic Alt / 0xE8 taps (win32::activate) must never act as hotkeys.
+            return unsafe { CallNextHookEx(null_mut(), code, w, l) };
+        }
         let win = unsafe {
             KeyboardAndMouse::GetAsyncKeyState(0x5B) < 0
                 || KeyboardAndMouse::GetAsyncKeyState(0x5C) < 0

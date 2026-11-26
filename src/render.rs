@@ -29,6 +29,8 @@ pub struct Tile {
     /// so it never paints over the taskbar.
     pub bound: Rect,
     pub fullscreen: bool,
+    /// OS frame sampled via the backend for fullscreen tiles (#80); keeps render free of win32 calls.
+    pub os_frame: Option<Rect>,
     pub preview: bool,
     pub id: isize,
     pub rect: Rect,
@@ -1220,11 +1222,31 @@ fn is_strictly_nearest_monitor(park_rect: Rect, monitor: Rect, all_monitors: &[R
     })
 }
 
+/// Park coordinates stay well inside i32 (top-level windows take 32-bit positions, and real layouts need
+/// about -37k), so extreme layouts never saturate or overflow `SetWindowPos`/`MonitorFromRect` math.
+pub(crate) const WIN32_COORD_LIMIT: i32 = 1_000_000;
+
+/// `park_y_unclamped` kept inside Win32 coordinate limits for extreme monitor layouts (#80): a
+/// candidate that would leave the window beyond the limit is replaced by `bound.y`.
+pub(crate) fn park_y_for_monitor(
+    park_x: i32,
+    monitor: Rect,
+    bound: Rect,
+    all_monitors: &[Rect],
+) -> i32 {
+    let y = park_y_unclamped(park_x, monitor, bound, all_monitors);
+    let lim = WIN32_COORD_LIMIT;
+    if y.saturating_add(monitor.h.max(1)) > lim || y < -lim {
+        return bound.y.clamp(-lim, (lim - monitor.h.max(1)).max(-lim));
+    }
+    y
+}
+
 /// Choose a constant off-screen `y` at `x = park_x` for `monitor` so `MonitorFromRect` /
 /// `MONITOR_DEFAULTTONEAREST` resolves to `monitor` instead of a neighboring different-DPI monitor
 /// (e.g. a wider monitor stacked above a narrower laptop screen), preventing `WM_DPICHANGED` storms
 /// on park/unpark (#75, #77, #78).
-pub(crate) fn park_y_for_monitor(
+fn park_y_unclamped(
     park_x: i32,
     monitor: Rect,
     bound: Rect,
@@ -1740,9 +1762,11 @@ impl RenderState {
     }
 
     fn invalidate_device_generation(&mut self, dead_gen: u64) {
-        reset_shared_devices_if_generation(dead_gen);
+        let reset = reset_shared_devices_if_generation(dead_gen);
+        diag::trace(format!("DEVICE invalidate gen={dead_gen} shared_reset={reset} hosts={}", self.hosts.len()));
         for host in self.hosts.values_mut() {
             if host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen) {
+                diag::trace(format!("DEVICE host {:?} surface dropped (gen {dead_gen}); overlay blank until recovery", host.b));
                 host.invalidate_gpu(&mut self.next_host_gen);
             }
         }
@@ -2420,7 +2444,7 @@ impl RenderState {
                     }
                     let effective_rect = fullscreen_preserved_rect(
                         tile.rect,
-                        if tile.fullscreen { win32::frame(tile.id) } else { None },
+                        tile.os_frame,
                         tile.fullscreen,
                     );
                     let target = if park_window {
@@ -2586,9 +2610,7 @@ impl RenderState {
                             };
                             let draw_start = Instant::now();
                             let drawn = if removed_before_skip {
-                                Err(windows::core::Error::from(
-                                    surface.gpu.GetDeviceRemovedReason().unwrap_err(),
-                                )
+                                Err(surface.gpu.GetDeviceRemovedReason().unwrap_err()
                                 .into())
                             } else {
                                 let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
@@ -2604,6 +2626,7 @@ impl RenderState {
                                 let dead_gen = surface.device_gen;
                                 let picture_only = !device_lost && !scratch.backing.is_empty();
                                 if device_lost {
+                                    diag::trace(format!("DEVICE draw failed gen={dead_gen} err={e} removed={removed_reason:?}"));
                                     reset_shared_devices_if_generation(dead_gen);
                                     invalidated_device_gen = Some(dead_gen);
                                     host.invalidate_gpu(&mut self.next_host_gen);
@@ -3839,6 +3862,7 @@ mod tests {
                 hidden: false,
                 bound: Rect { x: 0, y: 0, w: 1920, h: 1080 },
                 fullscreen: false,
+                os_frame: None,
                 preview: false,
                 id: 101,
                 rect: Rect { x: 0, y: 0, w: 960, h: 1080 },
@@ -3897,6 +3921,25 @@ mod tests {
             super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &[mon0]),
             0
         );
+    }
+
+    #[test]
+    fn park_y_for_monitor_stays_within_win32_coordinate_limits() {
+        // Monitors stacked so far apart that the nearest-monitor search overshoots 16-bit coordinates.
+        let mon0 = Rect { x: 0, y: 0, w: 1920, h: 1080 };
+        let mon1 = Rect { x: 0, y: 990_000, w: 1920, h: 1080 };
+        let mon2 = Rect { x: 0, y: -990_000, w: 1920, h: 1080 };
+        let all = [mon0, mon1, mon2];
+        let lim = super::WIN32_COORD_LIMIT;
+        for m in all {
+            let bound = Rect { x: m.x, y: m.y, w: m.w, h: m.h - 40 };
+            let y = super::park_y_for_monitor(m.x + 5000, m, bound, &all);
+            assert!(y >= -lim && y.saturating_add(m.h) <= lim, "y {y} for {m:?} beyond limits");
+        }
+        // Bounds themselves far beyond the limit are clamped, never wrapped.
+        let far = Rect { x: 0, y: 2_000_000_000, w: 100, h: 100 };
+        let y = super::park_y_for_monitor(0, far, far, &[far, mon0]);
+        assert!(y >= -lim && y.saturating_add(far.h) <= lim, "far y {y} beyond limits");
     }
 
     #[test]

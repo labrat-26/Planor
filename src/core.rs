@@ -243,7 +243,7 @@ impl Strip {
 
     /// Remove `id` from its group and place it as its own column on the leading (`trailing == false`:
     /// left on landscape, top on portrait) or trailing (`trailing == true`: right on landscape, bottom
-    /// on portrait) side of the currently visible viewport (#79).
+    /// on portrait) side of the group's own column (#79, #90).
     pub fn ungroup_to_side(&mut self, id: WindowId, trailing: bool) {
         let Some((from, _)) = self.locate(id) else {
             return;
@@ -252,21 +252,8 @@ impl Strip {
             return;
         }
         let span = self.area.length();
-        let mut first_vis = None;
-        let mut last_vis = None;
-        let mut x = 0;
-        for (i, c) in self.columns.iter().enumerate() {
-            if x < self.offset + span && x + c.length > self.offset {
-                first_vis.get_or_insert(i);
-                last_vis = Some(i);
-            }
-            x += c.length + self.gap;
-        }
-        let pos = if trailing {
-            last_vis.map(|i| i + 1).unwrap_or(from + 1)
-        } else {
-            first_vis.unwrap_or(from)
-        };
+        // The new column lands right beside the group's own column (#90), on the side of the zone used.
+        let pos = if trailing { from + 1 } else { from };
         self.remove(id);
         let usable = (span - self.gap).max(1);
         let length = match self.columns.as_mut_slice() {
@@ -580,6 +567,12 @@ pub struct Gesture {
     /// the window up. Set by the caller before each `sample`; `None` is the free drag. The carry itself is
     /// restricted by the daemon (`pad_move`), which needs the raw finger deltas.
     pub axis_lock: Option<bool>,
+    /// With the lock on: whether a monitor lies across the axis on the (negative, positive) side (left/up,
+    /// right/down). A clearly cross-axis start towards such a side is a carry to that monitor (or a regroup from a
+    /// perpendicular direction) and starts unlocked. Set by the caller before each `sample`.
+    pub cross_ok: (bool, bool),
+    /// The running drag started across the lock axis towards a monitor: the caller starts it unlocked.
+    pub started_cross: bool,
     /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
     rejected: bool,
 }
@@ -675,10 +668,16 @@ impl Gesture {
                     // three-finger scroll). A cross-axis start is ignored until the fingers lift.
                     let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
                     if along < 1.5 * cross {
-                        if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
-                            self.rejected = true;
+                        let across = if h { dy } else { dx };
+                        let allowed = if across > 0. { self.cross_ok.1 } else { self.cross_ok.0 };
+                        if cross >= 1.5 * along && allowed {
+                            self.started_cross = true;
+                        } else {
+                            if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
+                                self.rejected = true;
+                            }
+                            return Swipe::None;
                         }
-                        return Swipe::None;
                     }
                 }
                 self.dragging = true;
