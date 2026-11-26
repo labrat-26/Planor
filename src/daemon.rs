@@ -1247,6 +1247,9 @@ impl<B: WindowBackend> Engine<B> {
         }
         if self.deadline.is_some_and(|t| Instant::now() >= t) {
             self.deadline = None;
+            if self.diag.enabled {
+                diag::trace("TOPOLOGY rescan (work areas or monitors changed)");
+            }
             self.topology();
             self.scan()
         }
@@ -1254,6 +1257,10 @@ impl<B: WindowBackend> Engine<B> {
             self.desktop_checked = Instant::now();
             let d = self.backend.current_desktop();
             if d != self.desktop {
+                if self.diag.enabled {
+                    // #56: a virtual-desktop switch (or a failed desktop query, `None`) clears every visual.
+                    diag::trace(format!("CLEAR reason=desktop from={:?} to={d:?}", self.desktop.map(|v| format!("{v:032x}"))));
+                }
                 self.clear()?;
                 self.desktop = d;
                 self.placed.clear();
@@ -3211,6 +3218,9 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Suspend(v) => {
+                if self.diag.enabled {
+                    diag::trace(format!("CLEAR reason=suspend locked={v}"));
+                }
                 self.clear_scroll_state();
                 let _ = self.clear();
                 self.locked = v;
@@ -3219,6 +3229,10 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Topology => {
+                if self.diag.enabled {
+                    // #56: display change or TaskbarCreated (explorer restart): the overlay is cleared.
+                    diag::trace("CLEAR reason=topology");
+                }
                 self.clear_scroll_state();
                 self.drag = None;
                 let _ = self.clear();
@@ -3266,7 +3280,10 @@ impl<B: WindowBackend> Engine<B> {
                                 && (a == id || target == Some(a))
                         });
                     if self.diag.enabled {
-                        diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
+                        // #56: name unmanaged foreground windows (Shell_TrayWnd = a taskbar click, Progman/WorkerW =
+                        // show desktop) so a bundle shows what took focus before tiles went away.
+                        let class = if target.is_none() && id != 0 { format!(" class={}", self.backend.class_of(id)) } else { String::new() };
+                        diag::trace(format!("FG {id} managed={} external={} pad={}{class}", target.is_some(), self.backend.external(id), self.pad_scrolling));
                     }
                     let active_id = self
                         .key()
@@ -3313,7 +3330,19 @@ impl<B: WindowBackend> Engine<B> {
                     if self.backend.is_visible(id)
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none()
-                        || self.is_parked_by_planor(id) => {}
+                        || self.is_parked_by_planor(id) =>
+                {
+                    if self.diag.enabled && self.owning(id).is_some() {
+                        let why = if self.backend.is_visible(id) {
+                            "visible"
+                        } else if self.backend.is_iconic(id) {
+                            "iconic"
+                        } else {
+                            "parked"
+                        };
+                        diag::trace(format!("HIDE {id} kept reason={why}"));
+                    }
+                }
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         self.drag = None;
@@ -3329,6 +3358,20 @@ impl<B: WindowBackend> Engine<B> {
                                 || self.managed_foreground_id(self.backend.foreground()) == Some(id);
                             self.strips.get_mut(&k).unwrap().remove(id);
                             self.strips.get_mut(&k).unwrap().fill();
+                            if self.diag.enabled {
+                                // #56: why a tile left the layout, and what held focus at that moment.
+                                let why = match e {
+                                    EVENT_OBJECT_DESTROY => "destroy",
+                                    EVENT_SYSTEM_MINIMIZESTART => "minimize",
+                                    _ => "hide",
+                                };
+                                let fg = self.backend.foreground();
+                                let left: usize = self.strips.values().map(|s| s.columns.len()).sum();
+                                diag::trace(format!(
+                                    "REMOVE {id} reason={why} focused={focused} fg={fg} fg_class={} columns_left={left}",
+                                    self.backend.class_of(fg)
+                                ));
+                            }
                             if focused {
                                 if let Some(next) = self.strips[&k].active() {
                                     self.active = k.1.clone();

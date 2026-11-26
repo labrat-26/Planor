@@ -320,7 +320,9 @@ pub fn write_bundle(
     let trace_src = base_dir.join("trace.log");
     if let Ok(raw) = fs::read_to_string(&trace_src) {
         let lines: Vec<&str> = raw.lines().collect();
-        let start = lines.len().saturating_sub(400);
+        // #56: 400 lines covered only ~4 s once touchpad PAD/SCENE lines flooded the trace, so the moment a note
+        // describes ("clicking the bar made everything disappear") had already scrolled out. Keep 3000.
+        let start = lines.len().saturating_sub(3000);
         fs::write(bundle_dir.join("trace.tail.log"), lines[start..].join("\n"))?;
     }
 
