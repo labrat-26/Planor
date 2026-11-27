@@ -1657,15 +1657,6 @@ impl<B: WindowBackend> Engine<B> {
                     let c = if fullscreen {
                         None
                     } else if self.drag.as_ref().is_some_and(|d| {
-                        d.moved
-                            && !d.resizing
-                            && !d.visuals_cleared
-                            && d.target == Some(id)
-                            && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
-                    }) {
-                        // The window a drop would swap with (or pull out beside).
-                        hot.drop_target_color
-                    } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
                         d.moved
                             && !d.resizing

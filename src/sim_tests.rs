@@ -6193,3 +6193,62 @@ fn merge_and_leave_zone_icons_emitted_centred_scaled_and_theme_aware() {
         h.settle();
     }
 }
+
+#[test]
+fn drag_hover_suppresses_green_border_while_keeping_zones_and_icons() {
+    // (#105) While dragging a window over another window (swap or stack hover), the target window
+    // must not get the green drop_target_color highlight border, while drop zones and icons stay.
+    let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
+        sim.add_window(SimWindow::new(101, Rect { x: 0, y: 0, w: 900, h: 1000 }));
+        sim.add_window(SimWindow::new(102, Rect { x: 960, y: 0, w: 900, h: 1000 }));
+        sim.foreground = 101;
+    });
+    let r1 = h.rect(101);
+    let r2 = h.rect(102);
+    // Normal focused border before drag is untouched.
+    assert_eq!(tile_color(&h, 101), h.engine.hot.focused_color);
+
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
+    // 1. Hover in Swap region (outer 25% of target 102)
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&101).unwrap().rect = Rect { x: r1.x + 40, y: r1.y + 20, ..r1 };
+        g.cursor = (r2.x + 20, r2.y + r2.h / 2);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(
+        h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
+        Some((Some(102), planor::Drag::Swap)),
+        "outer edge hover must be Swap"
+    );
+    assert_ne!(
+        tile_color(&h, 102),
+        h.engine.hot.drop_target_color,
+        "target window must not draw green border during Swap hover (#105)"
+    );
+    let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert!(!scene.zones.is_empty(), "drop zones must stay visible during Swap hover");
+    assert_eq!(scene.zone_icons.len(), scene.zones.len(), "zone icons must stay visible during Swap hover");
+
+    // 2. Hover in Stack (merge) region (centre of target 102)
+    h.desktop.0.lock().unwrap().cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert_eq!(
+        h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
+        Some((Some(102), planor::Drag::Stack)),
+        "centre hover must be Stack"
+    );
+    assert_ne!(
+        tile_color(&h, 102),
+        h.engine.hot.drop_target_color,
+        "target window must not draw green border during Stack hover (#105)"
+    );
+    let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+    assert!(!scene.zones.is_empty(), "drop zones must stay visible during Stack hover");
+    assert_eq!(scene.zone_icons.len(), scene.zones.len(), "zone icons must stay visible during Stack hover");
+
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
+    h.settle();
+}
