@@ -115,12 +115,9 @@ fn analyzes_a_synthetic_expect_recording_end_to_end() {
             "minimized": false
         }]
     });
-    let mark = serde_json::json!({"t": start_us + 100_000, "kind": "mark", "text": "synthetic marker"});
-    std::fs::write(
-        dir.join("events.jsonl"),
-        format!("{os}\n{mark}\n"),
-    )
-    .unwrap();
+    let mark =
+        serde_json::json!({"t": start_us + 100_000, "kind": "mark", "text": "synthetic marker"});
+    std::fs::write(dir.join("events.jsonl"), format!("{os}\n{mark}\n")).unwrap();
 
     // ---- Planor trace: one EXPECT for the window, on the same UTC wall clock.
     std::fs::write(
@@ -169,7 +166,9 @@ fn analyzes_a_synthetic_expect_recording_end_to_end() {
     // The EXPECT path was used, not the OS fallback.
     assert_eq!(recording["trace_expectations"].as_u64(), Some(1));
     assert_eq!(
-        recording["os_fallback_monitors"].as_array().map(|a| a.len()),
+        recording["os_fallback_monitors"]
+            .as_array()
+            .map(|a| a.len()),
         Some(0),
         "EXPECT trace should be used for monitor 0"
     );
@@ -180,7 +179,10 @@ fn analyzes_a_synthetic_expect_recording_end_to_end() {
             && c["verdict"] == "fail"
             && c["detail"].as_str().unwrap_or("").contains("taskbar")
     });
-    assert!(border_fail.is_some(), "expected border-over-taskbar failure:\n{checks:#?}");
+    assert!(
+        border_fail.is_some(),
+        "expected border-over-taskbar failure:\n{checks:#?}"
+    );
 
     // The window's expected, OS and measured rectangles agree.
     let position = checks
@@ -200,13 +202,17 @@ fn analyzes_a_synthetic_expect_recording_end_to_end() {
         .find_map(|s| s["crop"].as_str())
         .expect("suspect crop path");
     assert!(
-        dir.join(crop.replace('/', std::path::MAIN_SEPARATOR_STR)).is_file(),
+        dir.join(crop.replace('/', std::path::MAIN_SEPARATOR_STR))
+            .is_file(),
         "suspect crop {crop} should exist"
     );
 
     // The report mentions the nearest marker/note.
     let md = std::fs::read_to_string(dir.join("report.md")).unwrap();
-    assert!(md.contains("synthetic marker") || md.contains("synthetic note"), "{md}");
+    assert!(
+        md.contains("synthetic marker") || md.contains("synthetic note"),
+        "{md}"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -244,9 +250,31 @@ fn a_lost_capture_stretch_is_its_own_finding_and_not_black_or_frozen() {
 
     let mut child = Command::new(&ffmpeg)
         .args([
-            "-hide_banner", "-loglevel", "error", "-y", "-f", "rawvideo", "-pixel_format", "bgra",
-            "-video_size", "320x180", "-framerate", "60", "-i", "pipe:0", "-an", "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p", "-r", "60",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pixel_format",
+            "bgra",
+            "-video_size",
+            "320x180",
+            "-framerate",
+            "60",
+            "-i",
+            "pipe:0",
+            "-an",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "16",
+            "-pix_fmt",
+            "yuv420p",
+            "-r",
+            "60",
         ])
         .arg(dir.join("video-0.mp4"))
         .stdin(Stdio::piped())
@@ -257,7 +285,11 @@ fn a_lost_capture_stretch_is_its_own_finding_and_not_black_or_frozen() {
     {
         let mut stdin = child.stdin.take().unwrap();
         for i in 0..total {
-            let img = if (lost_from..lost_to).contains(&i) { &black } else { &good };
+            let img = if (lost_from..lost_to).contains(&i) {
+                &black
+            } else {
+                &good
+            };
             stdin.write_all(&img.bgra).unwrap();
         }
     }
@@ -272,7 +304,11 @@ fn a_lost_capture_stretch_is_its_own_finding_and_not_black_or_frozen() {
         } else {
             "ok"
         };
-        csv.push_str(&format!("{i},{},{},{state}\n", start_us + i as i64 * period_us, if state == "lost" { 0 } else { 1 }));
+        csv.push_str(&format!(
+            "{i},{},{},{state}\n",
+            start_us + i as i64 * period_us,
+            if state == "lost" { 0 } else { 1 }
+        ));
     }
     std::fs::write(dir.join("frames-0.csv"), csv).unwrap();
 
@@ -287,7 +323,11 @@ fn a_lost_capture_stretch_is_its_own_finding_and_not_black_or_frozen() {
         "reason": "DXGI_ERROR_ACCESS_LOST (0x887A0026)"});
     let reopened = serde_json::json!({"t": start_us + lost_to as i64 * period_us, "kind": "capture",
         "monitor": 0, "event": "reopened", "lost_ms": 500, "rect": [0, 0, W, H]});
-    std::fs::write(dir.join("events.jsonl"), format!("{os}\n{lost_event}\n{reopened}\n")).unwrap();
+    std::fs::write(
+        dir.join("events.jsonl"),
+        format!("{os}\n{lost_event}\n{reopened}\n"),
+    )
+    .unwrap();
     std::fs::write(
         dir.join("trace.log"),
         "05:00:00.000 EXPECT id=100 rect=40,30,120,90 monitor=m kind=tile hidden=0 animate_ms=0\n",
@@ -322,27 +362,45 @@ fn a_lost_capture_stretch_is_its_own_finding_and_not_black_or_frozen() {
         serde_json::from_str(&std::fs::read_to_string(dir.join("report.json")).unwrap()).unwrap();
     let checks = report["checks"].as_array().unwrap();
 
-    let lost: Vec<&Value> = checks.iter().filter(|c| c["kind"] == "capture_lost").collect();
-    assert_eq!(lost.len(), 1, "exactly one capture_lost finding: {checks:#?}");
+    let lost: Vec<&Value> = checks
+        .iter()
+        .filter(|c| c["kind"] == "capture_lost")
+        .collect();
+    assert_eq!(
+        lost.len(),
+        1,
+        "exactly one capture_lost finding: {checks:#?}"
+    );
     assert_eq!(lost[0]["verdict"], "fail");
     assert_eq!(lost[0]["monitor"], 0);
     assert_eq!(lost[0]["time_qpc_us"].as_i64(), Some(lost_t));
     let duration = lost[0]["duration_ms"].as_i64().unwrap();
     assert!((495..=505).contains(&duration), "duration {duration} ms");
-    assert!(lost[0]["detail"].as_str().unwrap().contains("DXGI_ERROR_ACCESS_LOST"));
+    assert!(
+        lost[0]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("DXGI_ERROR_ACCESS_LOST")
+    );
 
     for kind in ["monitor_black", "monitor_frozen", "interior"] {
         assert!(
-            !checks.iter().any(|c| c["kind"] == kind && c["verdict"] == "fail"),
+            !checks
+                .iter()
+                .any(|c| c["kind"] == kind && c["verdict"] == "fail"),
             "a lost stretch must not be reported as {kind}: {checks:#?}"
         );
     }
     assert!(
-        !checks.iter().any(|c| c["kind"] == "position" && c["verdict"] == "fail"),
+        !checks
+            .iter()
+            .any(|c| c["kind"] == "position" && c["verdict"] == "fail"),
         "no position failure: {checks:#?}"
     );
     assert!(
-        checks.iter().any(|c| c["kind"] == "position" && c["verdict"] == "pass"),
+        checks
+            .iter()
+            .any(|c| c["kind"] == "position" && c["verdict"] == "pass"),
         "healthy frames are still measured: {checks:#?}"
     );
     let md = std::fs::read_to_string(dir.join("report.md")).unwrap();

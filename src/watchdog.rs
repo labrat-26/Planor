@@ -37,7 +37,8 @@ pub(crate) fn find_planor_rec() -> Option<PathBuf> {
             return Some(sibling);
         }
     }
-    let manifest_rel = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/planor-rec-bin/planor-rec.exe");
+    let manifest_rel =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/planor-rec-bin/planor-rec.exe");
     if manifest_rel.is_file() {
         return Some(manifest_rel);
     }
@@ -76,7 +77,12 @@ fn write_stall_bundle(thread_name: &'static str, stalled_ms: i64, span_name: &'s
         let _ = Command::new(rec)
             .args(["dump", "--out"])
             .arg(bundle_dir.join("video"))
-            .args(["--reason", &format!("stall-{thread_name}-{span_name}"), "--pipe", "ring"])
+            .args([
+                "--reason",
+                &format!("stall-{thread_name}-{span_name}"),
+                "--pipe",
+                "ring",
+            ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -188,7 +194,12 @@ mod tests {
         // Normal healthy 16 ms cadence produces zero stall lines.
         for delta_ms in [0, 16, 32, 100, 250] {
             assert_eq!(
-                eval_stall(now + delta_ms * 1000, now, 300_000, perf::SpanKind::DaemonTick as u8),
+                eval_stall(
+                    now + delta_ms * 1000,
+                    now,
+                    300_000,
+                    perf::SpanKind::DaemonTick as u8
+                ),
                 None
             );
         }
@@ -210,7 +221,11 @@ mod tests {
             perf::heartbeat_render();
             thread::sleep(Duration::from_millis(25));
         }
-        assert_eq!(perf::stall_count(), before, "healthy heartbeats must never trigger a stall");
+        assert_eq!(
+            perf::stall_count(),
+            before,
+            "healthy heartbeats must never trigger a stall"
+        );
 
         perf::DAEMON_SPAN_ID.store(perf::SpanKind::DaemonTick as u8, Ordering::Relaxed);
         thread::sleep(Duration::from_millis(400));

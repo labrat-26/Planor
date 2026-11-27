@@ -55,7 +55,11 @@ fn check_window_mode(w: &Sentinel, label: usize, before: &Snap, loose: bool) -> 
                 "flags, showCmd, rcNormalPosition",
             )
         } else {
-            (format!("{:?}", before.1), format!("{place:?}"), "full placement")
+            (
+                format!("{:?}", before.1),
+                format!("{place:?}"),
+                "full placement",
+            )
         };
         return Err(format!(
             "window {label}: expected {what} {exp} as before Planor started, observed {obs}"
@@ -113,7 +117,9 @@ fn tasklist_planor() -> String {
 }
 
 fn planor_running() -> bool {
-    tasklist_planor().to_ascii_lowercase().contains("planor.exe")
+    tasklist_planor()
+        .to_ascii_lowercase()
+        .contains("planor.exe")
 }
 
 /// Id and executable path of every planor process, for assertion messages.
@@ -195,12 +201,11 @@ impl Drop for Rescue {
 fn wait_exit(d: &mut Daemon, secs: u64) -> Option<std::process::ExitStatus> {
     let until = Instant::now() + Duration::from_secs(secs);
     loop {
-        let status = d
-            .p
-            .as_mut()
-            .expect("test bug: daemon not running")
-            .try_wait()
-            .unwrap();
+        let status =
+            d.p.as_mut()
+                .expect("test bug: daemon not running")
+                .try_wait()
+                .unwrap();
         if status.is_some() || Instant::now() >= until {
             return status;
         }
@@ -228,7 +233,11 @@ fn stop_checked(d: &mut Daemon) {
 fn set_tile_on_startup(d: &Daemon, on: bool) {
     let path = d.dir.join("planor/planor.toml");
     let text = fs::read_to_string(&path).unwrap();
-    let (from, to) = if on { ("false", "true") } else { ("true", "false") };
+    let (from, to) = if on {
+        ("false", "true")
+    } else {
+        ("true", "false")
+    };
     let updated = text.replace(
         &format!("tile_existing_on_startup = {from}"),
         &format!("tile_existing_on_startup = {to}"),
@@ -643,8 +652,8 @@ fn stop_without_daemon_rescues_windows() {
 #[ignore]
 fn ctrl_break_restores_before_exit() {
     use std::os::windows::process::CommandExt;
-    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
     use windows_sys::Win32::Foundation::GetLastError;
+    use windows_sys::Win32::System::Console::{CTRL_BREAK_EVENT, GenerateConsoleCtrlEvent};
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
     aware();
@@ -678,7 +687,10 @@ fn ctrl_break_restores_before_exit() {
             d.p.as_mut().unwrap().try_wait().unwrap().is_none(),
             "daemon exited during startup (ctrl-break test)"
         );
-        assert!(Instant::now() < until, "pipe startup timeout (ctrl-break test)");
+        assert!(
+            Instant::now() < until,
+            "pipe startup timeout (ctrl-break test)"
+        );
         thread::sleep(Duration::from_millis(80));
     }
     d.register_active();
@@ -718,7 +730,10 @@ fn exit_restores_windows_on_many_monitors() {
     aware();
     let m = mons();
     if m.len() < 2 {
-        println!("SKIPPED_SINGLE_MONITOR: {} monitor(s) attached, need at least 2", m.len());
+        println!(
+            "SKIPPED_SINGLE_MONITOR: {} monitor(s) attached, need at least 2",
+            m.len()
+        );
         return;
     }
     // One sentinel per monitor (index i on monitor i, primary first), plus 3 more on the primary.

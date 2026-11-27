@@ -17,7 +17,8 @@ fn iconic(w: &Sentinel) -> bool {
 
 /// True while the daemon child process is still running.
 fn is_alive(d: &mut Daemon) -> bool {
-    d.p.as_mut().map_or(false, |p| p.try_wait().unwrap().is_none())
+    d.p.as_mut()
+        .map_or(false, |p| p.try_wait().unwrap().is_none())
 }
 
 /// One sentinel per monitor (physical coords inside each monitor rect) plus two extras on the primary.
@@ -30,7 +31,12 @@ fn build_sentinels(m: &[(RECT, RECT)]) -> Vec<Sentinel> {
     let p = m[0].0;
     let n = m.len();
     for k in 0..2usize {
-        ws.push(Sentinel::at(n + k, 0, p.left + 600 + 400 * k as i32, p.top + 100));
+        ws.push(Sentinel::at(
+            n + k,
+            0,
+            p.left + 600 + 400 * k as i32,
+            p.top + 100,
+        ));
     }
     ws
 }
@@ -365,8 +371,7 @@ fn offline_then_kill_recover() {
     let restored = eventually(5, || {
         ws.iter().enumerate().all(|(i, w)| {
             let r = w.rect();
-            reachable(w)
-                && (0..4).all(|k| (r[k] - before[i][k]).abs() <= RESTART_TOL)
+            reachable(w) && (0..4).all(|k| (r[k] - before[i][k]).abs() <= RESTART_TOL)
         })
     });
     for (i, w) in ws.iter().enumerate() {

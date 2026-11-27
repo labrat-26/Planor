@@ -66,7 +66,7 @@ pub(crate) fn last_contacts_dpi() -> Option<f64> {
     let v = LAST_CONTACTS_DPI.load(std::sync::atomic::Ordering::Relaxed);
     (v > 0).then_some(v as f64)
 }
-thread_local!{static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
+thread_local! {static PARTS:std::cell::RefCell<std::collections::HashMap<usize,planor::ContactFrame>>=Default::default();}
 pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::InputContacts);
     let mut frames = vec![];
@@ -130,7 +130,9 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
             };
             let mut points = vec![];
             let mut slots = 0usize;
-            let all=RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);let count=get(13,0,0x54).unwrap_or(0);if count>=3||count==0||(all&&count>=1) {
+            let all = RECORD_ALL.load(std::sync::atomic::Ordering::Relaxed);
+            let count = get(13, 0, 0x54).unwrap_or(0);
+            if count >= 3 || count == 0 || (all && count >= 1) {
                 for link in 1..caps.NumberLinkCollectionNodes {
                     let (Some(x), Some(y)) = (get(1, link, 0x30), get(1, link, 0x31)) else {
                         continue;
@@ -156,7 +158,9 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                         let mut scale = |usage| {
                             let mut c = HIDP_VALUE_CAPS::default();
                             let mut n = 1;
-                            if HidP_GetSpecificValueCaps(HidP_Input, 1, link, usage, &mut c, &mut n, prep) < 0
+                            if HidP_GetSpecificValueCaps(
+                                HidP_Input, 1, link, usage, &mut c, &mut n, prep,
+                            ) < 0
                                 || c.LogicalMax <= c.LogicalMin
                                 || c.PhysicalMax <= c.PhysicalMin
                             {
@@ -182,14 +186,28 @@ pub fn contacts(l: isize) -> Vec<Vec<(f64, f64)>> {
                         let sx = scale(0x30);
                         let sy = scale(0x31);
                         LAST_CONTACTS_DPI.store(
-                            if has_physical_units { dpi.round().max(1.0) as u32 } else { 0 },
+                            if has_physical_units {
+                                dpi.round().max(1.0) as u32
+                            } else {
+                                0
+                            },
                             std::sync::atomic::Ordering::Relaxed,
                         );
-                        points.push((get(13, link, 0x51).unwrap_or(link as u32), (x as f64 * sx, y as f64 * sy)));
+                        points.push((
+                            get(13, link, 0x51).unwrap_or(link as u32),
+                            (x as f64 * sx, y as f64 * sy),
+                        ));
                     }
                 }
             }
-            if let Some(frame)=PARTS.with(|v|{let mut m=v.borrow_mut();let f=m.entry(head.hDevice as usize).or_default();f.all=all;f.packet_with_slots(count,slots,points)}){frames.push(frame)}
+            if let Some(frame) = PARTS.with(|v| {
+                let mut m = v.borrow_mut();
+                let f = m.entry(head.hDevice as usize).or_default();
+                f.all = all;
+                f.packet_with_slots(count, slots, points)
+            }) {
+                frames.push(frame)
+            }
         }
     }
     frames

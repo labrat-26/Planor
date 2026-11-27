@@ -74,7 +74,11 @@ pub fn list_recordings(root: &Path) -> std::io::Result<Vec<Recording>> {
 
 /// Split into (kept, to_remove): the `keep` newest are kept.
 pub fn plan(mut all: Vec<Recording>, keep: usize) -> (Vec<Recording>, Vec<Recording>) {
-    all.sort_by(|a, b| b.started_ms.cmp(&a.started_ms).then_with(|| a.path.cmp(&b.path)));
+    all.sort_by(|a, b| {
+        b.started_ms
+            .cmp(&a.started_ms)
+            .then_with(|| a.path.cmp(&b.path))
+    });
     let remove = all.split_off(keep.min(all.len()));
     (all, remove)
 }
@@ -105,7 +109,11 @@ pub fn run(root: &Path, keep: usize, dry_run: bool) -> util::anyhow_lite::Result
         "planor-rec: {found} recording(s) found, {} kept, {} {} ({:.1} MB)",
         kept.len(),
         remove.len(),
-        if dry_run { "would be deleted" } else { "deleted" },
+        if dry_run {
+            "would be deleted"
+        } else {
+            "deleted"
+        },
         freed as f64 / 1_048_576.0
     );
     Ok(())
@@ -165,7 +173,13 @@ mod tests {
             bytes: 0,
         };
         let (kept, remove) = plan(vec![r(5), r(1), r(9), r(3)], 2);
-        assert_eq!(kept.iter().map(|r| r.started_ms).collect::<Vec<_>>(), vec![9, 5]);
-        assert_eq!(remove.iter().map(|r| r.started_ms).collect::<Vec<_>>(), vec![3, 1]);
+        assert_eq!(
+            kept.iter().map(|r| r.started_ms).collect::<Vec<_>>(),
+            vec![9, 5]
+        );
+        assert_eq!(
+            remove.iter().map(|r| r.started_ms).collect::<Vec<_>>(),
+            vec![3, 1]
+        );
     }
 }

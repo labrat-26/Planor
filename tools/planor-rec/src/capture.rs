@@ -14,18 +14,14 @@ use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::{
         Dwm::{DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
-        Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        },
+        Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint},
     },
     UI::{
         HiDpi::{
-            GetDpiForMonitor, SetThreadDpiAwarenessContext, MDT_EFFECTIVE_DPI,
-            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+            DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForMonitor, MDT_EFFECTIVE_DPI,
+            SetThreadDpiAwarenessContext,
         },
-        WindowsAndMessaging::{
-            EnumWindows, GetClassNameW, IsWindowVisible, MONITORINFOF_PRIMARY,
-        },
+        WindowsAndMessaging::{EnumWindows, GetClassNameW, IsWindowVisible, MONITORINFOF_PRIMARY},
     },
 };
 
@@ -458,7 +454,9 @@ impl Duplicator {
                 let tex: ID3D11Texture2D = res.unwrap().cast()?;
                 let mut desc = D3D11_TEXTURE2D_DESC::default();
                 tex.GetDesc(&mut desc);
-                let swapped = desc.Width == self.height && desc.Height == self.width && self.width != self.height;
+                let swapped = desc.Width == self.height
+                    && desc.Height == self.width
+                    && self.width != self.height;
                 rotated = swapped;
                 if !swapped && (desc.Width != self.width || desc.Height != self.height) {
                     return Err(windows::core::Error::new(
@@ -496,7 +494,11 @@ impl Duplicator {
                     self.native.resize(w * h * 4, 0);
                     for y in 0..h {
                         let src = (mapped.pData as *const u8).add(y * mapped.RowPitch as usize);
-                        std::ptr::copy_nonoverlapping(src, self.native[y * w * 4..].as_mut_ptr(), w * 4);
+                        std::ptr::copy_nonoverlapping(
+                            src,
+                            self.native[y * w * 4..].as_mut_ptr(),
+                            w * 4,
+                        );
                     }
                     phases[2] = t_cpu.elapsed().as_micros() as i64;
                     let t_rot = std::time::Instant::now();
@@ -547,7 +549,12 @@ impl crate::timeline::FrameSource for Duplicator {
         (self.width, self.height)
     }
     fn rect(&self) -> Rect {
-        Rect::new(self.origin.0, self.origin.1, self.width as i32, self.height as i32)
+        Rect::new(
+            self.origin.0,
+            self.origin.1,
+            self.width as i32,
+            self.height as i32,
+        )
     }
     fn phases_us(&self) -> Option<[i64; 4]> {
         Some(self.phases_us)
@@ -655,9 +662,17 @@ unsafe fn rotate_rows(
             for y in ty..(ty + T).min(y1) {
                 let row = unsafe { src.add(y * pitch) };
                 for x in tx..(tx + T).min(w) {
-                    let (dx, dy) = if rotation == 4 { (y, w - 1 - x) } else { (h - 1 - y, x) };
+                    let (dx, dy) = if rotation == 4 {
+                        (y, w - 1 - x)
+                    } else {
+                        (h - 1 - y, x)
+                    };
                     unsafe {
-                        std::ptr::copy_nonoverlapping(row.add(x * 4), out.add((dy * h + dx) * 4), 4);
+                        std::ptr::copy_nonoverlapping(
+                            row.add(x * 4),
+                            out.add((dy * h + dx) * 4),
+                            4,
+                        );
                     }
                 }
             }
@@ -709,7 +724,15 @@ mod tests {
         // Desktop coordinates with a negative-origin monitor.
         let mut out = frame(30, 30);
         let shape = color_pointer(1, 1, &[[0, 255, 0, 255]]);
-        composite_pointer(&mut out, 30, 30, (-1440, -1859), (-1435, -1855), true, Some(&shape));
+        composite_pointer(
+            &mut out,
+            30,
+            30,
+            (-1440, -1859),
+            (-1435, -1855),
+            true,
+            Some(&shape),
+        );
         let i = (4 * 30 + 5) * 4;
         assert_eq!(out[i + 1], 255);
         // Output-relative coordinates fall back to the raw value.
@@ -782,7 +805,11 @@ mod rotation_tests {
     fn rotate_naive(src: &[u8], w: usize, h: usize, rotation: i32, out: &mut [u8]) {
         for y in 0..h {
             for x in 0..w {
-                let (dx, dy) = if rotation == 4 { (y, w - 1 - x) } else { (h - 1 - y, x) };
+                let (dx, dy) = if rotation == 4 {
+                    (y, w - 1 - x)
+                } else {
+                    (h - 1 - y, x)
+                };
                 let d = (dy * h + dx) * 4;
                 let s = (y * w + x) * 4;
                 out[d..d + 4].copy_from_slice(&src[s..s + 4]);
@@ -808,7 +835,10 @@ mod rotation_tests {
             rotate_naive(&tight, w, h, rotation, &mut want);
             let mut got = vec![1u8; w * h * 4];
             rotate_strided(&padded, pitch, w, h, rotation, &mut got);
-            assert!(got == want, "rotation {rotation}: tiled with pitch differs from the naive rotation");
+            assert!(
+                got == want,
+                "rotation {rotation}: tiled with pitch differs from the naive rotation"
+            );
             let mut got2 = vec![2u8; w * h * 4];
             rotate_into(&tight, w, h, rotation, &mut got2);
             assert!(got2 == want, "rotation {rotation}: rotate_into differs");
@@ -816,7 +846,10 @@ mod rotation_tests {
             for threads in [2, 3, 4, 16] {
                 let mut got3 = vec![3u8; w * h * 4];
                 rotate_with_threads(&padded, pitch, w, h, rotation, &mut got3, threads);
-                assert!(got3 == want, "rotation {rotation}: {threads} threads differ");
+                assert!(
+                    got3 == want,
+                    "rotation {rotation}: {threads} threads differ"
+                );
             }
         }
     }

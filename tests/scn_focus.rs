@@ -160,13 +160,25 @@ fn focus_walk(n: usize) {
     start_at_window_0(&ws);
     for step in 0..n - 1 {
         press(&[ALT], RIGHT);
-        expect_focus(&ws, step + 1, &format!("N={n} Alt+Right press {}", step + 1));
+        expect_focus(
+            &ws,
+            step + 1,
+            &format!("N={n} Alt+Right press {}", step + 1),
+        );
     }
     press(&[ALT], RIGHT);
-    expect_focus(&ws, n - 1, &format!("N={n} Alt+Right past strip end (press {n})"));
+    expect_focus(
+        &ws,
+        n - 1,
+        &format!("N={n} Alt+Right past strip end (press {n})"),
+    );
     for k in 1..n {
         press(&[ALT], LEFT);
-        expect_focus(&ws, n - 1 - k, &format!("N={n} Alt+Left press {k} (returning)"));
+        expect_focus(
+            &ws,
+            n - 1 - k,
+            &format!("N={n} Alt+Left press {k} (returning)"),
+        );
     }
     drop(d);
 }
@@ -210,7 +222,10 @@ fn focused_window_never_parked() {
     let mut d = Daemon::new("neverparked");
     d.start();
     settle(&d);
-    assert!(focus_window(&ws[0]), "setup: could not give window 0 the foreground");
+    assert!(
+        focus_window(&ws[0]),
+        "setup: could not give window 0 the foreground"
+    );
     let mut rng: u64 = 0x9E37_79B9_7F4A_7C15;
     let mut seq: Vec<&str> = Vec::new();
     for step in 0..40 {
@@ -360,7 +375,11 @@ fn stack_cycle() {
         matches!(fgw, Some(0) | Some(1)),
         "Alt+S (group): expected focus to stay inside stack {{0,1}}, observed {fgw:?}"
     );
-    let reach: Vec<usize> = stack.iter().copied().filter(|&i| reachable(&ws[i])).collect();
+    let reach: Vec<usize> = stack
+        .iter()
+        .copied()
+        .filter(|&i| reachable(&ws[i]))
+        .collect();
     assert_eq!(
         reach,
         vec![fgw.unwrap()],
@@ -382,11 +401,16 @@ fn stack_cycle() {
             ),
         };
         assert_ne!(
-            cur_i, prev,
+            cur_i,
+            prev,
             "{label} cycle step {}: expected focus to move to the other stack member than {prev}, observed still {cur_i}",
             step + 1
         );
-        let reach: Vec<usize> = stack.iter().copied().filter(|&i| reachable(&ws[i])).collect();
+        let reach: Vec<usize> = stack
+            .iter()
+            .copied()
+            .filter(|&i| reachable(&ws[i]))
+            .collect();
         assert_eq!(
             reach,
             vec![cur_i],
@@ -398,9 +422,16 @@ fn stack_cycle() {
 
     // Alt+S ungroups: every window must become a reachable column again (scrolling allowed).
     press(&[ALT], KEY_S);
-    assert!(fg_index(&ws).is_some(), "Alt+S (ungroup): expected a sentinel to keep focus, observed none");
+    assert!(
+        fg_index(&ws).is_some(),
+        "Alt+S (ungroup): expected a sentinel to keep focus, observed none"
+    );
     for target in 0..n {
-        walk_to(&ws, target, &format!("after ungroup, reaching window {target}"));
+        walk_to(
+            &ws,
+            target,
+            &format!("after ungroup, reaching window {target}"),
+        );
     }
     drop(d);
 }
@@ -425,27 +456,63 @@ fn move_reorders() {
     // Strip is [0,1,2,3]: window 1 has neighbours 0 (left) and 2 (right).
 
     press(&[ALT, SHIFT], RIGHT);
-    expect_focus(&ws, 1, "Alt+Shift+Right on window 1: focus must follow the moved window 1");
+    expect_focus(
+        &ws,
+        1,
+        "Alt+Shift+Right on window 1: focus must follow the moved window 1",
+    );
     // Expected strip [0,2,1,3]: window 1 must now have left neighbour 2 and right neighbour 3.
 
     press(&[ALT], LEFT);
-    expect_focus(&ws, 2, "after Alt+Shift+Right: Alt+Left from window 1 must reach its new left neighbour 2");
+    expect_focus(
+        &ws,
+        2,
+        "after Alt+Shift+Right: Alt+Left from window 1 must reach its new left neighbour 2",
+    );
     press(&[ALT], RIGHT);
-    expect_focus(&ws, 1, "after Alt+Shift+Right: Alt+Right from window 2 must return to window 1");
+    expect_focus(
+        &ws,
+        1,
+        "after Alt+Shift+Right: Alt+Right from window 2 must return to window 1",
+    );
     press(&[ALT], RIGHT);
-    expect_focus(&ws, 3, "after Alt+Shift+Right: Alt+Right from window 1 must reach its new right neighbour 3");
+    expect_focus(
+        &ws,
+        3,
+        "after Alt+Shift+Right: Alt+Right from window 1 must reach its new right neighbour 3",
+    );
     press(&[ALT], LEFT);
-    expect_focus(&ws, 1, "after Alt+Shift+Right: Alt+Left from window 3 must return to window 1");
+    expect_focus(
+        &ws,
+        1,
+        "after Alt+Shift+Right: Alt+Left from window 3 must return to window 1",
+    );
 
     // Alt+Shift+Left moves window 1 back past its left neighbour 2: strip [0,1,2,3] again.
     press(&[ALT, SHIFT], LEFT);
-    expect_focus(&ws, 1, "Alt+Shift+Left on window 1: focus must follow the moved window 1");
+    expect_focus(
+        &ws,
+        1,
+        "Alt+Shift+Left on window 1: focus must follow the moved window 1",
+    );
     press(&[ALT], LEFT);
-    expect_focus(&ws, 0, "after Alt+Shift+Left: Alt+Left from window 1 must reach window 0 (order restored)");
+    expect_focus(
+        &ws,
+        0,
+        "after Alt+Shift+Left: Alt+Left from window 1 must reach window 0 (order restored)",
+    );
     press(&[ALT], RIGHT);
-    expect_focus(&ws, 1, "after Alt+Shift+Left: Alt+Right from window 0 must return to window 1");
+    expect_focus(
+        &ws,
+        1,
+        "after Alt+Shift+Left: Alt+Right from window 0 must return to window 1",
+    );
     press(&[ALT], RIGHT);
-    expect_focus(&ws, 2, "after Alt+Shift+Left: Alt+Right from window 1 must reach window 2 (order restored)");
+    expect_focus(
+        &ws,
+        2,
+        "after Alt+Shift+Left: Alt+Right from window 1 must reach window 2 (order restored)",
+    );
     drop(d);
 }
 
@@ -540,7 +607,10 @@ fn pin_toggle() {
     // (the presses below only ever visit the windows to its right). Check it like every other window.
     let mut seen = vec![false; n];
     let Some(first) = fg_index(&ws) else {
-        panic!("after unpin, Alt+Left to the first column: expected a sentinel in the foreground, observed foreground hwnd {:#x}", fg());
+        panic!(
+            "after unpin, Alt+Left to the first column: expected a sentinel in the foreground, observed foreground hwnd {:#x}",
+            fg()
+        );
     };
     let frac = on_screen_fraction(&ws[first]);
     assert!(
@@ -599,7 +669,10 @@ fn monitor_hotkeys() {
     let mut d = Daemon::new("monitors");
     d.start();
     settle(&d);
-    assert!(focus_window(&ws[0]), "setup: could not give window 0 (primary) the foreground");
+    assert!(
+        focus_window(&ws[0]),
+        "setup: could not give window 0 (primary) the foreground"
+    );
     assert_eq!(
         monitor_of(&ws[0]),
         Some(0),

@@ -256,7 +256,9 @@ mod tests {
     fn only_the_first_scene_after_a_daemon_start_is_marked_startup() {
         let utc = crate::util::parse_iso_utc("2026-11-22T05:30:43.000Z").unwrap();
         let line = |t: &str, id: i64, x: i32| {
-            format!("{t} EXPECT id={id} rect={x},0,10,10 monitor=m kind=tile hidden=0 animate_ms=180\n")
+            format!(
+                "{t} EXPECT id={id} rect={x},0,10,10 monitor=m kind=tile hidden=0 animate_ms=180\n"
+            )
         };
         let mut text = String::new();
         text += &line("05:30:44.000", 1, 0);
@@ -272,18 +274,30 @@ mod tests {
         let flags: Vec<bool> = trace.expectations.iter().map(|e| e.startup).collect();
         assert_eq!(flags, vec![true, false, false, true]);
         let scenes: Vec<u64> = trace.expectations.iter().map(|e| e.scene).collect();
-        assert_eq!(scenes, vec![1, 2, 3, 4], "each EXPECT carries the number of the SCENE line that follows it");
+        assert_eq!(
+            scenes,
+            vec![1, 2, 3, 4],
+            "each EXPECT carries the number of the SCENE line that follows it"
+        );
         // A trace that starts mid-session (first SCENE line seen is seq=40): that one is the first in the file.
-        let text = format!("{}05:30:44.000 SCENE seq=40 tiles=1 holes=0\n{}05:30:45.000 SCENE seq=41 tiles=1 holes=0\n",
-            line("05:30:44.000", 1, 0), line("05:30:45.000", 1, 9));
-        let flags: Vec<bool> = parse(&text, 0, utc).expectations.iter().map(|e| e.startup).collect();
+        let text = format!(
+            "{}05:30:44.000 SCENE seq=40 tiles=1 holes=0\n{}05:30:45.000 SCENE seq=41 tiles=1 holes=0\n",
+            line("05:30:44.000", 1, 0),
+            line("05:30:45.000", 1, 9)
+        );
+        let flags: Vec<bool> = parse(&text, 0, utc)
+            .expectations
+            .iter()
+            .map(|e| e.startup)
+            .collect();
         assert_eq!(flags, vec![true, false]);
     }
 
     #[test]
     fn midnight_rollover_is_supported() {
         let utc = crate::util::parse_iso_utc("2026-11-22T23:59:59.000Z").unwrap();
-        let text = "00:00:01.000 EXPECT id=1 rect=0,0,10,10 monitor=m kind=tile hidden=0 animate_ms=0\n";
+        let text =
+            "00:00:01.000 EXPECT id=1 rect=0,0,10,10 monitor=m kind=tile hidden=0 animate_ms=0\n";
         let trace = parse(text, 0, utc);
         assert_eq!(trace.expectations[0].t_us, 2_000_000);
     }

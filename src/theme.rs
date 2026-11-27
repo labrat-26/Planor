@@ -67,13 +67,27 @@ pub fn enable_app_dark_mode() {
 pub fn apply_window(hwnd: HWND, dark: bool) {
     unsafe {
         let on = dark as i32;
-        DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, (&on as *const i32).cast(), 4);
-        DwmSetWindowAttribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, (&BACKDROP_MAIN_WINDOW as *const i32).cast(), 4);
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&on as *const i32).cast(),
+            4,
+        );
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_SYSTEMBACKDROP_TYPE,
+            (&BACKDROP_MAIN_WINDOW as *const i32).cast(),
+            4,
+        );
     }
 }
 /// Give a classic control (button, edit, combo, list, scroll bar, tooltip) the dark or light Explorer theme.
 pub fn apply_control(hwnd: HWND, dark: bool) {
-    let theme = wide(if dark { "DarkMode_Explorer" } else { "Explorer" });
+    let theme = wide(if dark {
+        "DarkMode_Explorer"
+    } else {
+        "Explorer"
+    });
     unsafe { SetWindowTheme(hwnd, theme.as_ptr(), std::ptr::null()) };
 }
 /// DWM colorization `0xAARRGGBB` to a GDI `COLORREF` (`0x00BBGGRR`).
@@ -103,7 +117,16 @@ pub fn app_icon(size: i32) -> windows_sys::Win32::UI::WindowsAndMessaging::HICON
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{IMAGE_ICON, LR_DEFAULTCOLOR, LR_SHARED, LoadImageW},
     };
-    unsafe { LoadImageW(GetModuleHandleW(std::ptr::null()), 1usize as *const u16, IMAGE_ICON, size, size, LR_DEFAULTCOLOR | LR_SHARED) as _ }
+    unsafe {
+        LoadImageW(
+            GetModuleHandleW(std::ptr::null()),
+            1usize as *const u16,
+            IMAGE_ICON,
+            size,
+            size,
+            LR_DEFAULTCOLOR | LR_SHARED,
+        ) as _
+    }
 }
 
 pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
@@ -119,7 +142,12 @@ pub fn hex_to_colorref(s: &str) -> Option<u32> {
 }
 /// A GDI `COLORREF` to `#RRGGBB` (uppercase).
 pub fn colorref_to_hex(c: u32) -> String {
-    format!("#{:02X}{:02X}{:02X}", c & 0xFF, (c >> 8) & 0xFF, (c >> 16) & 0xFF)
+    format!(
+        "#{:02X}{:02X}{:02X}",
+        c & 0xFF,
+        (c >> 8) & 0xFF,
+        (c >> 16) & 0xFF
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +210,11 @@ mod tests {
     fn luminance(c: u32) -> f64 {
         let lin = |v: u32| {
             let s = v as f64 / 255.0;
-            if s <= 0.03928 { s / 12.92 } else { ((s + 0.055) / 1.055).powf(2.4) }
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
         };
         0.2126 * lin(c & 0xFF) + 0.7152 * lin((c >> 8) & 0xFF) + 0.0722 * lin((c >> 16) & 0xFF)
     }
@@ -211,11 +243,14 @@ mod tests {
                 ("subtext/card", p.subtext, p.card),
                 ("error/card", p.error, p.card),
             ] {
-                assert!(contrast(fg, bg) >= 4.5, "dark={dark} {name}: {:.2}", contrast(fg, bg));
+                assert!(
+                    contrast(fg, bg) >= 4.5,
+                    "dark={dark} {name}: {:.2}",
+                    contrast(fg, bg)
+                );
             }
         }
     }
-
 
     #[test]
     fn hex_colorref_round_trip() {

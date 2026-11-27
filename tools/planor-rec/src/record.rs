@@ -2,22 +2,23 @@
 //! hotkeys and the microphone.
 
 use crate::{
-    capture::{self, DxgiOpener, Duplicator, MonitorInfo},
+    capture::{self, Duplicator, DxgiOpener, MonitorInfo},
     events::{self, EventWriter},
     pipe,
     timeline::{self, FrameSink, QueueSink, RealClock, TimelineCfg},
-    util::{self, qpc_frequency, qpc_us, unix_ms, Rect},
+    util::{self, Rect, qpc_frequency, qpc_us, unix_ms},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     fs::File,
     io::{BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc,
     },
     thread,
     time::{Duration, Instant},
@@ -27,9 +28,9 @@ use windows_sys::Win32::{
     System::{Console::SetConsoleCtrlHandler, Threading::GetCurrentThreadId},
     UI::{
         Input::KeyboardAndMouse::{
-            RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, VK_M,
+            MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, RegisterHotKey, UnregisterHotKey, VK_M,
         },
-        WindowsAndMessaging::{GetMessageW, PostThreadMessageW, MSG, WM_HOTKEY, WM_QUIT},
+        WindowsAndMessaging::{GetMessageW, MSG, PostThreadMessageW, WM_HOTKEY, WM_QUIT},
     },
 };
 
@@ -157,7 +158,10 @@ fn copy_trace(dir: &Path, name: &str, source: &Option<PathBuf>) {
         if source.is_file() {
             let target = dir.join(name);
             match std::fs::copy(&source, &target) {
-                Ok(bytes) => println!("planor-rec: copied Planor trace ({bytes} bytes) to {}", target.display()),
+                Ok(bytes) => println!(
+                    "planor-rec: copied Planor trace ({bytes} bytes) to {}",
+                    target.display()
+                ),
                 Err(e) => eprintln!("planor-rec: could not copy {}: {e}", source.display()),
             }
         } else if !dir.join(name).is_file() {
@@ -172,7 +176,11 @@ fn copy_trace(dir: &Path, name: &str, source: &Option<PathBuf>) {
 /// Keep `dst` a copy of `src` while recording. An isolated test daemon deletes its folder (and its trace)
 /// when it exits, which can be before the recording is stopped, so the recorder keeps its own copy as the
 /// trace grows and never removes it. The copy is only refreshed when the size or modified time changed.
-pub fn spawn_trace_follower(src: PathBuf, dst: PathBuf, stop: Arc<AtomicBool>) -> thread::JoinHandle<()> {
+pub fn spawn_trace_follower(
+    src: PathBuf,
+    dst: PathBuf,
+    stop: Arc<AtomicBool>,
+) -> thread::JoinHandle<()> {
     thread::spawn(move || {
         let mut last: Option<(u64, Option<std::time::SystemTime>)> = None;
         while !stop.load(Ordering::Relaxed) {
@@ -201,16 +209,21 @@ pub fn follow_trace_once(
         }
     }
 }
-pub fn select_monitors(monitors: &[MonitorInfo], spec: &str) -> util::anyhow_lite::Result<Vec<u32>> {
+pub fn select_monitors(
+    monitors: &[MonitorInfo],
+    spec: &str,
+) -> util::anyhow_lite::Result<Vec<u32>> {
     if monitors.is_empty() {
         return util::anyhow_lite::err("no monitors found");
     }
     if spec.eq_ignore_ascii_case("all") || spec.is_empty() {
         return Ok(monitors.iter().map(|m| m.index).collect());
     }
-    let index: u32 = spec
-        .parse()
-        .map_err(|_| util::fmt_err(format!("--monitors must be `all` or a monitor index, got `{spec}`")))?;
+    let index: u32 = spec.parse().map_err(|_| {
+        util::fmt_err(format!(
+            "--monitors must be `all` or a monitor index, got `{spec}`"
+        ))
+    })?;
     if monitors.iter().any(|m| m.index == index) {
         Ok(vec![index])
     } else {
@@ -234,7 +247,9 @@ pub fn describe_hotkey_failure(keys: &str, code: u32) -> String {
              or close the program that owns it"
         )
     } else {
-        format!("{keys} could not be registered (Windows error {code}); it will NOT work in this recording")
+        format!(
+            "{keys} could not be registered (Windows error {code}); it will NOT work in this recording"
+        )
     }
 }
 
@@ -279,7 +294,9 @@ fn spawn_hotkeys(
                 writer.write(json!({"kind": "session", "event": "hotkey", "name": "stop"}));
                 stop.store(true, Ordering::SeqCst);
             } else if msg.message == WM_HOTKEY && msg.wParam == 2 {
-                writer.write(json!({"kind": "mark", "text": "hotkey Ctrl+Alt+Shift+M", "source": "hotkey"}));
+                writer.write(
+                    json!({"kind": "mark", "text": "hotkey Ctrl+Alt+Shift+M", "source": "hotkey"}),
+                );
                 println!("planor-rec: mark added by hotkey");
             }
         }
@@ -369,7 +386,9 @@ fn spawn_audio(out: &Path, requested_device: &Option<String>) -> Option<AudioPro
     let ffmpeg = match util::find_ffmpeg() {
         Some(p) => p,
         None => {
-            eprintln!("planor-rec: microphone requested but FFmpeg was not found; recording video only");
+            eprintln!(
+                "planor-rec: microphone requested but FFmpeg was not found; recording video only"
+            );
             return None;
         }
     };
@@ -402,7 +421,10 @@ fn spawn_audio(out: &Path, requested_device: &Option<String>) -> Option<AudioPro
         "+bitexact",
     ]);
     // stdin is piped so the recorder can send `q` and let FFmpeg finish the WAV header itself.
-    command.arg(&path).stdin(Stdio::piped()).stdout(Stdio::null());
+    command
+        .arg(&path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null());
     if let Some(log) = log {
         command.stderr(Stdio::from(log));
     } else {
@@ -507,7 +529,11 @@ pub fn finalize_wav(path: &Path) {
     let Some(info) = wav_info(path) else {
         return;
     };
-    let Ok(mut file) = std::fs::OpenOptions::new().read(true).write(true).open(path) else {
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+    else {
         return;
     };
     let Ok(len) = file.metadata().map(|m| m.len()) else {
@@ -623,7 +649,10 @@ fn record_monitor(
         ))
         .spawn()
         .map_err(|e| util::fmt_err(format!("starting FFmpeg: {e}")))?;
-    let stdin = child.stdin.take().ok_or_else(|| util::fmt_err("ffmpeg stdin"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| util::fmt_err("ffmpeg stdin"))?;
 
     let capture = match Duplicator::open_by_device(Some(&monitor.device), index) {
         Ok(c) => c,
@@ -831,7 +860,8 @@ pub fn run(args: RecordArgs) -> util::anyhow_lite::Result<()> {
     let qpc_start = util::qpc_ticks();
     let qpc_start_us = util::ticks_to_us(qpc_start, qpc_freq);
     let utc_start_unix_ms = unix_ms();
-    let monitors = capture::monitors().map_err(|e| util::fmt_err(format!("enumerating monitors: {e}")))?;
+    let monitors =
+        capture::monitors().map_err(|e| util::fmt_err(format!("enumerating monitors: {e}")))?;
     let taskbars = capture::taskbar_rects();
     let selected = select_monitors(&monitors, &args.monitors)?;
 
@@ -913,7 +943,11 @@ pub fn run(args: RecordArgs) -> util::anyhow_lite::Result<()> {
         .clone()
         .map(|src| spawn_trace_follower(src, out.join("trace.log"), stop.clone()));
 
-    let mut audio_proc = if args.mic { spawn_audio(&out, &args.mic_device) } else { None };
+    let mut audio_proc = if args.mic {
+        spawn_audio(&out, &args.mic_device)
+    } else {
+        None
+    };
 
     let mut threads = Vec::new();
     for &index in &selected {
@@ -936,7 +970,16 @@ pub fn run(args: RecordArgs) -> util::anyhow_lite::Result<()> {
         let preset = args.preset.clone();
         let encoder_threads = args.encoder_threads;
         let handle = thread::spawn(move || {
-            record_monitor(monitor, out, fps, preset, encoder_threads, stop, writer, epoch)
+            record_monitor(
+                monitor,
+                out,
+                fps,
+                preset,
+                encoder_threads,
+                stop,
+                writer,
+                epoch,
+            )
         });
         threads.push((index, handle));
     }
@@ -1082,7 +1125,14 @@ mod tests {
             v.extend_from_slice(b"INFOISFT\x0e\x00\x00\x00Lavf62.3.100\x00\x00");
         }
         v.extend_from_slice(b"data");
-        v.extend_from_slice(&(if placeholder { 0xFFFF_FFFFu32 } else { (samples * 2) as u32 }).to_le_bytes());
+        v.extend_from_slice(
+            &(if placeholder {
+                0xFFFF_FFFFu32
+            } else {
+                (samples * 2) as u32
+            })
+            .to_le_bytes(),
+        );
         v.extend(std::iter::repeat_n(0u8, samples * 2));
         v
     }
@@ -1097,9 +1147,15 @@ mod tests {
             assert_eq!(info.sample_rate, 16_000);
             assert_eq!(info.channels, 1);
             assert_eq!(info.bits, 16);
-            assert_eq!(info.data_bytes, 64_000, "list={list} placeholder={placeholder}");
+            assert_eq!(
+                info.data_bytes, 64_000,
+                "list={list} placeholder={placeholder}"
+            );
             assert_eq!(info.duration_ms(), 2_000);
-            assert_eq!(info.data_offset, if list { 12 + 24 + 8 + 26 + 8 } else { 44 });
+            assert_eq!(
+                info.data_offset,
+                if list { 12 + 24 + 8 + 26 + 8 } else { 44 }
+            );
         }
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1129,7 +1185,10 @@ mod tests {
     #[test]
     fn hotkey_conflicts_are_described_clearly() {
         let text = describe_hotkey_failure("Ctrl+Alt+Shift+R", 1409);
-        assert!(text.contains("already registered by another program"), "{text}");
+        assert!(
+            text.contains("already registered by another program"),
+            "{text}"
+        );
         assert!(text.contains("1409"));
         assert!(text.contains("planor-rec stop"));
         let other = describe_hotkey_failure("Ctrl+Alt+Shift+M", 5);
@@ -1140,12 +1199,16 @@ mod tests {
     fn limits_stop_on_time_or_size() {
         let mb = 1024 * 1024;
         assert!(limit_reached(Duration::from_secs(10), 5 * mb, Some(100), Some(1.0)).is_none());
-        assert!(limit_reached(Duration::from_secs(61), 0, None, Some(1.0))
-            .unwrap()
-            .contains("--max-minutes"));
-        assert!(limit_reached(Duration::from_secs(1), 100 * mb, Some(100), None)
-            .unwrap()
-            .contains("--max-size-mb"));
+        assert!(
+            limit_reached(Duration::from_secs(61), 0, None, Some(1.0))
+                .unwrap()
+                .contains("--max-minutes")
+        );
+        assert!(
+            limit_reached(Duration::from_secs(1), 100 * mb, Some(100), None)
+                .unwrap()
+                .contains("--max-size-mb")
+        );
         assert!(limit_reached(Duration::from_secs(1000), u64::MAX, None, None).is_none());
     }
 

@@ -15,21 +15,19 @@ use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, AtomicUsize, Ordering},
 };
-use windows::{
-    Win32::{
-        Foundation as WF,
-        Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
-            Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice,
-                ID3D11Device, ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
-            },
-            Dxgi::{
-                Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-                DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
-                DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
-                IDXGIFactory2, IDXGISwapChain1,
-            },
+use windows::Win32::{
+    Foundation as WF,
+    Graphics::{
+        Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+        Direct3D11::{
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
+            ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+        },
+        Dxgi::{
+            Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
+            DXGI_PRESENT, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+            DXGI_SWAP_EFFECT_FLIP_DISCARD, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
+            IDXGIFactory2, IDXGISwapChain1,
         },
     },
 };
@@ -62,7 +60,10 @@ fn tile_video_class(d: &Daemon) {
     let path = d.dir.join("planor/planor.toml");
     let cfg = fs::read_to_string(&path).unwrap();
     let catch_all = "[[rules]]\nclass=\"*\"\naction=\"ignore\"\n";
-    assert!(cfg.contains(catch_all), "test config has no catch-all ignore rule");
+    assert!(
+        cfg.contains(catch_all),
+        "test config has no catch-all ignore rule"
+    );
     let rule = format!("[[rules]]\nclass={:?}\naction=\"tile\"\n", video_class());
     fs::write(&path, cfg.replacen(catch_all, &(rule + catch_all), 1)).unwrap();
 }
@@ -379,14 +380,20 @@ fn count_in(cap: &Capture, r: RECT, want: impl Fn(u32) -> bool) -> Option<(usize
             let copy = copy.unwrap();
             cap.ctx.CopyResource(&copy, &tex);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            cap.ctx.Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-            let (x0, y0) = ((r.left - cap.origin.0).max(0), (r.top - cap.origin.1).max(0));
+            cap.ctx
+                .Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            let (x0, y0) = (
+                (r.left - cap.origin.0).max(0),
+                (r.top - cap.origin.1).max(0),
+            );
             let x1 = (r.right - cap.origin.0).min(desc.Width as i32).max(x0);
             let y1 = (r.bottom - cap.origin.1).min(desc.Height as i32).max(y0);
             let (mut hit, mut total) = (0usize, 0usize);
             for y in y0..y1 {
                 let row = std::slice::from_raw_parts(
-                    (mapped.pData as *const u8).add(y as usize * mapped.RowPitch as usize).cast::<u32>(),
+                    (mapped.pData as *const u8)
+                        .add(y as usize * mapped.RowPitch as usize)
+                        .cast::<u32>(),
                     desc.Width as usize,
                 );
                 for px in &row[x0 as usize..x1 as usize] {
@@ -403,7 +410,12 @@ fn count_in(cap: &Capture, r: RECT, want: impl Fn(u32) -> bool) -> Option<(usize
 }
 
 fn shrink(r: RECT, by_w: i32, by_h: i32) -> RECT {
-    RECT { left: r.left + by_w, top: r.top + by_h, right: r.right - by_w, bottom: r.bottom - by_h }
+    RECT {
+        left: r.left + by_w,
+        top: r.top + by_h,
+        right: r.right - by_w,
+        bottom: r.bottom - by_h,
+    }
 }
 
 fn client_screen_rect(hwnd: isize) -> RECT {
@@ -413,7 +425,12 @@ fn client_screen_rect(hwnd: isize) -> RECT {
         GetClientRect(hwnd as _, &mut c);
         ClientToScreen(hwnd as _, &mut p);
     }
-    RECT { left: p.x, top: p.y, right: p.x + c.right, bottom: p.y + c.bottom }
+    RECT {
+        left: p.x,
+        top: p.y,
+        right: p.x + c.right,
+        bottom: p.y + c.bottom,
+    }
 }
 
 /// Whether a frame showed at least `frac` of `r` in the video colours within 3 s (the video presents
@@ -500,7 +517,10 @@ impl PipWindow {
             join_window_thread(Some(join));
             unreachable!("PipWindow thread exited without a window or a panic");
         };
-        Self { hwnd, join: Some(join) }
+        Self {
+            hwnd,
+            join: Some(join),
+        }
     }
 
     fn rect(&self) -> RECT {
@@ -514,7 +534,14 @@ impl PipWindow {
     }
 
     fn repaint(&self) {
-        unsafe { RedrawWindow(self.hwnd as _, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW) };
+        unsafe {
+            RedrawWindow(
+                self.hwnd as _,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            )
+        };
     }
 }
 
@@ -564,14 +591,19 @@ fn daemon_state(d: &Daemon) -> serde_json::Value {
 }
 
 fn tile_of(st: &serde_json::Value, id: isize) -> Option<&serde_json::Value> {
-    st["tiles"].as_array()?.iter().find(|t| t["id"].as_i64() == Some(id as i64))
+    st["tiles"]
+        .as_array()?
+        .iter()
+        .find(|t| t["id"].as_i64() == Some(id as i64))
 }
 
 /// Offset of the strip holding `id`.
 fn strip_offset(st: &serde_json::Value, id: isize) -> Option<i64> {
     st["strips"].as_array()?.iter().find_map(|s| {
         let holds = s["columns"].as_array()?.iter().any(|c| {
-            c["members"].as_array().is_some_and(|m| m.iter().any(|v| v.as_i64() == Some(id as i64)))
+            c["members"]
+                .as_array()
+                .is_some_and(|m| m.iter().any(|v| v.as_i64() == Some(id as i64)))
         });
         if holds { s["offset"].as_i64() } else { None }
     })
@@ -596,7 +628,9 @@ fn claim_fg(hwnd: isize) {
 /// with the fingers held still for 120 ms, so no momentum is left. Returns how long the replay takes.
 fn replay_scroll(d: &Daemon, dx: f64) -> Duration {
     let path = d.dir.join("scroll.jsonl");
-    let mut lines = vec![r#"{"kind":"meta","schema":1,"name":"scn_video-scroll","synthetic":true}"#.to_string()];
+    let mut lines = vec![
+        r#"{"kind":"meta","schema":1,"name":"scn_video-scroll","synthetic":true}"#.to_string(),
+    ];
     let mut t: i64 = 0;
     let (steps, hold) = (45, 15);
     for (from, to) in [(600.0, 600.0 + dx), (600.0 + dx, 600.0)] {
@@ -614,9 +648,18 @@ fn replay_scroll(d: &Daemon, dx: f64) -> Duration {
         t += 8000;
     }
     fs::write(&path, lines.join("\n") + "\n").unwrap();
-    let out = d.call_output(&["gestures", "replay", path.to_str().unwrap(), "--gap-ms", "500"]);
+    let out = d.call_output(&[
+        "gestures",
+        "replay",
+        path.to_str().unwrap(),
+        "--gap-ms",
+        "500",
+    ]);
     let said = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success() && said.contains("replaying 2 gestures"), "gesture replay refused: {said:?}");
+    assert!(
+        out.status.success() && said.contains("replaying 2 gestures"),
+        "gesture replay refused: {said:?}"
+    );
     Duration::from_micros(t as u64) + Duration::from_millis(2 * 500)
 }
 
@@ -624,7 +667,9 @@ fn replay_scroll(d: &Daemon, dx: f64) -> Duration {
 /// lifting. Returns when the rest starts (from now) and the total length.
 fn replay_scroll_and_rest(d: &Daemon, dx: f64, rest_ms: i64) -> (Duration, Duration) {
     let path = d.dir.join("scroll-rest.jsonl");
-    let mut lines = vec![r#"{"kind":"meta","schema":1,"name":"scn_video-scroll-rest","synthetic":true}"#.to_string()];
+    let mut lines = vec![
+        r#"{"kind":"meta","schema":1,"name":"scn_video-scroll-rest","synthetic":true}"#.to_string(),
+    ];
     let (steps, mut t) = (45, 0i64);
     let pts = |x: f64| format!("[[{:.1},300],[{:.1},312],[{:.1},300]]", x, x + 40., x + 80.);
     for i in 0..=steps {
@@ -634,15 +679,30 @@ fn replay_scroll_and_rest(d: &Daemon, dx: f64, rest_ms: i64) -> (Duration, Durat
     }
     let rest_at = t;
     while t < rest_at + rest_ms * 1000 {
-        lines.push(format!(r#"{{"t":{t},"kind":"contacts","pts":{}}}"#, pts(600.0 + dx)));
+        lines.push(format!(
+            r#"{{"t":{t},"kind":"contacts","pts":{}}}"#,
+            pts(600.0 + dx)
+        ));
         t += 8000;
     }
     lines.push(format!(r#"{{"t":{t},"kind":"contacts","pts":[]}}"#));
     fs::write(&path, lines.join("\n") + "\n").unwrap();
-    let out = d.call_output(&["gestures", "replay", path.to_str().unwrap(), "--gap-ms", "0"]);
+    let out = d.call_output(&[
+        "gestures",
+        "replay",
+        path.to_str().unwrap(),
+        "--gap-ms",
+        "0",
+    ]);
     let said = String::from_utf8_lossy(&out.stdout).to_string();
-    assert!(out.status.success() && said.contains("replaying 1 gesture"), "gesture replay refused: {said:?}");
-    (Duration::from_micros(rest_at as u64), Duration::from_micros(t as u64))
+    assert!(
+        out.status.success() && said.contains("replaying 1 gesture"),
+        "gesture replay refused: {said:?}"
+    );
+    (
+        Duration::from_micros(rest_at as u64),
+        Duration::from_micros(t as u64),
+    )
 }
 
 /// Distinct red levels (the video's drifting red channel) seen inside `r` over `window`; a frozen picture
@@ -684,33 +744,58 @@ fn d3d11_flip_video_window_scroll_no_resize_or_cover() {
     let mut d = Daemon::new_animated("video-scroll");
     tile_video_class(&d);
     d.start();
-    assert!(wait_settled(&d, 5, Duration::from_secs(6)), "the five windows did not settle");
+    assert!(
+        wait_settled(&d, 5, Duration::from_secs(6)),
+        "the five windows did not settle"
+    );
     let st = daemon_state(&d);
     let cols: Vec<i64> = st["strips"][0]["columns"]
         .as_array()
         .map(|c| c.iter().filter_map(|c| c["active_id"].as_i64()).collect())
         .unwrap_or_default();
-    let want: Vec<i64> = [s0.hwnd, video.hwnd, s2.hwnd, s3.hwnd, s4.hwnd].iter().map(|&h| h as i64).collect();
-    assert_eq!(cols, want, "setup: the strip holds the five windows left to right in creation order");
+    let want: Vec<i64> = [s0.hwnd, video.hwnd, s2.hwnd, s3.hwnd, s4.hwnd]
+        .iter()
+        .map(|&h| h as i64)
+        .collect();
+    assert_eq!(
+        cols, want,
+        "setup: the strip holds the five windows left to right in creation order"
+    );
     claim_fg(s0.hwnd);
-    assert!(wait_settled(&d, 5, Duration::from_secs(4)), "layout did not settle after focusing the first window");
+    assert!(
+        wait_settled(&d, 5, Duration::from_secs(4)),
+        "layout did not settle after focusing the first window"
+    );
     thread::sleep(Duration::from_millis(400));
     let mon = primary_monitor_bounds();
     let cap = Capture::open(0).expect("DXGI primary output duplication");
-    assert_eq!(cap.origin, (mon.left, mon.top), "DXGI output 0 is not the primary monitor");
+    assert_eq!(
+        cap.origin,
+        (mon.left, mon.top),
+        "DXGI output 0 is not the primary monitor"
+    );
 
     let base_sizes = video.wm_size_count();
     let base_client = client_screen_rect(video.hwnd);
-    let base_size = ((base_client.right - base_client.left) as u32, (base_client.bottom - base_client.top) as u32);
+    let base_size = (
+        (base_client.right - base_client.left) as u32,
+        (base_client.bottom - base_client.top) as u32,
+    );
     let base_rb = video.resize_buffers_count();
     let mut presents = video.presents();
 
     // Focus walk s0 -> s4 and back. The video is the second column, so it is parked while s3/s4 are focused.
     let mut parked_seen = false;
     let mut visible_checks = 0;
-    for (i, &step) in [RIGHT, RIGHT, RIGHT, RIGHT, LEFT, LEFT, LEFT, LEFT].iter().enumerate() {
+    for (i, &step) in [RIGHT, RIGHT, RIGHT, RIGHT, LEFT, LEFT, LEFT, LEFT]
+        .iter()
+        .enumerate()
+    {
         press(&[ALT], step);
-        assert!(wait_settled(&d, 5, Duration::from_secs(4)), "step {i}: layout did not settle");
+        assert!(
+            wait_settled(&d, 5, Duration::from_secs(4)),
+            "step {i}: layout did not settle"
+        );
         let st = daemon_state(&d);
         let tile = tile_of(&st, video.hwnd).expect("video tile in state");
         parked_seen |= tile["parked"].as_bool() == Some(true);
@@ -725,11 +810,24 @@ fn d3d11_flip_video_window_scroll_no_resize_or_cover() {
             visible_checks += 1;
         }
     }
-    assert_eq!(fg(), s0.hwnd, "the focus walk must end back on the first window");
-    assert!(parked_seen, "the focus walk never parked the video window: the test did not scroll it off screen");
-    assert_eq!(visible_checks, 2, "the video window must have been focused twice during the walk");
+    assert_eq!(
+        fg(),
+        s0.hwnd,
+        "the focus walk must end back on the first window"
+    );
+    assert!(
+        parked_seen,
+        "the focus walk never parked the video window: the test did not scroll it off screen"
+    );
+    assert_eq!(
+        visible_checks, 2,
+        "the video window must have been focused twice during the walk"
+    );
     let walk_presents = video.presents() - presents;
-    assert!(walk_presents >= 60, "the video must keep presenting during the walk (presents={walk_presents})");
+    assert!(
+        walk_presents >= 60,
+        "the video must keep presenting during the walk (presents={walk_presents})"
+    );
 
     // Live three-finger scroll one way and back (whichever way the strip can go from the first column).
     presents = video.presents();
@@ -743,18 +841,35 @@ fn d3d11_flip_video_window_scroll_no_resize_or_cover() {
         }
         thread::sleep(Duration::from_millis(30));
     }
-    assert!(wait_settled(&d, 5, Duration::from_secs(4)), "layout did not settle after the live scroll");
-    assert!(moved >= 300, "the replayed three-finger swipe must scroll the strip (max offset change {moved} px)");
+    assert!(
+        wait_settled(&d, 5, Duration::from_secs(4)),
+        "layout did not settle after the live scroll"
+    );
+    assert!(
+        moved >= 300,
+        "the replayed three-finger swipe must scroll the strip (max offset change {moved} px)"
+    );
     let scroll_presents = video.presents() - presents;
-    assert!(scroll_presents >= 30, "the video must keep presenting during the live scroll (presents={scroll_presents})");
+    assert!(
+        scroll_presents >= 30,
+        "the video must keep presenting during the live scroll (presents={scroll_presents})"
+    );
 
     let sizes: Vec<(u32, u32)> = video.stats.wm_sizes.lock().unwrap()[base_sizes..].to_vec();
     assert!(
         sizes.iter().all(|&s| s == base_size),
         "the video's client size must never change while scrolling: baseline {base_size:?}, WM_SIZE {sizes:?}"
     );
-    assert_eq!(video.resize_buffers_count(), base_rb, "scrolling must never make the video resize its swapchain");
-    assert_eq!(video.present_errors(), 0, "the video must present without errors");
+    assert_eq!(
+        video.resize_buffers_count(),
+        base_rb,
+        "scrolling must never make the video resize its swapchain"
+    );
+    assert_eq!(
+        video.present_errors(),
+        0,
+        "the video must present without errors"
+    );
     d.stop();
 }
 
@@ -771,13 +886,23 @@ fn video_stand_in_keeps_playing_while_fingers_rest_mid_scroll() {
     let mut d = Daemon::new_animated("video-rest");
     tile_video_class(&d);
     d.start();
-    assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(6)),
+        "the three windows did not settle"
+    );
     claim_fg(s0.hwnd);
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after focusing the first window");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after focusing the first window"
+    );
     thread::sleep(Duration::from_millis(300));
     let mon = primary_monitor_bounds();
     let cap = Capture::open(0).expect("DXGI primary output duplication");
-    assert_eq!(cap.origin, (mon.left, mon.top), "DXGI output 0 is not the primary monitor");
+    assert_eq!(
+        cap.origin,
+        (mon.left, mon.top),
+        "DXGI output 0 is not the primary monitor"
+    );
 
     // Swipe left by a third of the monitor and hold. The scroll direction does not matter: the video column
     // moves, so it is drawn as a stand-in while the fingers rest.
@@ -787,25 +912,49 @@ fn video_stand_in_keeps_playing_while_fingers_rest_mid_scroll() {
     let st = daemon_state(&d);
     let tile = tile_of(&st, video.hwnd).expect("video tile in state");
     let er = &tile["expected_rect"];
-    let (x, y, w, h) = (er["x"].as_i64().unwrap() as i32, er["y"].as_i64().unwrap() as i32, er["w"].as_i64().unwrap() as i32, er["h"].as_i64().unwrap() as i32);
+    let (x, y, w, h) = (
+        er["x"].as_i64().unwrap() as i32,
+        er["y"].as_i64().unwrap() as i32,
+        er["w"].as_i64().unwrap() as i32,
+        er["h"].as_i64().unwrap() as i32,
+    );
     let r = shrink(
-        RECT { left: x.max(mon.left), top: y.max(mon.top), right: (x + w).min(mon.right), bottom: (y + h).min(mon.bottom) },
+        RECT {
+            left: x.max(mon.left),
+            top: y.max(mon.top),
+            right: (x + w).min(mon.right),
+            bottom: (y + h).min(mon.bottom),
+        },
         30,
         60,
     );
-    assert!(r.right - r.left >= 40 && r.bottom - r.top >= 40, "the held scroll left too little of the video on screen: {:?}", (x, y, w, h));
+    assert!(
+        r.right - r.left >= 40 && r.bottom - r.top >= 40,
+        "the held scroll left too little of the video on screen: {:?}",
+        (x, y, w, h)
+    );
     let presents = video.presents();
     let reds = video_reds_over(&cap, r, Duration::from_millis(1200));
     let held = presents_while(&video, presents);
-    assert!(held >= 30, "the video must keep presenting while the fingers rest (presents={held})");
+    assert!(
+        held >= 30,
+        "the video must keep presenting while the fingers rest (presents={held})"
+    );
     assert!(
         reds.len() >= 5,
         "the video's stand-in froze while the fingers rested mid-scroll: only red levels {reds:?} showed in {:?} over 1.2 s",
         (r.left, r.top, r.right, r.bottom)
     );
     thread::sleep(total.saturating_sub(started.elapsed()) + Duration::from_millis(300));
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after the held scroll");
-    assert_eq!(video.present_errors(), 0, "the video must present without errors");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after the held scroll"
+    );
+    assert_eq!(
+        video.present_errors(),
+        0,
+        "the video must present without errors"
+    );
     d.stop();
 }
 
@@ -831,33 +980,63 @@ fn fullscreen_borderless_d3d11_video_window_scroll_preserves_frame() {
     let mut d = Daemon::new_animated("video-fs");
     tile_video_class(&d);
     d.start();
-    assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(6)),
+        "the three windows did not settle"
+    );
     claim_fg(video.hwnd);
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after focusing the video");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after focusing the video"
+    );
 
     video.make_borderless_fullscreen(mon);
     let entered = wait_until(Duration::from_secs(6), || {
-        tile_of(&daemon_state(&d), video.hwnd).is_some_and(|t| t["fullscreen"].as_bool() == Some(true))
+        tile_of(&daemon_state(&d), video.hwnd)
+            .is_some_and(|t| t["fullscreen"].as_bool() == Some(true))
     });
-    assert!(entered, "the daemon did not recognise the monitor-sized borderless video as fullscreen");
+    assert!(
+        entered,
+        "the daemon did not recognise the monitor-sized borderless video as fullscreen"
+    );
     thread::sleep(Duration::from_millis(400));
     // Chromium's borderless fullscreen often ends up at h - 1; Planor must keep that size, not force h (#77).
     unsafe {
-        SetWindowPos(video.hwnd as _, null_mut(), mon.left, mon.top, mon_w, mon_h - 1, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            video.hwnd as _,
+            null_mut(),
+            mon.left,
+            mon.top,
+            mon_w,
+            mon_h - 1,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
     }
     thread::sleep(Duration::from_millis(500));
     assert!(
-        tile_of(&daemon_state(&d), video.hwnd).is_some_and(|t| t["fullscreen"].as_bool() == Some(true)),
+        tile_of(&daemon_state(&d), video.hwnd)
+            .is_some_and(|t| t["fullscreen"].as_bool() == Some(true)),
         "an h - 1 frame must keep the video fullscreen"
     );
     let cap = Capture::open(0).expect("DXGI primary output duplication");
-    assert_eq!(cap.origin, (mon.left, mon.top), "DXGI output 0 is not the primary monitor");
+    assert_eq!(
+        cap.origin,
+        (mon.left, mon.top),
+        "DXGI output 0 is not the primary monitor"
+    );
 
     let base_sizes = video.wm_size_count();
     let base_rb = video.resize_buffers_count();
     let base_client = client_screen_rect(video.hwnd);
-    let base_size = ((base_client.right - base_client.left) as u32, (base_client.bottom - base_client.top) as u32);
-    assert_eq!(base_size, (mon_w as u32, (mon_h - 1) as u32), "setup: the borderless video's client is the h - 1 frame");
+    let base_size = (
+        (base_client.right - base_client.left) as u32,
+        (base_client.bottom - base_client.top) as u32,
+    );
+    assert_eq!(
+        base_size,
+        (mon_w as u32, (mon_h - 1) as u32),
+        "setup: the borderless video's client is the h - 1 frame"
+    );
     let presents = video.presents();
 
     let parked_seen = Cell::new(false);
@@ -883,11 +1062,21 @@ fn fullscreen_borderless_d3d11_video_window_scroll_preserves_frame() {
             check_frame(&format!("focus step {i}"));
             thread::sleep(Duration::from_millis(15));
         }
-        assert!(wait_settled(&d, 3, Duration::from_secs(4)), "step {i}: layout did not settle");
+        assert!(
+            wait_settled(&d, 3, Duration::from_secs(4)),
+            "step {i}: layout did not settle"
+        );
         check_frame(&format!("focus step {i}, settled"));
     }
-    assert!(parked_seen.get(), "the focus walk never parked the fullscreen video: it did not scroll off screen");
-    assert_eq!(fg(), video.hwnd, "the focus walk must end back on the video");
+    assert!(
+        parked_seen.get(),
+        "the focus walk never parked the fullscreen video: it did not scroll off screen"
+    );
+    assert_eq!(
+        fg(),
+        video.hwnd,
+        "the focus walk must end back on the video"
+    );
     let r = video.rect();
     assert!(
         (r.left - mon.left).abs() <= 2 && (r.top - mon.top).abs() <= 2,
@@ -902,7 +1091,11 @@ fn fullscreen_borderless_d3d11_video_window_scroll_preserves_frame() {
         bottom: mon.bottom - mon_h / 4,
     };
     let (ok, got) = video_visible_in(&cap, centre, 0.95);
-    assert!(ok, "the fullscreen video must be on screen after unparking; at best {:.0}% video pixels", got * 100.);
+    assert!(
+        ok,
+        "the fullscreen video must be on screen after unparking; at best {:.0}% video pixels",
+        got * 100.
+    );
 
     // Live three-finger scroll one way and back (whichever way the strip can go from the last column).
     parked_seen.set(false);
@@ -912,20 +1105,41 @@ fn fullscreen_borderless_d3d11_video_window_scroll_preserves_frame() {
         check_frame("live scroll");
         thread::sleep(Duration::from_millis(15));
     }
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after the live scroll");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after the live scroll"
+    );
     check_frame("after the live scroll");
-    assert!(parked_seen.get(), "the live scroll never moved the fullscreen video off screen");
-    assert!(samples.get() > 100, "too few frame samples ({})", samples.get());
+    assert!(
+        parked_seen.get(),
+        "the live scroll never moved the fullscreen video off screen"
+    );
+    assert!(
+        samples.get() > 100,
+        "too few frame samples ({})",
+        samples.get()
+    );
 
     let sizes: Vec<(u32, u32)> = video.stats.wm_sizes.lock().unwrap()[base_sizes..].to_vec();
     assert!(
         sizes.iter().all(|&s| s == base_size),
         "the fullscreen video's client size must never change (#77): baseline {base_size:?}, WM_SIZE {sizes:?}"
     );
-    assert_eq!(video.resize_buffers_count(), base_rb, "park/unpark must never make the video resize its swapchain");
+    assert_eq!(
+        video.resize_buffers_count(),
+        base_rb,
+        "park/unpark must never make the video resize its swapchain"
+    );
     let delta = video.presents() - presents;
-    assert!(delta >= 60, "the fullscreen video must keep presenting (presents={delta})");
-    assert_eq!(video.present_errors(), 0, "the fullscreen video must present without errors");
+    assert!(
+        delta >= 60,
+        "the fullscreen video must keep presenting (presents={delta})"
+    );
+    assert_eq!(
+        video.present_errors(),
+        0,
+        "the fullscreen video must present without errors"
+    );
     drop(s0);
     drop(s2);
     d.stop();
@@ -940,7 +1154,9 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
     // with its rect, is never tiled or parked, and the strip still scrolls under it.
     use std::cell::Cell;
     aware();
-    let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::at(i, 0, 40 + 80 * i as i32, 60)).collect();
+    let ws: Vec<Sentinel> = (0..3)
+        .map(|i| Sentinel::at(i, 0, 40 + 80 * i as i32, 60))
+        .collect();
     let mut d = Daemon::new_animated("video-pip");
     // Isolated daemons carve overlay holes only for the class a test names (they share the desktop with the
     // developer's own windows); the real daemon carves them for every occluder. The daemon child inherits the
@@ -948,30 +1164,64 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
     let holes = EnvGuard::set("PLANOR_HOLES", &pip_class());
     d.start();
     drop(holes);
-    assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(6)),
+        "the three windows did not settle"
+    );
     claim_fg(ws[0].hwnd);
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after focusing the first window");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after focusing the first window"
+    );
     thread::sleep(Duration::from_millis(300));
     let mon = primary_monitor_bounds();
     let cap = Capture::open(0).expect("DXGI primary output duplication");
-    assert_eq!(cap.origin, (mon.left, mon.top), "DXGI output 0 is not the primary monitor");
+    assert_eq!(
+        cap.origin,
+        (mon.left, mon.top),
+        "DXGI output 0 is not the primary monitor"
+    );
 
     // The PiP straddles the focused window's right edge, where its focus border runs.
     let v = ws[0].visible();
     let (pw, ph) = (320, 180);
     let cy = (v.top + v.bottom) / 2;
-    let at = RECT { left: v.right - pw / 2, top: cy - ph / 2, right: v.right + pw / 2, bottom: cy + ph / 2 };
+    let at = RECT {
+        left: v.right - pw / 2,
+        top: cy - ph / 2,
+        right: v.right + pw / 2,
+        bottom: cy + ph / 2,
+    };
     // Control: with nothing there, the focus border shows in that rectangle, so a zero later means something.
     let control = eventually(4, || {
-        unsafe { RedrawWindow(ws[1].hwnd as _, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW) };
+        unsafe {
+            RedrawWindow(
+                ws[1].hwnd as _,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            )
+        };
         count_in(&cap, at, |px| px == FOCUS_RGB).is_some_and(|c| c.0 > 0)
     });
-    assert!(control, "control: expected the focus border #3B82F6 inside {:?} before the PiP window exists", (at.left, at.top, at.right, at.bottom));
+    assert!(
+        control,
+        "control: expected the focus border #3B82F6 inside {:?} before the PiP window exists",
+        (at.left, at.top, at.right, at.bottom)
+    );
 
     let pip = PipWindow::new(at.left, at.top, pw, ph);
     let pip_rect0 = pip.rect();
-    assert_eq!((pip_rect0.left, pip_rect0.top), (at.left, at.top), "setup: the PiP window opened where asked");
-    assert_eq!(fg(), ws[0].hwnd, "opening the PiP window must not take the focus");
+    assert_eq!(
+        (pip_rect0.left, pip_rect0.top),
+        (at.left, at.top),
+        "setup: the PiP window opened where asked"
+    );
+    assert_eq!(
+        fg(),
+        ws[0].hwnd,
+        "opening the PiP window must not take the focus"
+    );
     let pid = d.last_pid.expect("daemon pid");
     let hosts = overlay_hosts(pid);
     let host = *hosts
@@ -981,9 +1231,27 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
             unsafe { GetWindowRect(h as _, &mut r) };
             r.left <= at.left && r.top <= at.top && r.right >= at.right && r.bottom >= at.bottom
         })
-        .unwrap_or_else(|| panic!("no overlay host of the test daemon covers {:?} (hosts {hosts:?})", (at.left, at.top, at.right, at.bottom)));
-    unsafe { SetWindowPos(pip.hwnd as _, host as _, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
-    assert!(z_below(pip.hwnd, host), "setup: the PiP window must sit below the overlay host in the z-order");
+        .unwrap_or_else(|| {
+            panic!(
+                "no overlay host of the test daemon covers {:?} (hosts {hosts:?})",
+                (at.left, at.top, at.right, at.bottom)
+            )
+        });
+    unsafe {
+        SetWindowPos(
+            pip.hwnd as _,
+            host as _,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    };
+    assert!(
+        z_below(pip.hwnd, host),
+        "setup: the PiP window must sit below the overlay host in the z-order"
+    );
     assert!(pip.is_topmost(), "setup: the PiP window is still topmost");
     // Holes are rebuilt on the daemon tick (200 ms).
     thread::sleep(Duration::from_millis(600));
@@ -1009,7 +1277,11 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
         sample();
         thread::sleep(Duration::from_millis(40));
     }
-    assert!(frames.get() >= 4, "no captured frame while settled ({}); cannot judge the PiP window", frames.get());
+    assert!(
+        frames.get() >= 4,
+        "no captured frame while settled ({}); cannot judge the PiP window",
+        frames.get()
+    );
     assert_eq!(
         worst_border.get(),
         0,
@@ -1019,16 +1291,28 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
 
     let check_untouched = |when: &str| {
         let st = daemon_state(&d);
-        assert!(tile_of(&st, pip.hwnd).is_none(), "{when}: the PiP window must never be tiled");
         assert!(
-            !st["parked"].as_array().unwrap().iter().any(|p| p["id"].as_i64() == Some(pip.hwnd as i64)),
+            tile_of(&st, pip.hwnd).is_none(),
+            "{when}: the PiP window must never be tiled"
+        );
+        assert!(
+            !st["parked"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["id"].as_i64() == Some(pip.hwnd as i64)),
             "{when}: the PiP window must never be parked"
         );
         assert!(pip.is_topmost(), "{when}: the PiP window must stay topmost");
         let r = pip.rect();
         assert_eq!(
             (r.left, r.top, r.right, r.bottom),
-            (pip_rect0.left, pip_rect0.top, pip_rect0.right, pip_rect0.bottom),
+            (
+                pip_rect0.left,
+                pip_rect0.top,
+                pip_rect0.right,
+                pip_rect0.bottom
+            ),
             "{when}: the PiP window must keep its rect"
         );
     };
@@ -1041,12 +1325,18 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
         while Instant::now() < until {
             sample();
         }
-        assert!(wait_settled(&d, 3, Duration::from_secs(4)), "step {i}: layout did not settle");
+        assert!(
+            wait_settled(&d, 3, Duration::from_secs(4)),
+            "step {i}: layout did not settle"
+        );
         visited.push(fg());
         check_untouched(&format!("focus step {i}"));
     }
     let expect: Vec<isize> = [0, 1, 2, 1, 0].iter().map(|&i| ws[i].hwnd).collect();
-    assert_eq!(visited, expect, "the focus walk must work with the PiP window on top");
+    assert_eq!(
+        visited, expect,
+        "the focus walk must work with the PiP window on top"
+    );
 
     // Live three-finger scroll under the PiP window (the overlay draws the moving windows' pictures).
     let off0 = strip_offset(&daemon_state(&d), ws[0].hwnd).unwrap();
@@ -1063,14 +1353,21 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
             }
         }
     }
-    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after the live scroll");
+    assert!(
+        wait_settled(&d, 3, Duration::from_secs(4)),
+        "layout did not settle after the live scroll"
+    );
     assert!(
         moved >= 300,
         "the replayed three-finger swipe must scroll the strip under the PiP window (max offset change {moved} px)"
     );
     check_untouched("after the live scroll");
 
-    assert!(frames.get() >= 20, "too few captured frames during the scrolls ({})", frames.get());
+    assert!(
+        frames.get() >= 20,
+        "too few captured frames during the scrolls ({})",
+        frames.get()
+    );
     assert_eq!(
         worst_border.get(),
         0,

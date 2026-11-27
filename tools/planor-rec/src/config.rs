@@ -81,7 +81,10 @@ impl Default for Config {
 impl Config {
     /// Load `<dir>/planor-rec.toml`, else `./planor-rec.toml`, else defaults.
     pub fn load(dir: &Path) -> (Self, Option<std::path::PathBuf>) {
-        for candidate in [dir.join("planor-rec.toml"), Path::new("planor-rec.toml").to_path_buf()] {
+        for candidate in [
+            dir.join("planor-rec.toml"),
+            Path::new("planor-rec.toml").to_path_buf(),
+        ] {
             if let Ok(text) = std::fs::read_to_string(&candidate) {
                 match toml::from_str::<Config>(&text) {
                     Ok(mut cfg) => {

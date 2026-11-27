@@ -68,10 +68,7 @@ pub struct Scene {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ZoneKind {
     Merge,
-    Leave {
-        trailing: bool,
-        horizontal: bool,
-    },
+    Leave { trailing: bool, horizontal: bool },
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -257,7 +254,9 @@ impl Source {
                     Err(_) => break,
                 }
             }
-            let Some(frame) = newest else { return Ok(false) };
+            let Some(frame) = newest else {
+                return Ok(false);
+            };
             // The pool's buffers keep the size the pool was created with: after the window resizes, the
             // frame texture still matches the picture while only `ContentSize` tells the content changed,
             // so comparing textures alone would copy a cropped picture or one with a blank band (#108
@@ -266,7 +265,10 @@ impl Source {
             let content = frame.ContentSize()?;
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
-            let (mut got, mut have) = (D3D11_TEXTURE2D_DESC::default(), D3D11_TEXTURE2D_DESC::default());
+            let (mut got, mut have) = (
+                D3D11_TEXTURE2D_DESC::default(),
+                D3D11_TEXTURE2D_DESC::default(),
+            );
             tex.GetDesc(&mut got);
             copy.GetDesc(&mut have);
             let action = live_frame_action(
@@ -281,13 +283,22 @@ impl Source {
             }
             frame.Close()?;
             if action == LiveFrame::Resize {
-                self.pool.Recreate(&self.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content)?;
+                self.pool.Recreate(
+                    &self.winrt,
+                    DirectXPixelFormat::B8G8R8A8UIntNormalized,
+                    2,
+                    content,
+                )?;
                 self.size = content;
             }
             Ok(action == LiveFrame::Copy)
         }
     }
-    unsafe fn store(&mut self, surface: &Surface, frame: Direct3D11CaptureFrame) -> windows::core::Result<()> {
+    unsafe fn store(
+        &mut self,
+        surface: &Surface,
+        frame: Direct3D11CaptureFrame,
+    ) -> windows::core::Result<()> {
         unsafe {
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
@@ -299,7 +310,10 @@ impl Source {
             if let (Some(copy), Some(_)) = (&self.copy, &self.bitmap) {
                 let mut have = D3D11_TEXTURE2D_DESC::default();
                 copy.GetDesc(&mut have);
-                if have.Width == desc.Width && have.Height == desc.Height && have.Format == desc.Format {
+                if have.Width == desc.Width
+                    && have.Height == desc.Height
+                    && have.Format == desc.Format
+                {
                     surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
                     frame.Close()?;
                     return Ok(());
@@ -421,7 +435,11 @@ pub(crate) fn live_redraw_scene(mut settled: Scene) -> Scene {
 /// are still parked, and clearing `live` here would unpark them at the mid-scroll position only for the settle
 /// to move them again (#108 re-review F1). The settle's own scene ends the live state.
 pub(crate) fn overlay_patched_settled_scene(settled: Scene) -> Scene {
-    if settled.live { live_redraw_scene(settled) } else { idle_scene_from_settled(settled) }
+    if settled.live {
+        live_redraw_scene(settled)
+    } else {
+        idle_scene_from_settled(settled)
+    }
 }
 /// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
 /// device, a scene already queued, or no settled scene means there is nothing to do.
@@ -536,7 +554,8 @@ fn shared_devices() -> Result<(u64, ID3D11Device, IDCompositionDevice, ID2D1Devi
             let gpu = device.unwrap();
             let dx: IDXGIDevice = gpu.cast()?;
             let dev: IDCompositionDevice = DCompositionCreateDevice(&dx)?;
-            let factory: ID2D1Factory1 = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
+            let factory: ID2D1Factory1 =
+                D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
             let d2d = factory.CreateDevice(&dx)?;
             let generation = SHARED_GEN.with(|g| {
                 let next = g.get().wrapping_add(1).max(1);
@@ -579,8 +598,16 @@ pub(crate) struct BorderLine {
 /// #36: host-local border for `drawn` (screen) clipped to `bound` (screen): the rectangle is kept whole so the
 /// rounded corners stay where they are, and only the part inside `bound` is painted.
 pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> BorderLine {
-    let local = |r: Rect| Rect { x: r.x - host.x, y: r.y - host.y, ..r };
-    BorderLine { rect: local(drawn), color, clip: local(bound) }
+    let local = |r: Rect| Rect {
+        x: r.x - host.x,
+        y: r.y - host.y,
+        ..r
+    };
+    BorderLine {
+        rect: local(drawn),
+        color,
+        clip: local(bound),
+    }
 }
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
@@ -638,11 +665,13 @@ impl DrawSig {
         self.fills
             .extend(fills.iter().map(|&(r, c, a, k)| (r, c, a.to_bits(), k)));
         self.cards.clear();
-        self.cards.extend(
-            cards
-                .iter()
-                .map(|c| (c.rect, c.spinner_alpha.to_bits(), c.spinner_angle_rad.to_bits())),
-        );
+        self.cards.extend(cards.iter().map(|c| {
+            (
+                c.rect,
+                c.spinner_alpha.to_bits(),
+                c.spinner_angle_rad.to_bits(),
+            )
+        }));
         self.lines.clear();
         self.lines.extend_from_slice(lines);
         self.holes.clear();
@@ -827,7 +856,12 @@ impl Surface {
                     brush.SetOpacity(alpha);
                     rt.FillRoundedRectangle(
                         &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F { left: x, top: y, right: x + r.w as f32, bottom: y + r.h as f32 },
+                            rect: D2D_RECT_F {
+                                left: x,
+                                top: y,
+                                right: x + r.w as f32,
+                                bottom: y + r.h as f32,
+                            },
                             radiusX: radius,
                             radiusY: radius,
                         },
@@ -862,13 +896,21 @@ impl Surface {
                                 bottom: cy + ch * 0.5 + shift,
                             };
                             rt.DrawRoundedRectangle(
-                                &D2D1_ROUNDED_RECT { rect: back, radiusX: cr, radiusY: cr },
+                                &D2D1_ROUNDED_RECT {
+                                    rect: back,
+                                    radiusX: cr,
+                                    radiusY: cr,
+                                },
                                 glyph,
                                 stroke,
                                 None,
                             );
                             rt.DrawRoundedRectangle(
-                                &D2D1_ROUNDED_RECT { rect: front, radiusX: cr, radiusY: cr },
+                                &D2D1_ROUNDED_RECT {
+                                    rect: front,
+                                    radiusX: cr,
+                                    radiusY: cr,
+                                },
                                 glyph,
                                 stroke,
                                 None,
@@ -882,7 +924,10 @@ impl Surface {
                                 None,
                             );
                         }
-                        ZoneKind::Leave { trailing, horizontal } => {
+                        ZoneKind::Leave {
+                            trailing,
+                            horizontal,
+                        } => {
                             // Arrow-out-of-group glyph: open bracket on inner side + outward arrow.
                             let half = size * 0.42;
                             let (dx, dy) = match (horizontal, trailing) {
@@ -898,15 +943,45 @@ impl Surface {
                             let b_back = -half;
                             let b_front = -half * 0.2;
                             let b_half = half * 0.78;
-                            rt.DrawLine(p_at(b_front, -b_half), p_at(b_back, -b_half), glyph, stroke, None);
-                            rt.DrawLine(p_at(b_back, -b_half), p_at(b_back, b_half), glyph, stroke, None);
-                            rt.DrawLine(p_at(b_back, b_half), p_at(b_front, b_half), glyph, stroke, None);
+                            rt.DrawLine(
+                                p_at(b_front, -b_half),
+                                p_at(b_back, -b_half),
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            rt.DrawLine(
+                                p_at(b_back, -b_half),
+                                p_at(b_back, b_half),
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            rt.DrawLine(
+                                p_at(b_back, b_half),
+                                p_at(b_front, b_half),
+                                glyph,
+                                stroke,
+                                None,
+                            );
                             let a_start = -half * 0.35;
                             let a_tip = half;
                             let head = half * 0.48;
                             rt.DrawLine(p_at(a_start, 0.0), p_at(a_tip, 0.0), glyph, stroke, None);
-                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, -head * 0.75), glyph, stroke, None);
-                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, head * 0.75), glyph, stroke, None);
+                            rt.DrawLine(
+                                p_at(a_tip, 0.0),
+                                p_at(a_tip - head, -head * 0.75),
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            rt.DrawLine(
+                                p_at(a_tip, 0.0),
+                                p_at(a_tip - head, head * 0.75),
+                                glyph,
+                                stroke,
+                                None,
+                            );
                         }
                     }
                 }
@@ -919,7 +994,12 @@ impl Surface {
                     base.SetOpacity(1.0);
                     rt.FillRoundedRectangle(
                         &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F { left: x, top: y, right: x + w, bottom: y + h },
+                            rect: D2D_RECT_F {
+                                left: x,
+                                top: y,
+                                right: x + w,
+                                bottom: y + h,
+                            },
                             radiusX: radius,
                             radiusY: radius,
                         },
@@ -977,7 +1057,12 @@ impl Surface {
                         }
                     }
                 }
-                for &BorderLine { rect: r, color: c, clip } in *lines {
+                for &BorderLine {
+                    rect: r,
+                    color: c,
+                    clip,
+                } in *lines
+                {
                     // #36: never paint a border outside its strip's work area (over the taskbar).
                     rt.PushAxisAlignedClip(
                         &D2D_RECT_F {
@@ -1035,7 +1120,8 @@ impl Surface {
                             clear,
                         );
                     }
-                    self.context.SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                    self.context
+                        .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
                 }
                 let end = rt.EndDraw(None, None);
                 self.context.SetTarget(None);
@@ -1180,7 +1266,8 @@ impl Host {
             if rgn_holes.is_empty() {
                 windows_sys::Win32::Graphics::Gdi::SetWindowRgn(self.h, null_mut(), 0);
             } else {
-                let whole = windows_sys::Win32::Graphics::Gdi::CreateRectRgn(0, 0, self.b.w, self.b.h);
+                let whole =
+                    windows_sys::Win32::Graphics::Gdi::CreateRectRgn(0, 0, self.b.w, self.b.h);
                 for h in rgn_holes {
                     let cut = windows_sys::Win32::Graphics::Gdi::CreateRectRgn(
                         h.x - self.b.x,
@@ -1384,7 +1471,12 @@ pub(crate) fn proxy_blit_rects(
         return None;
     }
     Some((
-        Rect { x: sx, y: sy, w: sw, h: sh },
+        Rect {
+            x: sx,
+            y: sy,
+            w: sw,
+            h: sh,
+        },
         Rect {
             x: clip.x + dx_pad - host_origin.0,
             y: clip.y + dy_pad - host_origin.1,
@@ -1480,9 +1572,17 @@ pub(crate) fn live_frame_action(
     same_format: bool,
 ) -> LiveFrame {
     if content != pool {
-        return if content.0 > 0 && content.1 > 0 { LiveFrame::Resize } else { LiveFrame::Skip };
+        return if content.0 > 0 && content.1 > 0 {
+            LiveFrame::Resize
+        } else {
+            LiveFrame::Skip
+        };
     }
-    if frame_tex == picture && same_format { LiveFrame::Copy } else { LiveFrame::Skip }
+    if frame_tex == picture && same_format {
+        LiveFrame::Copy
+    } else {
+        LiveFrame::Skip
+    }
 }
 /// True when a cached WGC capture bitmap should be dropped as stale.
 /// While `in_motion` (`moving || open_handoff`), the stand-in `rs` keeps the window's original
@@ -1553,9 +1653,12 @@ fn is_strictly_nearest_monitor(park_rect: Rect, monitor: Rect, all_monitors: &[R
     let cy = park_rect.y as i64 + park_rect.h as i64 / 2;
     let my_r = rect_dist_sq(park_rect, monitor);
     let my_c = point_rect_dist_sq(cx, cy, monitor);
-    all_monitors.iter().filter(|&&other| other != monitor).all(|&other| {
-        rect_dist_sq(park_rect, other) > my_r && point_rect_dist_sq(cx, cy, other) > my_c
-    })
+    all_monitors
+        .iter()
+        .filter(|&&other| other != monitor)
+        .all(|&other| {
+            rect_dist_sq(park_rect, other) > my_r && point_rect_dist_sq(cx, cy, other) > my_c
+        })
 }
 
 /// Park coordinates stay well inside i32 (top-level windows take 32-bit positions, and real layouts need
@@ -1582,18 +1685,23 @@ pub(crate) fn park_y_for_monitor(
 /// `MONITOR_DEFAULTTONEAREST` resolves to `monitor` instead of a neighboring different-DPI monitor
 /// (e.g. a wider monitor stacked above a narrower laptop screen), preventing `WM_DPICHANGED` storms
 /// on park/unpark (#75, #77, #78).
-fn park_y_unclamped(
-    park_x: i32,
-    monitor: Rect,
-    bound: Rect,
-    all_monitors: &[Rect],
-) -> i32 {
+fn park_y_unclamped(park_x: i32, monitor: Rect, bound: Rect, all_monitors: &[Rect]) -> i32 {
     if all_monitors.len() <= 1 {
         return bound.y;
     }
     let ok = |y: i32| {
-        let small = Rect { x: park_x, y, w: 1, h: 1 };
-        let full = Rect { x: park_x, y, w: monitor.w.max(1), h: monitor.h.max(1) };
+        let small = Rect {
+            x: park_x,
+            y,
+            w: 1,
+            h: 1,
+        };
+        let full = Rect {
+            x: park_x,
+            y,
+            w: monitor.w.max(1),
+            h: monitor.h.max(1),
+        };
         is_strictly_nearest_monitor(small, monitor, all_monitors)
             && is_strictly_nearest_monitor(full, monitor, all_monitors)
     };
@@ -1620,7 +1728,11 @@ pub(crate) fn parked_target_rect(
     bound: Rect,
     _in_live_motion: bool,
 ) -> Rect {
-    Rect { x: park, y: bound.y, ..tile_rect }
+    Rect {
+        x: park,
+        y: bound.y,
+        ..tile_rect
+    }
 }
 
 pub(crate) fn parked_target_rect_for_monitor(
@@ -1631,7 +1743,11 @@ pub(crate) fn parked_target_rect_for_monitor(
     all_monitors: &[Rect],
 ) -> Rect {
     let y = park_y_for_monitor(park, monitor, bound, all_monitors);
-    Rect { x: park, y, ..tile_rect }
+    Rect {
+        x: park,
+        y,
+        ..tile_rect
+    }
 }
 
 /// Preserve a fullscreen window's OS dimensions when they are within 2 px of `tile_rect`
@@ -1647,7 +1763,11 @@ pub(crate) fn fullscreen_preserved_rect(
         && (f.w - tile_rect.w).abs() <= 2
         && (f.h - tile_rect.h).abs() <= 2
     {
-        return Rect { w: f.w, h: f.h, ..tile_rect };
+        return Rect {
+            w: f.w,
+            h: f.h,
+            ..tile_rect
+        };
     }
     tile_rect
 }
@@ -1754,8 +1874,15 @@ pub(crate) fn holes_intersecting_rects(holes: &[Rect], rects: &[Rect], out: &mut
 /// already-visible one (scroll start) or showing a settled peek (scroll end) before the frame's region holes are
 /// applied covered topmost windows (a PiP player) for a frame. Holes nothing visible overlaps are not cut, so a
 /// steady scroll past a PiP costs no `SetWindowRgn`.
-pub(crate) fn holes_needed_before_showing(applied: &[Rect], holes: &[Rect], clip: Rect) -> Option<Vec<Rect>> {
-    if holes.iter().all(|&h| applied.contains(&h) || intersect(h, clip).is_none()) {
+pub(crate) fn holes_needed_before_showing(
+    applied: &[Rect],
+    holes: &[Rect],
+    clip: Rect,
+) -> Option<Vec<Rect>> {
+    if holes
+        .iter()
+        .all(|&h| applied.contains(&h) || intersect(h, clip).is_none())
+    {
         return None;
     }
     let mut out: Vec<Rect> = holes
@@ -1775,7 +1902,11 @@ pub(crate) fn holes_needed_before_showing(applied: &[Rect], holes: &[Rect], clip
 /// focus border jumps ahead of the real window resize.
 pub(crate) fn stand_in_rect(origin: Rect, current: Rect, t: f64, open_handoff: bool) -> Rect {
     if t < 1. || open_handoff {
-        Rect { w: origin.w, h: origin.h, ..current }
+        Rect {
+            w: origin.w,
+            h: origin.h,
+            ..current
+        }
     } else {
         current
     }
@@ -1798,7 +1929,11 @@ pub(crate) fn tile_stand_in_and_park(
     preview: bool,
     hidden: bool,
 ) -> (Rect, Option<Rect>, bool, bool) {
-    let final_clip = if hidden { None } else { intersect(final_rect, bound) };
+    let final_clip = if hidden {
+        None
+    } else {
+        intersect(final_rect, bound)
+    };
     let park_window =
         !pinned && (moving || live_proxy || final_clip != Some(final_rect) || preview || hidden);
     let tile_moved = origin != final_rect;
@@ -1858,8 +1993,7 @@ pub(crate) fn open_landing_item_arrived(
     if got.w >= want.w - 2 && got.h >= want.h - 2 {
         return true;
     }
-    let size_changed_from_origin =
-        (got.w - origin.w).abs() > 1 || (got.h - origin.h).abs() > 1;
+    let size_changed_from_origin = (got.w - origin.w).abs() > 1 || (got.h - origin.h).abs() > 1;
     if !size_changed_from_origin {
         *stable = None;
         return false;
@@ -1959,9 +2093,19 @@ struct VerifyState {
 }
 type SourceKey = (isize, usize);
 type SourceJob = (String, u64, SourceKey, SendDevice);
-type SourceDone = (String, u64, SourceKey, std::result::Result<SendSource, String>, u128);
+type SourceDone = (
+    String,
+    u64,
+    SourceKey,
+    std::result::Result<SendSource, String>,
+    u128,
+);
 
-fn warm_hosts(monitors: Vec<(String, Rect)>, hosts: &mut BTreeMap<String, Host>, next_gen: &mut u64) {
+fn warm_hosts(
+    monitors: Vec<(String, Rect)>,
+    hosts: &mut BTreeMap<String, Host>,
+    next_gen: &mut u64,
+) {
     for (n, b) in monitors {
         if hosts.get(&n).is_some_and(|h| h.b != b) {
             hosts.remove(&n);
@@ -2054,7 +2198,10 @@ struct RenderState {
 }
 
 impl RenderState {
-    fn new(source_tx: crossbeam_channel::Sender<SourceJob>, source_done: crossbeam_channel::Receiver<SourceDone>) -> Self {
+    fn new(
+        source_tx: crossbeam_channel::Sender<SourceJob>,
+        source_done: crossbeam_channel::Receiver<SourceDone>,
+    ) -> Self {
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn QueryPerformanceFrequency(value: *mut i64) -> i32;
@@ -2112,9 +2259,9 @@ impl RenderState {
     }
 
     fn has_active_sources(&self) -> bool {
-        self.hosts
-            .values()
-            .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty() || !h.thumbs.is_empty())
+        self.hosts.values().any(|h| {
+            !h.pictures.is_empty() || !h.pending_sources.is_empty() || !h.thumbs.is_empty()
+        })
     }
     /// Copy the newest captured frame into the picture of every window drawn as a live stand-in
     /// (`live_ids`). True when at least one picture changed, so the overlay needs a redraw; windows
@@ -2133,7 +2280,9 @@ impl RenderState {
                 match source.update_live(surface) {
                     Ok(c) => changed |= c,
                     Err(e) => {
-                        if is_device_lost_hr(e.code().0) || unsafe { surface.gpu.GetDeviceRemovedReason() }.is_err() {
+                        if is_device_lost_hr(e.code().0)
+                            || unsafe { surface.gpu.GetDeviceRemovedReason() }.is_err()
+                        {
                             dead_gen = Some(surface.device_gen);
                         }
                     }
@@ -2153,10 +2302,20 @@ impl RenderState {
 
     fn invalidate_device_generation(&mut self, dead_gen: u64) {
         let reset = reset_shared_devices_if_generation(dead_gen);
-        diag::trace(format!("DEVICE invalidate gen={dead_gen} shared_reset={reset} hosts={}", self.hosts.len()));
+        diag::trace(format!(
+            "DEVICE invalidate gen={dead_gen} shared_reset={reset} hosts={}",
+            self.hosts.len()
+        ));
         for host in self.hosts.values_mut() {
-            if host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen) {
-                diag::trace(format!("DEVICE host {:?} surface dropped (gen {dead_gen}); overlay blank until recovery", host.b));
+            if host
+                .surface
+                .as_ref()
+                .is_some_and(|s| s.device_gen == dead_gen)
+            {
+                diag::trace(format!(
+                    "DEVICE host {:?} surface dropped (gen {dead_gen}); overlay blank until recovery",
+                    host.b
+                ));
                 host.invalidate_gpu(&mut self.next_host_gen);
             }
         }
@@ -2171,7 +2330,9 @@ impl RenderState {
         self.device_health_checked = Instant::now();
         let dead_gen = self.hosts.values().find_map(|h| {
             let s = h.surface.as_ref()?;
-            unsafe { s.gpu.GetDeviceRemovedReason() }.is_err().then_some(s.device_gen)
+            unsafe { s.gpu.GetDeviceRemovedReason() }
+                .is_err()
+                .then_some(s.device_gen)
         });
         if let Some(dead_gen) = dead_gen {
             diag::trace("overlay GPU device loss detected while idle; invalidating surfaces");
@@ -2244,7 +2405,9 @@ impl RenderState {
                                     dead_gen = Some(s.device_gen);
                                 }
                                 if host.recovery.record_failure(now) {
-                                    diag::trace(format!("overlay GPU surface recovery draw failed: {e}"));
+                                    diag::trace(format!(
+                                        "overlay GPU surface recovery draw failed: {e}"
+                                    ));
                                 }
                             }
                         }
@@ -2262,8 +2425,12 @@ impl RenderState {
                 }
             }
         }
-        if needs_scene_rearm(recovered, dead_gen, self.scene.is_some(), self.last_settled_scene.is_some())
-            && let Some(settled) = self.last_settled_scene.take()
+        if needs_scene_rearm(
+            recovered,
+            dead_gen,
+            self.scene.is_some(),
+            self.last_settled_scene.is_some(),
+        ) && let Some(settled) = self.last_settled_scene.take()
         {
             // #67: the static frame above is drawn with `pictures: &[]`, so a settled peek stays blank after a
             // device loss until some new scene arrives — an idle desktop may never send one. Re-arm the settled
@@ -2321,9 +2488,12 @@ impl RenderState {
                             if v.left == 1
                                 && (got.w > want.w + 1 || got.h > want.h + 1)
                                 && !win32::is_hung(id)
-                                && prev.is_some_and(|p| (p.w - got.w).abs() <= 1 && (p.h - got.h).abs() <= 1)
+                                && prev.is_some_and(|p| {
+                                    (p.w - got.w).abs() <= 1 && (p.h - got.h).abs() <= 1
+                                })
                             {
-                                let min_track = (win32::minimum(id, true), win32::minimum(id, false));
+                                let min_track =
+                                    (win32::minimum(id, true), win32::minimum(id, false));
                                 if should_verify_reject(
                                     v.epoch,
                                     current_epoch,
@@ -2391,7 +2561,10 @@ impl RenderState {
                 };
                 host.pending_sources.remove(&key);
                 if ms >= 100 {
-                    diag::trace(format!("capture source for {} took {ms} ms (worker thread, render not blocked)", key.0));
+                    diag::trace(format!(
+                        "capture source for {} took {ms} ms (worker thread, render not blocked)",
+                        key.0
+                    ));
                 }
                 match made {
                     Ok(src) => {
@@ -2409,10 +2582,8 @@ impl RenderState {
     }
 
     fn prepare_scene(&mut self, s: Scene) {
-        let _scene_span = crate::perf::SpanGuard::with_arg(
-            crate::perf::SpanKind::RenderScene,
-            s.epoch,
-        );
+        let _scene_span =
+            crate::perf::SpanGuard::with_arg(crate::perf::SpanKind::RenderScene, s.epoch);
         self.gesture_recorded = false;
         crate::perf::record_instant(
             "SCENE",
@@ -2580,7 +2751,12 @@ impl RenderState {
                 if let Some(r) = win32::frame(id) {
                     let stale = source.bitmap.as_ref().is_some_and(|bm| {
                         let px = unsafe { bm.GetPixelSize() };
-                        is_capture_stale((px.width as i32, px.height as i32), (r.w, r.h), Some(r), false)
+                        is_capture_stale(
+                            (px.width as i32, px.height as i32),
+                            (r.w, r.h),
+                            Some(r),
+                            false,
+                        )
                     });
                     if stale {
                         source.bitmap = None;
@@ -2614,7 +2790,10 @@ impl RenderState {
             let all_monitors: Vec<Rect> = self.hosts.values().map(|h| h.b).collect();
             for (name, host) in &mut self.hosts {
                 if let Some(dead_gen) = invalidated_device_gen
-                    && host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen)
+                    && host
+                        .surface
+                        .as_ref()
+                        .is_some_and(|s| s.device_gen == dead_gen)
                 {
                     host.invalidate_gpu(&mut self.next_host_gen);
                 }
@@ -2703,7 +2882,9 @@ impl RenderState {
                                     spinner_angle_rad: vis.spinner_angle_rad,
                                 });
                                 if let Some(color) = tile.color {
-                                    scratch.lines.push(border_line(tile.rect, color, bound, host.b));
+                                    scratch
+                                        .lines
+                                        .push(border_line(tile.rect, color, bound, host.b));
                                 }
                                 scratch.cover_placements.push((tile.id, tile.rect));
                                 if t >= 1. && !s.live {
@@ -2731,13 +2912,17 @@ impl RenderState {
                     let (o, r) = if skip_cover_motion {
                         (tile.rect, tile.rect)
                     } else {
-                        (self.origins[&tile.id], interpolate(self.origins[&tile.id], tile.rect, t))
+                        (
+                            self.origins[&tile.id],
+                            interpolate(self.origins[&tile.id], tile.rect, t),
+                        )
                     };
                     scratch.next.insert(tile.id, r);
                     let moving = !skip_cover_motion && t < 1. && o != tile.rect;
                     let live_proxy = s.live
                         && !tile.pinned
-                        && (self.live_ids.contains(&tile.id) || self.origins[&tile.id] != tile.rect);
+                        && (self.live_ids.contains(&tile.id)
+                            || self.origins[&tile.id] != tile.rect);
                     if live_proxy {
                         self.live_ids.insert(tile.id);
                     }
@@ -2817,7 +3002,9 @@ impl RenderState {
                                     eprintln!("source frame: {e}");
                                 }
                             }
-                            if source_device_lost.is_none() && let Some(bitmap) = &source.bitmap {
+                            if source_device_lost.is_none()
+                                && let Some(bitmap) = &source.bitmap
+                            {
                                 let px = bitmap.GetPixelSize();
                                 let src_size = (px.width as i32, px.height as i32);
                                 let frame_rect = cur_frame.unwrap_or(rs);
@@ -2825,8 +3012,12 @@ impl RenderState {
                                 let window_rect = (GetWindowRect(tile.id as _, &mut wr) != 0)
                                     .then(|| win32::rect(wr));
                                 let dwm_insets = win32::insets(tile.id).unwrap_or((0, 0));
-                                let wgc_insets =
-                                    wgc_capture_insets(src_size, frame_rect, window_rect, dwm_insets);
+                                let wgc_insets = wgc_capture_insets(
+                                    src_size,
+                                    frame_rect,
+                                    window_rect,
+                                    dwm_insets,
+                                );
                                 if let Some((src_r, dst_r)) = choose_proxy_backing(
                                     rs,
                                     c,
@@ -2872,11 +3063,8 @@ impl RenderState {
                             scratch.lines.push(border_line(b, color, bound, host.b))
                         }
                     }
-                    let effective_rect = fullscreen_preserved_rect(
-                        tile.rect,
-                        tile.os_frame,
-                        tile.fullscreen,
-                    );
+                    let effective_rect =
+                        fullscreen_preserved_rect(tile.rect, tile.os_frame, tile.fullscreen);
                     let target = if park_window {
                         parked_target_rect_for_monitor(
                             park,
@@ -3029,14 +3217,17 @@ impl RenderState {
                             };
                             let draw_start = Instant::now();
                             let drawn = if removed_before_skip {
-                                Err(surface.gpu.GetDeviceRemovedReason().unwrap_err()
-                                .into())
+                                Err(surface.gpu.GetDeviceRemovedReason().unwrap_err().into())
                             } else {
-                                let _dspan = crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
+                                let _dspan =
+                                    crate::perf::SpanGuard::new(crate::perf::SpanKind::RenderDraw);
                                 surface.draw(&frame)
                             };
                             if draw_start.elapsed().as_millis() >= 100 {
-                                diag::trace(format!("SLOW render draw: {} ms", draw_start.elapsed().as_millis()))
+                                diag::trace(format!(
+                                    "SLOW render draw: {} ms",
+                                    draw_start.elapsed().as_millis()
+                                ))
                             }
                             if let Err(e) = drawn {
                                 let removed_reason = surface.gpu.GetDeviceRemovedReason();
@@ -3045,16 +3236,23 @@ impl RenderState {
                                 let dead_gen = surface.device_gen;
                                 let picture_only = !device_lost && !scratch.backing.is_empty();
                                 if device_lost {
-                                    diag::trace(format!("DEVICE draw failed gen={dead_gen} err={e} removed={removed_reason:?}"));
+                                    diag::trace(format!(
+                                        "DEVICE draw failed gen={dead_gen} err={e} removed={removed_reason:?}"
+                                    ));
                                     reset_shared_devices_if_generation(dead_gen);
                                     invalidated_device_gen = Some(dead_gen);
                                     host.invalidate_gpu(&mut self.next_host_gen);
                                 } else if picture_only {
                                     // Picture-only failure: drop capture sources and bump host
                                     // generation, then fall back to border-only with backoff.
-                                    bump_host_generation(&mut host.generation, &mut self.next_host_gen);
+                                    bump_host_generation(
+                                        &mut host.generation,
+                                        &mut self.next_host_gen,
+                                    );
                                     let now = Instant::now();
-                                    for &key in host.pictures.keys().chain(host.pending_sources.iter()) {
+                                    for &key in
+                                        host.pictures.keys().chain(host.pending_sources.iter())
+                                    {
                                         host.failed_sources.insert(key, now);
                                     }
                                     host.pictures.clear();
@@ -3088,7 +3286,9 @@ impl RenderState {
                                                     true
                                                 } else {
                                                     if device_lost {
-                                                        reset_shared_devices_if_generation(fresh.device_gen);
+                                                        reset_shared_devices_if_generation(
+                                                            fresh.device_gen,
+                                                        );
                                                     }
                                                     false
                                                 }
@@ -3124,7 +3324,9 @@ impl RenderState {
                                             Err(r) => format!(" (reason: {r})"),
                                             Ok(()) => String::new(),
                                         };
-                                        diag::trace(format!("border draw failed: {e}{reason_str}; scheduling recovery"));
+                                        diag::trace(format!(
+                                            "border draw failed: {e}{reason_str}; scheduling recovery"
+                                        ));
                                         eprintln!("border draw: {e}{reason_str}");
                                     }
                                 }
@@ -3158,7 +3360,11 @@ impl RenderState {
                     // `SetWindowRgn` (with bRedraw = 0 to prevent DWM flashing) when an active
                     // DWM thumbnail actually overlaps a hole. Store `desired_rgn_holes` on the host
                     // so idle GPU recovery restores it without clearing active thumbnail holes.
-                    holes_intersecting_rects(&scratch.mine, &scratch.thumb_rects, &mut scratch.rgn_holes);
+                    holes_intersecting_rects(
+                        &scratch.mine,
+                        &scratch.thumb_rects,
+                        &mut scratch.rgn_holes,
+                    );
                     host.desired_rgn_holes.clear();
                     host.desired_rgn_holes.extend_from_slice(&scratch.rgn_holes);
                     host.apply_rgn_holes(&scratch.rgn_holes);
@@ -3179,7 +3385,11 @@ impl RenderState {
             }
             if let Some(dead_gen) = invalidated_device_gen {
                 for host in self.hosts.values_mut() {
-                    if host.surface.as_ref().is_some_and(|s| s.device_gen == dead_gen) {
+                    if host
+                        .surface
+                        .as_ref()
+                        .is_some_and(|s| s.device_gen == dead_gen)
+                    {
                         host.invalidate_gpu(&mut self.next_host_gen);
                     }
                 }
@@ -3254,7 +3464,11 @@ impl RenderState {
                         if let Some(got) = win32::frame(id)
                             && got != want
                         {
-                            diag::trace(format!("PLACE {id} {:?} -> {:?}", (got.x, got.y, got.w, got.h), (want.x, want.y, want.w, want.h)));
+                            diag::trace(format!(
+                                "PLACE {id} {:?} -> {:?}",
+                                (got.x, got.y, got.w, got.h),
+                                (want.x, want.y, want.w, want.h)
+                            ));
                         }
                     }
                 }
@@ -3262,13 +3476,15 @@ impl RenderState {
                 // Parking never waits for the app. The last on-screen move of an open/close animation is
                 // asynchronous too: its thumbnail remains above it until `open_landed` confirms arrival.
                 let mut placed_async_landing = false;
-                let moved_landing: Vec<(isize, Rect, Rect)> = if s.action == "open_close" && t >= 1. {
+                let moved_landing: Vec<(isize, Rect, Rect)> = if s.action == "open_close" && t >= 1.
+                {
                     open_landing_items(s.action, t, &scratch.landing, &scratch.async_landing)
                         .into_iter()
                         .flatten()
                         .filter_map(|(id, rect)| {
                             let origin = self.origins.get(&id).copied().unwrap_or(rect);
-                            (origin != rect || scratch.async_landing.contains(&(id, rect))).then_some((id, origin, rect))
+                            (origin != rect || scratch.async_landing.contains(&(id, rect)))
+                                .then_some((id, origin, rect))
                         })
                         .collect()
                 } else {
@@ -3277,10 +3493,15 @@ impl RenderState {
                 let animated_open_landing = !moved_landing.is_empty();
                 if animated_open_landing
                     && self.open_landed != Some(s.epoch)
-                    && self.open_landing.as_ref().is_none_or(|ol| ol.epoch != s.epoch)
+                    && self
+                        .open_landing
+                        .as_ref()
+                        .is_none_or(|ol| ol.epoch != s.epoch)
                 {
-                    let to_place: Vec<Placement> =
-                        moved_landing.iter().map(|&(id, _, want)| (id, want)).collect();
+                    let to_place: Vec<Placement> = moved_landing
+                        .iter()
+                        .map(|&(id, _, want)| (id, want))
+                        .collect();
                     win32::place_async(&to_place);
                     self.open_landing = Some(OpenLanding {
                         epoch: s.epoch,
@@ -3296,15 +3517,19 @@ impl RenderState {
                         win32::place_async(&scratch.async_landing);
                     }
                 }
-                let result = if scratch.landing.is_empty() || (animated_open_landing && retries == 0) {
-                    Ok(())
-                } else {
-                    // Constraint/rejection handling remains synchronous, as does final placement for
-                    // every non-open/close action. The existing delayed verify corrects a timed-out handoff.
-                    win32::place(&scratch.landing)
-                };
+                let result =
+                    if scratch.landing.is_empty() || (animated_open_landing && retries == 0) {
+                        Ok(())
+                    } else {
+                        // Constraint/rejection handling remains synchronous, as does final placement for
+                        // every non-open/close action. The existing delayed verify corrects a timed-out handoff.
+                        win32::place(&scratch.landing)
+                    };
                 if placed_at.elapsed().as_millis() >= 100 {
-                    diag::trace(format!("SLOW render place: {} ms", placed_at.elapsed().as_millis()))
+                    diag::trace(format!(
+                        "SLOW render place: {} ms",
+                        placed_at.elapsed().as_millis()
+                    ))
                 }
                 scratch.rejected.clear();
                 if t >= 1. && !open_handoff && !self.open_timed_out && result.is_ok() {
@@ -3336,7 +3561,11 @@ impl RenderState {
             if !scratch.rejected.is_empty() {
                 win32::emit(win32::Event::Rejected(s.epoch, scratch.rejected.clone()));
             }
-            if place_ok && (!scratch.placements.is_empty() || !scratch.cover_placements.is_empty() || t >= 1.) {
+            if place_ok
+                && (!scratch.placements.is_empty()
+                    || !scratch.cover_placements.is_empty()
+                    || t >= 1.)
+            {
                 crate::perf::mark_first_place_done();
             }
             if place_ok
@@ -3374,7 +3603,8 @@ impl RenderState {
                         scratch.actuals.push((st.id, r));
                     }
                 }
-                let violations = planor::check_settled_parked(&scratch.settled_tiles, &scratch.actuals, park);
+                let violations =
+                    planor::check_settled_parked(&scratch.settled_tiles, &scratch.actuals, park);
                 for v in violations {
                     crate::perf::record_instant("INVARIANT", "invariant", v.trace_line());
                     if s.diagnostics {
@@ -3430,7 +3660,8 @@ impl RenderState {
             }
             if s.live && self.frame_of_scene == 0 {
                 // Under the fingers every scene is one frame: the gap between their presents is the smoothness.
-                let cutoff = Duration::from_millis(planor::pacing::live_gap_cutoff_ms(self.live_refresh_us));
+                let cutoff =
+                    Duration::from_millis(planor::pacing::live_gap_cutoff_ms(self.live_refresh_us));
                 if let Some(prev) = self.last_live_present.filter(|p| p.elapsed() < cutoff) {
                     crate::perf::record_frame_with_refresh(
                         "live",
@@ -3447,8 +3678,8 @@ impl RenderState {
                 .as_ref()
                 .is_some_and(|ol| ol.epoch == s.epoch);
             if t >= 1. && !waiting_open_landing && !any_cover_active {
-                self.settled =
-                    self.timestamp() + planor::pacing::settled_capture_delay_100ns(self.live_refresh_us);
+                self.settled = self.timestamp()
+                    + planor::pacing::settled_capture_delay_100ns(self.live_refresh_us);
                 let current_epoch = s.epoch == EPOCH.load(std::sync::atomic::Ordering::Acquire);
                 if current_epoch && did_place {
                     self.scratch.verify_items.clear();
@@ -3499,7 +3730,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 );
                 for (mon, generation, key, device) in source_jobs {
                     let t = Instant::now();
-                    let made = Source::new(key.0, &device.0).map(SendSource).map_err(|e| e.to_string());
+                    let made = Source::new(key.0, &device.0)
+                        .map(SendSource)
+                        .map_err(|e| e.to_string());
                     if source_done_tx
                         .send((mon, generation, key, made, t.elapsed().as_millis()))
                         .is_err()
@@ -3559,11 +3792,17 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     let _ = ack.send(());
                     continue;
                 }
-                Ok(Message::OverlayUpdate { seq, holes, colors, .. }) => {
-                    if seq != EPOCH.load(std::sync::atomic::Ordering::Acquire) { continue; }
+                Ok(Message::OverlayUpdate {
+                    seq, holes, colors, ..
+                }) => {
+                    if seq != EPOCH.load(std::sync::atomic::Ordering::Acquire) {
+                        continue;
+                    }
                     if let Some(active) = state.scene.as_mut().filter(|s| s.epoch == seq) {
                         apply_overlay_update(active, holes, &colors);
-                    } else if let Some(mut settled) = state.last_settled_scene.take().filter(|s| s.epoch == seq) {
+                    } else if let Some(mut settled) =
+                        state.last_settled_scene.take().filter(|s| s.epoch == seq)
+                    {
                         apply_overlay_update(&mut settled, holes, &colors);
                         state.scene = Some(overlay_patched_settled_scene(settled));
                     }
@@ -3576,8 +3815,12 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     while let Ok(next_msg) = rx.try_recv() {
                         match next_msg {
                             Message::Scene(newer) => s = newer,
-                            Message::OverlayUpdate { seq, holes, colors, .. } => {
-                                if s.epoch == seq { apply_overlay_update(&mut s, holes, &colors); }
+                            Message::OverlayUpdate {
+                                seq, holes, colors, ..
+                            } => {
+                                if s.epoch == seq {
+                                    apply_overlay_update(&mut s, holes, &colors);
+                                }
                             }
                             Message::Warm(monitors) => {
                                 warm_hosts(monitors, &mut state.hosts, &mut state.next_host_gen)
@@ -3615,7 +3858,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 // Fingers resting mid-swipe: the parked windows' stand-ins must keep playing. Redraw
                 // only when one of them actually delivered a new frame (a static window costs nothing).
                 let live = state.last_settled_scene.as_ref().is_some_and(|s| s.live);
-                let period = Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64);
+                let period =
+                    Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64);
                 // Woken early by a message: wait for the period instead of polling again.
                 let due = live && live_polled.elapsed() + Duration::from_micros(500) >= period;
                 if due {
@@ -3646,9 +3890,8 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 )
             };
             let park = s.monitors.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-            let open_handoff = s.action == "open_close"
-                && t >= 1.
-                && state.open_landed != Some(s.epoch);
+            let open_handoff =
+                s.action == "open_close" && t >= 1. && state.open_landed != Some(s.epoch);
             let any_cover_active = state.build_all_hosts(&s, t, park, open_handoff);
             let place_start = Instant::now();
             let (retries, placement_us, did_place) =
@@ -3684,23 +3927,65 @@ mod tests {
 
     #[test]
     fn wgc_vs_dwm_origins_are_distinguished() {
-        let frame = Rect { x: 0, y: 0, w: 1280, h: 1364 };
-        let window = Rect { x: -8, y: 0, w: 1296, h: 1372 };
+        let frame = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 1364,
+        };
+        let window = Rect {
+            x: -8,
+            y: 0,
+            w: 1296,
+            h: 1372,
+        };
         let dwm_insets = (8, 0);
 
         // Normal WGC capture matches the visible frame -> origin is (0, 0), NOT (8, 0).
-        assert_eq!(wgc_capture_insets((1280, 1364), frame, Some(window), dwm_insets), (0, 0));
+        assert_eq!(
+            wgc_capture_insets((1280, 1364), frame, Some(window), dwm_insets),
+            (0, 0)
+        );
         // If WGC actually captured the full GetWindowRect with invisible borders -> use dwm_insets.
-        assert_eq!(wgc_capture_insets((1296, 1372), frame, Some(window), dwm_insets), (8, 0));
+        assert_eq!(
+            wgc_capture_insets((1296, 1372), frame, Some(window), dwm_insets),
+            (8, 0)
+        );
         // Without a window rect -> default to (0, 0).
-        assert_eq!(wgc_capture_insets((1280, 1364), frame, None, dwm_insets), (0, 0));
+        assert_eq!(
+            wgc_capture_insets((1280, 1364), frame, None, dwm_insets),
+            (0, 0)
+        );
 
         // Verify blitting with WGC (0, 0) vs DWM (8, 0) produces exact unshifted rects.
-        let clip = Rect { x: 0, y: 0, w: 1280, h: 1364 };
-        let (wgc_src, wgc_dst) = proxy_blit_rects(frame, clip, (1280, 1364), (0, 0), (0, 0)).unwrap();
-        let (dwm_src, dwm_dst) = proxy_blit_rects(frame, clip, (1296, 1372), (8, 0), (0, 0)).unwrap();
-        assert_eq!(wgc_src, Rect { x: 0, y: 0, w: 1280, h: 1364 });
-        assert_eq!(dwm_src, Rect { x: 8, y: 0, w: 1280, h: 1364 });
+        let clip = Rect {
+            x: 0,
+            y: 0,
+            w: 1280,
+            h: 1364,
+        };
+        let (wgc_src, wgc_dst) =
+            proxy_blit_rects(frame, clip, (1280, 1364), (0, 0), (0, 0)).unwrap();
+        let (dwm_src, dwm_dst) =
+            proxy_blit_rects(frame, clip, (1296, 1372), (8, 0), (0, 0)).unwrap();
+        assert_eq!(
+            wgc_src,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1280,
+                h: 1364
+            }
+        );
+        assert_eq!(
+            dwm_src,
+            Rect {
+                x: 8,
+                y: 0,
+                w: 1280,
+                h: 1364
+            }
+        );
         assert_eq!(wgc_dst, dwm_dst);
     }
 
@@ -3711,48 +3996,146 @@ mod tests {
     fn live_frame_resizes_the_pool_instead_of_copying_when_content_size_changes() {
         use super::{LiveFrame, live_frame_action};
         // Unchanged window: copy in place.
-        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), true), LiveFrame::Copy);
+        assert_eq!(
+            live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), true),
+            LiveFrame::Copy
+        );
         // Resized mid-gesture, larger or smaller: textures still equal, content differs -> resize, no copy.
-        assert_eq!(live_frame_action((1000, 700), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
-        assert_eq!(live_frame_action((640, 480), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
+        assert_eq!(
+            live_frame_action((1000, 700), (800, 600), (800, 600), (800, 600), true),
+            LiveFrame::Resize
+        );
+        assert_eq!(
+            live_frame_action((640, 480), (800, 600), (800, 600), (800, 600), true),
+            LiveFrame::Resize
+        );
         // Minimised / zero-size content: nothing to copy, nothing to recreate.
-        assert_eq!(live_frame_action((0, 0), (800, 600), (800, 600), (800, 600), true), LiveFrame::Skip);
+        assert_eq!(
+            live_frame_action((0, 0), (800, 600), (800, 600), (800, 600), true),
+            LiveFrame::Skip
+        );
         // After the pool resize, frames of the new size do not match the old picture: skip until the settled
         // path stores a picture of the new size (never copy mismatched textures).
-        assert_eq!(live_frame_action((1000, 700), (1000, 700), (1000, 700), (800, 600), true), LiveFrame::Skip);
+        assert_eq!(
+            live_frame_action((1000, 700), (1000, 700), (1000, 700), (800, 600), true),
+            LiveFrame::Skip
+        );
         // Format mismatch: skip.
-        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), false), LiveFrame::Skip);
+        assert_eq!(
+            live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), false),
+            LiveFrame::Skip
+        );
     }
 
     #[test]
     fn choose_proxy_backing_requires_full_coverage_when_thumb_is_live() {
         // Repro of #38 (bundle 000812248): group widened from 1157 -> 2560; bottom peek is 28px tall.
-        let tile = Rect { x: 0, y: 1364, w: 2560, h: 1364 };
-        let clip = Rect { x: 0, y: 1364, w: 2560, h: 28 };
+        let tile = Rect {
+            x: 0,
+            y: 1364,
+            w: 2560,
+            h: 1364,
+        };
+        let clip = Rect {
+            x: 0,
+            y: 1364,
+            w: 2560,
+            h: 28,
+        };
 
         // Partial capture (1157 < 2560) with live DWM thumbnail: must NOT draw backing or hide thumbnail.
         assert_eq!(
-            choose_proxy_backing(tile, clip, (1157, 1364), (0, 0), (0, 0), true, false, false, true),
+            choose_proxy_backing(
+                tile,
+                clip,
+                (1157, 1364),
+                (0, 0),
+                (0, 0),
+                true,
+                false,
+                false,
+                true
+            ),
             None,
             "partial WGC capture must keep live DWM thumbnail visible during motion"
         );
         // Same partial capture when DWM thumbnail failed (thumb_ok == false): allow partial fallback, 1:1 unscaled.
-        let (src, dst) =
-            choose_proxy_backing(tile, clip, (1157, 1364), (0, 0), (0, 0), false, false, false, false)
-                .expect("partial fallback allowed when thumb_ok == false");
-        assert_eq!(src, Rect { x: 0, y: 0, w: 1157, h: 28 });
-        assert_eq!(dst, Rect { x: 0, y: 1364, w: 1157, h: 28 });
+        let (src, dst) = choose_proxy_backing(
+            tile,
+            clip,
+            (1157, 1364),
+            (0, 0),
+            (0, 0),
+            false,
+            false,
+            false,
+            false,
+        )
+        .expect("partial fallback allowed when thumb_ok == false");
+        assert_eq!(
+            src,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1157,
+                h: 28
+            }
+        );
+        assert_eq!(
+            dst,
+            Rect {
+                x: 0,
+                y: 1364,
+                w: 1157,
+                h: 28
+            }
+        );
 
         // Full-coverage capture (2560 >= 2560) during motion: allowed and 1:1.
-        let (full_src, full_dst) =
-            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), true, false, false, true)
-                .expect("full coverage during motion uses WGC backing");
-        assert_eq!(full_src, Rect { x: 0, y: 0, w: 2560, h: 28 });
-        assert_eq!(full_dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+        let (full_src, full_dst) = choose_proxy_backing(
+            tile,
+            clip,
+            (2560, 1364),
+            (0, 0),
+            (0, 0),
+            true,
+            false,
+            false,
+            true,
+        )
+        .expect("full coverage during motion uses WGC backing");
+        assert_eq!(
+            full_src,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 2560,
+                h: 28
+            }
+        );
+        assert_eq!(
+            full_dst,
+            Rect {
+                x: 0,
+                y: 1364,
+                w: 2560,
+                h: 28
+            }
+        );
 
         // Settled with live DWM thumbnail: never draw WGC backing over it.
         assert_eq!(
-            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), false, false, false, true),
+            choose_proxy_backing(
+                tile,
+                clip,
+                (2560, 1364),
+                (0, 0),
+                (0, 0),
+                false,
+                false,
+                false,
+                true
+            ),
             None
         );
     }
@@ -3761,8 +4144,18 @@ mod tests {
     fn proxy_blit_rects_keeps_top_and_bottom_peeks_unscaled_landscape_and_portrait() {
         // Repro of #18 (bundle 144350042): 3-window group widened 1277 -> 2560 on monitor at y=-1440.
         let host = (0, -1440);
-        let top_tile = Rect { x: 0, y: -2748, w: 2560, h: 1336 };
-        let top_clip = Rect { x: 0, y: -1440, w: 2560, h: 28 };
+        let top_tile = Rect {
+            x: 0,
+            y: -2748,
+            w: 2560,
+            h: 1336,
+        };
+        let top_clip = Rect {
+            x: 0,
+            y: -1440,
+            w: 2560,
+            h: 28,
+        };
         let (top_src, top_dst) =
             proxy_blit_rects(top_tile, top_clip, (1293, 1344), (8, 0), host).unwrap();
         assert_eq!(top_src.w, top_dst.w);
@@ -3770,54 +4163,163 @@ mod tests {
         assert_eq!(top_dst.y, 0);
         assert_eq!(top_dst.h, 28);
 
-        let bot_tile = Rect { x: 0, y: -76, w: 2560, h: 1336 };
-        let bot_clip = Rect { x: 0, y: -76, w: 2560, h: 28 };
+        let bot_tile = Rect {
+            x: 0,
+            y: -76,
+            w: 2560,
+            h: 1336,
+        };
+        let bot_clip = Rect {
+            x: 0,
+            y: -76,
+            w: 2560,
+            h: 28,
+        };
         let (bot_src, bot_dst) =
             proxy_blit_rects(bot_tile, bot_clip, (2576, 1344), (8, 0), host).unwrap();
-        assert_eq!(bot_src, Rect { x: 8, y: 0, w: 2560, h: 28 });
-        assert_eq!(bot_dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+        assert_eq!(
+            bot_src,
+            Rect {
+                x: 8,
+                y: 0,
+                w: 2560,
+                h: 28
+            }
+        );
+        assert_eq!(
+            bot_dst,
+            Rect {
+                x: 0,
+                y: 1364,
+                w: 2560,
+                h: 28
+            }
+        );
 
         // Portrait monitor (-1440, 0, 1440, 2512): grouped peek on right edge (28px wide), negative host origin.
         let p_host = (-1440, 0);
-        let p_tile = Rect { x: -28, y: 0, w: 1412, h: 1200 };
-        let p_clip = Rect { x: -28, y: 0, w: 28, h: 1200 };
+        let p_tile = Rect {
+            x: -28,
+            y: 0,
+            w: 1412,
+            h: 1200,
+        };
+        let p_clip = Rect {
+            x: -28,
+            y: 0,
+            w: 28,
+            h: 1200,
+        };
         let (p_src, p_dst) =
             proxy_blit_rects(p_tile, p_clip, (1428, 1208), (8, 0), p_host).unwrap();
         assert_eq!(p_src.w, p_dst.w);
         assert_eq!(p_src.h, p_dst.h);
-        assert_eq!(p_dst, Rect { x: 1412, y: 0, w: 28, h: 1200 });
+        assert_eq!(
+            p_dst,
+            Rect {
+                x: 1412,
+                y: 0,
+                w: 28,
+                h: 1200
+            }
+        );
     }
 
     #[test]
     fn proxy_blit_rects_handles_negative_offsets_and_left_scrolled_windows() {
         // Repro of #55 (bundle 225940320): left window at x=-1455, w=1920, visible 0..465.
-        let tile = Rect { x: -1455, y: 0, w: 1920, h: 1140 };
-        let clip = Rect { x: 0, y: 0, w: 465, h: 1140 };
+        let tile = Rect {
+            x: -1455,
+            y: 0,
+            w: 1920,
+            h: 1140,
+        };
+        let clip = Rect {
+            x: 0,
+            y: 0,
+            w: 465,
+            h: 1140,
+        };
         let (src, dst) = proxy_blit_rects(tile, clip, (1936, 1148), (8, 0), (0, 0)).unwrap();
-        assert_eq!(src, Rect { x: 1463, y: 0, w: 465, h: 1140 });
-        assert_eq!(dst, Rect { x: 0, y: 0, w: 465, h: 1140 });
+        assert_eq!(
+            src,
+            Rect {
+                x: 1463,
+                y: 0,
+                w: 465,
+                h: 1140
+            }
+        );
+        assert_eq!(
+            dst,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 465,
+                h: 1140
+            }
+        );
 
         // Negative sx (clip.x < tile.x) pads dst.x and clamps src.x to 0.
         let (neg_src, neg_dst) = proxy_blit_rects(
-            Rect { x: 10, y: 0, w: 100, h: 100 },
-            Rect { x: 0, y: 0, w: 50, h: 100 },
+            Rect {
+                x: 10,
+                y: 0,
+                w: 100,
+                h: 100,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                w: 50,
+                h: 100,
+            },
             (100, 100),
             (0, 0),
             (0, 0),
         )
         .unwrap();
-        assert_eq!(neg_src, Rect { x: 0, y: 0, w: 40, h: 100 });
-        assert_eq!(neg_dst, Rect { x: 10, y: 0, w: 40, h: 100 });
+        assert_eq!(
+            neg_src,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 40,
+                h: 100
+            }
+        );
+        assert_eq!(
+            neg_dst,
+            Rect {
+                x: 10,
+                y: 0,
+                w: 40,
+                h: 100
+            }
+        );
 
         // Stale narrower capture returns None so caller keeps live DWM thumbnail.
-        assert_eq!(proxy_blit_rects(tile, clip, (957, 1140), (0, 0), (0, 0)), None);
+        assert_eq!(
+            proxy_blit_rects(tile, clip, (957, 1140), (0, 0), (0, 0)),
+            None
+        );
     }
 
     #[test]
     fn idle_thumbnail_refresh_updates_props_when_source_grows_after_settling() {
         // Repro of #18 (144350042): parked peek 3016780 resized asynchronously 1277 -> 2560 after settle.
-        let tile = Rect { x: 0, y: -76, w: 2560, h: 1336 };
-        let clip = Rect { x: 0, y: -76, w: 2560, h: 28 };
+        let tile = Rect {
+            x: 0,
+            y: -76,
+            w: 2560,
+            h: 1336,
+        };
+        let clip = Rect {
+            x: 0,
+            y: -76,
+            w: 2560,
+            h: 28,
+        };
         let host = (0, -1440);
 
         // Unchanged size -> no update needed.
@@ -3829,8 +4331,24 @@ mod tests {
         let (src, dst) =
             refresh_thumb_props_if_resized(tile, clip, (1293, 1344), (2576, 1344), (8, 0), host)
                 .expect("grown source must refresh thumbnail properties");
-        assert_eq!(src, Rect { x: 8, y: 0, w: 2560, h: 28 });
-        assert_eq!(dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+        assert_eq!(
+            src,
+            Rect {
+                x: 8,
+                y: 0,
+                w: 2560,
+                h: 28
+            }
+        );
+        assert_eq!(
+            dst,
+            Rect {
+                x: 0,
+                y: 1364,
+                w: 2560,
+                h: 28
+            }
+        );
     }
 
     /// #110: a stand-in whose captured picture replaces the DWM thumbnail (motion, live stand-in, open handoff) must
@@ -3851,7 +4369,10 @@ mod tests {
                 "deferred exactly when a working thumbnail is still replaced by the picture"
             );
         }
-        assert!(!defer_thumbnail_show(false, false, false), "a settled peek shows its thumbnail at once");
+        assert!(
+            !defer_thumbnail_show(false, false, false),
+            "a settled peek shows its thumbnail at once"
+        );
     }
 
     /// #110 review R1/R2: before a thumbnail is positioned visible at `clip`, the region must already cut every
@@ -3859,18 +4380,46 @@ mod tests {
     /// holes the clip misses are not cut, so a steady scroll past a PiP adds no region change.
     #[test]
     fn holes_are_cut_before_a_visible_thumbnail_overlapping_them_is_positioned() {
-        let pip = Rect { x: 900, y: 600, w: 320, h: 180 };
-        let hud = Rect { x: 10, y: 10, w: 50, h: 20 };
-        let stale = Rect { x: 2000, y: 0, w: 10, h: 10 };
-        let peek = Rect { x: 1000, y: 0, w: 920, h: 1140 };
-        let far = Rect { x: 0, y: 200, w: 500, h: 300 };
+        let pip = Rect {
+            x: 900,
+            y: 600,
+            w: 320,
+            h: 180,
+        };
+        let hud = Rect {
+            x: 10,
+            y: 10,
+            w: 50,
+            h: 20,
+        };
+        let stale = Rect {
+            x: 2000,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        let peek = Rect {
+            x: 1000,
+            y: 0,
+            w: 920,
+            h: 1140,
+        };
+        let far = Rect {
+            x: 0,
+            y: 200,
+            w: 500,
+            h: 300,
+        };
         let holes = [hud, pip];
         // Scroll start / end: nothing cut yet, a visible thumbnail lands under the PiP -> cut the PiP first.
         let cut = holes_needed_before_showing(&[], &holes, peek).expect("PiP must be cut first");
         assert_eq!(cut, vec![pip]);
         let mut needed = Vec::new();
         holes_intersecting_rects(&holes, &[peek], &mut needed);
-        assert!(needed.iter().all(|h| cut.contains(h)), "every overlapped hole is cut before showing");
+        assert!(
+            needed.iter().all(|h| cut.contains(h)),
+            "every overlapped hole is cut before showing"
+        );
         // Already cut: no region change (steady scroll / settled frames cost nothing).
         assert_eq!(holes_needed_before_showing(&[pip], &holes, peek), None);
         // Clip misses every hole: nothing to cut, even though holes exist.
@@ -3879,7 +4428,11 @@ mod tests {
         let cut = holes_needed_before_showing(&[stale], &holes, peek).expect("PiP must be added");
         assert_eq!(cut, vec![pip, stale]);
         let cut = holes_needed_before_showing(&[hud], &holes, peek).expect("PiP must be added");
-        assert_eq!(cut, vec![hud, pip], "frame order kept so the post-loop apply can be a no-op");
+        assert_eq!(
+            cut,
+            vec![hud, pip],
+            "frame order kept so the post-loop apply can be a no-op"
+        );
     }
 
     #[test]
@@ -3896,43 +4449,127 @@ mod tests {
         // (a) Shrinking window in motion: stand-in `rs` keeps original 2560x1364 while OS window
         //     at `park` already shrunk to 1157x1364. Must KEEP the origin-size capture so the
         //     stand-in covers the whole clip without blanking out during the 180 ms animation.
-        let shrunk_os = Some(Rect { x: 3584, y: 0, w: 1157, h: 1364 });
+        let shrunk_os = Some(Rect {
+            x: 3584,
+            y: 0,
+            w: 1157,
+            h: 1364,
+        });
         assert!(
             !is_capture_stale((2560, 1364), (2560, 1364), shrunk_os, true),
             "origin-size bitmap must be kept during motion even after OS window shrunk"
         );
-        let tile = Rect { x: 0, y: 0, w: 2560, h: 1364 };
-        let clip = Rect { x: 0, y: 0, w: 2560, h: 1364 };
+        let tile = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1364,
+        };
+        let clip = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1364,
+        };
         assert_eq!(
-            choose_proxy_backing(tile, clip, (2560, 1364), (0, 0), (0, 0), true, false, false, true),
+            choose_proxy_backing(
+                tile,
+                clip,
+                (2560, 1364),
+                (0, 0),
+                (0, 0),
+                true,
+                false,
+                false,
+                true
+            ),
             Some((clip, clip)),
             "kept origin-size bitmap covers full clip during shrinking animation"
         );
 
         // (b) Growing tile: during motion `rs` is still 1157x1364 so 1157 bitmap matches `rs`;
         //     once settled (`in_motion == false`), 1157 bitmap vs 2560 OS frame is stale.
-        let grown_os = Some(Rect { x: 3584, y: 0, w: 2560, h: 1364 });
-        assert!(!is_capture_stale((1157, 1364), (1157, 1364), grown_os, true));
-        assert!(is_capture_stale((1157, 1364), (2560, 1364), grown_os, false));
+        let grown_os = Some(Rect {
+            x: 3584,
+            y: 0,
+            w: 2560,
+            h: 1364,
+        });
+        assert!(!is_capture_stale(
+            (1157, 1364),
+            (1157, 1364),
+            grown_os,
+            true
+        ));
+        assert!(is_capture_stale(
+            (1157, 1364),
+            (2560, 1364),
+            grown_os,
+            false
+        ));
 
         // (c) Settled proxy / idle refresh with mismatched OS frame is stale and dropped.
-        assert!(is_capture_stale((1277, 1364), (1277, 1364), grown_os, false));
-        assert!(!is_capture_stale((2560, 1364), (2560, 1364), grown_os, false));
+        assert!(is_capture_stale(
+            (1277, 1364),
+            (1277, 1364),
+            grown_os,
+            false
+        ));
+        assert!(!is_capture_stale(
+            (2560, 1364),
+            (2560, 1364),
+            grown_os,
+            false
+        ));
     }
 
     #[test]
     fn parked_target_rect_holds_constant_y_during_live_group_roll_and_restores_on_settle() {
         // Repro of #46 (bundle 001446456): rolling a 3-window group changed tile.rect.y every frame.
-        let bound = Rect { x: 0, y: -1440, w: 2560, h: 1392 };
-        let frame1 = Rect { x: 0, y: -301, w: 1277, h: 1336 };
-        let frame2 = Rect { x: 0, y: -291, w: 1277, h: 1336 };
+        let bound = Rect {
+            x: 0,
+            y: -1440,
+            w: 2560,
+            h: 1392,
+        };
+        let frame1 = Rect {
+            x: 0,
+            y: -301,
+            w: 1277,
+            h: 1336,
+        };
+        let frame2 = Rect {
+            x: 0,
+            y: -291,
+            w: 1277,
+            h: 1336,
+        };
         let p1 = parked_target_rect(3584, frame1, bound, true);
         let p2 = parked_target_rect(3584, frame2, bound, true);
-        assert_eq!(p1, p2, "parked target stays constant during live roll (no per-frame DeferWindowPos storm)");
-        assert_eq!(p1, Rect { x: 3584, y: -1440, w: 1277, h: 1336 });
+        assert_eq!(
+            p1, p2,
+            "parked target stays constant during live roll (no per-frame DeferWindowPos storm)"
+        );
+        assert_eq!(
+            p1,
+            Rect {
+                x: 3584,
+                y: -1440,
+                w: 1277,
+                h: 1336
+            }
+        );
         // At settle, parked target keeps bound.y as well (zero extra settle move, no mixed-DPI y drift).
         let settled = parked_target_rect(3584, frame2, bound, false);
-        assert_eq!(settled, Rect { x: 3584, y: -1440, w: 1277, h: 1336 });
+        assert_eq!(
+            settled,
+            Rect {
+                x: 3584,
+                y: -1440,
+                w: 1277,
+                h: 1336
+            }
+        );
     }
 
     #[test]
@@ -3941,9 +4578,33 @@ mod tests {
         // WM_DPICHANGED must be placed asynchronously rather than blocking synchronous EndDeferWindowPos.
         let park = 3584;
         let placements = vec![
-            (10, Rect { x: park, y: -1440, w: 1277, h: 1392 }), // parked
-            (20, Rect { x: -1412, y: -1859, w: 1412, h: 2512 }), // cover timed out (cross-DPI)
-            (30, Rect { x: 0, y: -1440, w: 1277, h: 1392 }), // normal on-screen landing
+            (
+                10,
+                Rect {
+                    x: park,
+                    y: -1440,
+                    w: 1277,
+                    h: 1392,
+                },
+            ), // parked
+            (
+                20,
+                Rect {
+                    x: -1412,
+                    y: -1859,
+                    w: 1412,
+                    h: 2512,
+                },
+            ), // cover timed out (cross-DPI)
+            (
+                30,
+                Rect {
+                    x: 0,
+                    y: -1440,
+                    w: 1277,
+                    h: 1392,
+                },
+            ), // normal on-screen landing
         ];
         let mut timed_out = HashSet::new();
         timed_out.insert(20);
@@ -3964,8 +4625,24 @@ mod tests {
 
     #[test]
     fn open_landing_items_includes_timed_out_async_cover_even_when_sync_landing_is_empty() {
-        let newborn = (42, Rect { x: 0, y: 0, w: 960, h: 1140 });
-        let sibling = (43, Rect { x: 966, y: 0, w: 954, h: 1140 });
+        let newborn = (
+            42,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 960,
+                h: 1140,
+            },
+        );
+        let sibling = (
+            43,
+            Rect {
+                x: 966,
+                y: 0,
+                w: 954,
+                h: 1140,
+            },
+        );
 
         // Sole newborn whose cover timed out: sync_landing is empty, async_landing has newborn.
         assert_eq!(
@@ -3980,7 +4657,10 @@ mod tests {
         );
         // Mid-animation, non-open/close, or both empty -> None.
         assert_eq!(open_landing_items("open_close", 0.5, &[], &[newborn]), None);
-        assert_eq!(open_landing_items("drag_reflow", 1.0, &[], &[newborn]), None);
+        assert_eq!(
+            open_landing_items("drag_reflow", 1.0, &[], &[newborn]),
+            None
+        );
         assert_eq!(open_landing_items("open_close", 1.0, &[], &[]), None);
     }
 
@@ -4002,9 +4682,15 @@ mod tests {
         assert!(rec.record_failure(t0), "first failure should log");
         assert!(!rec.can_try(t0 + Duration::from_millis(100)));
         assert!(rec.can_try(t0 + Duration::from_millis(250)));
-        assert!(!rec.record_failure(t0 + Duration::from_millis(250)), "subsequent failures suppress log spam");
+        assert!(
+            !rec.record_failure(t0 + Duration::from_millis(250)),
+            "subsequent failures suppress log spam"
+        );
         assert_eq!(SurfaceRecovery::retry_delay(3), Duration::from_millis(1000));
-        assert_eq!(SurfaceRecovery::retry_delay(10), Duration::from_millis(2000));
+        assert_eq!(
+            SurfaceRecovery::retry_delay(10),
+            Duration::from_millis(2000)
+        );
         rec.reset();
         assert_eq!(rec.attempts, 0);
         assert!(rec.can_try(t0));
@@ -4014,8 +4700,18 @@ mod tests {
     #[test]
     fn holes_intersecting_rects_only_flags_overlapping_thumbnails() {
         let holes = vec![
-            Rect { x: 100, y: 100, w: 300, h: 300 },
-            Rect { x: 1000, y: 100, w: 200, h: 200 },
+            Rect {
+                x: 100,
+                y: 100,
+                w: 300,
+                h: 300,
+            },
+            Rect {
+                x: 1000,
+                y: 100,
+                w: 200,
+                h: 200,
+            },
         ];
         let mut out = Vec::new();
         // No thumbnails -> no SetWindowRgn holes needed (prevents DWM black flashes).
@@ -4023,22 +4719,66 @@ mod tests {
         assert!(out.is_empty());
 
         // Thumbnail away from all holes -> still no SetWindowRgn holes.
-        holes_intersecting_rects(&holes, &[Rect { x: 500, y: 500, w: 100, h: 100 }], &mut out);
+        holes_intersecting_rects(
+            &holes,
+            &[Rect {
+                x: 500,
+                y: 500,
+                w: 100,
+                h: 100,
+            }],
+            &mut out,
+        );
         assert!(out.is_empty());
 
         // Thumbnail overlapping only the second hole -> only that hole requires SetWindowRgn.
-        holes_intersecting_rects(&holes, &[Rect { x: 1100, y: 150, w: 150, h: 150 }], &mut out);
+        holes_intersecting_rects(
+            &holes,
+            &[Rect {
+                x: 1100,
+                y: 150,
+                w: 150,
+                h: 150,
+            }],
+            &mut out,
+        );
         assert_eq!(out, vec![holes[1]]);
     }
 
     #[test]
     fn stand_in_rect_holds_origin_size_during_motion_and_open_handoff() {
-        let origin = Rect { x: 0, y: 0, w: 1000, h: 1200 };
-        let current = Rect { x: 50, y: 0, w: 2560, h: 1200 };
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 1200,
+        };
+        let current = Rect {
+            x: 50,
+            y: 0,
+            w: 2560,
+            h: 1200,
+        };
         // Mid-animation: keeps origin size at interpolated position.
-        assert_eq!(stand_in_rect(origin, current, 0.5, false), Rect { x: 50, y: 0, w: 1000, h: 1200 });
+        assert_eq!(
+            stand_in_rect(origin, current, 0.5, false),
+            Rect {
+                x: 50,
+                y: 0,
+                w: 1000,
+                h: 1200
+            }
+        );
         // At t=1.0 while open/close async handoff is still waiting for real window to arrive: keeps origin size.
-        assert_eq!(stand_in_rect(origin, current, 1.0, true), Rect { x: 50, y: 0, w: 1000, h: 1200 });
+        assert_eq!(
+            stand_in_rect(origin, current, 1.0, true),
+            Rect {
+                x: 50,
+                y: 0,
+                w: 1000,
+                h: 1200
+            }
+        );
         // Settled: adopts full target rect.
         assert_eq!(stand_in_rect(origin, current, 1.0, false), current);
     }
@@ -4046,9 +4786,39 @@ mod tests {
     #[test]
     fn draw_sig_detects_hole_changes() {
         let mut sig = DrawSig::default();
-        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
-        let holes_a = vec![Rect { x: 100, y: 100, w: 400, h: 400 }];
-        let holes_b = vec![Rect { x: 150, y: 120, w: 400, h: 400 }];
+        let lines = vec![border_line(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 900,
+                h: 1000,
+            },
+            0x3B82F6,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1040,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+        )];
+        let holes_a = vec![Rect {
+            x: 100,
+            y: 100,
+            w: 400,
+            h: 400,
+        }];
+        let holes_b = vec![Rect {
+            x: 150,
+            y: 120,
+            w: 400,
+            h: 400,
+        }];
         sig.set_from(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0);
         assert!(sig.matches(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0));
         assert!(!sig.matches(&[], &[], &lines, &holes_b, 2.0, 8.0, 1.0));
@@ -4063,14 +4833,22 @@ mod tests {
 
         assert!(plan_device_invalidation(&mut shared_gen, &mut host_gens, 1));
         assert_eq!(shared_gen, None);
-        assert_eq!(host_gens, [None, None], "all hosts on dead gen 1 must be invalidated together");
+        assert_eq!(
+            host_gens,
+            [None, None],
+            "all hosts on dead gen 1 must be invalidated together"
+        );
 
         // Host 0 recreates on gen 2.
         shared_gen = Some(2);
         host_gens[0] = Some(2);
 
         // A second failure referencing dead gen 1 must NOT reset gen 2 or invalidate host 0.
-        assert!(!plan_device_invalidation(&mut shared_gen, &mut host_gens, 1));
+        assert!(!plan_device_invalidation(
+            &mut shared_gen,
+            &mut host_gens,
+            1
+        ));
         assert_eq!(shared_gen, Some(2));
         assert_eq!(host_gens, [Some(2), None]);
     }
@@ -4080,8 +4858,33 @@ mod tests {
         let mut sig = DrawSig::default();
         let mut want_visible = false;
         let mut valid = false;
-        let mut rgn_holes = vec![Rect { x: 10, y: 10, w: 100, h: 100 }];
-        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
+        let mut rgn_holes = vec![Rect {
+            x: 10,
+            y: 10,
+            w: 100,
+            h: 100,
+        }];
+        let lines = vec![border_line(
+            Rect {
+                x: 0,
+                y: 0,
+                w: 900,
+                h: 1000,
+            },
+            0x3B82F6,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1040,
+            },
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1080,
+            },
+        )];
 
         // Scene with pictures (settled peek/clipped proxy) updates `last_draw` even while keeping
         // `last_draw_valid == false`, so idle recovery restores the latest border.
@@ -4100,7 +4903,10 @@ mod tests {
             true,
         );
         assert!(want_visible);
-        assert!(!valid, "frames with WGC backing pictures keep last_draw_valid=false");
+        assert!(
+            !valid,
+            "frames with WGC backing pictures keep last_draw_valid=false"
+        );
         assert!(should_draw_on_recovery(want_visible, &sig));
         assert!(sig.matches(&[], &[], &lines, &[], 2.0, 8.0, 1.0));
 
@@ -4168,62 +4974,184 @@ mod tests {
 
     #[test]
     fn tile_stand_in_and_park_shrink_grow_and_portrait() {
-        let bound = Rect { x: 0, y: 0, w: 2560, h: 1392 };
+        let bound = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1392,
+        };
 
         // 1. Shrinking tile at x > 0 during open_handoff (1988 -> 1277 at x=1283):
         //    rs overflows bound (1283 + 1988 > 2560), but final_rect fits (1283 + 1277 == 2560).
         //    Must NOT be parked (lands on screen), while proxy stays true for the handoff stand-in.
-        let origin = Rect { x: 0, y: 0, w: 1988, h: 1392 };
-        let final_r = Rect { x: 1283, y: 0, w: 1277, h: 1392 };
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            w: 1988,
+            h: 1392,
+        };
+        let final_r = Rect {
+            x: 1283,
+            y: 0,
+            w: 1277,
+            h: 1392,
+        };
         let (rs, draw_clip, park_window, proxy) = tile_stand_in_and_park(
             origin, final_r, final_r, bound, 1.0, true, false, false, false, false, false,
         );
-        assert_eq!(rs, Rect { x: 1283, y: 0, w: 1988, h: 1392 });
-        assert_eq!(draw_clip, Some(Rect { x: 1283, y: 0, w: 1277, h: 1392 }));
-        assert!(!park_window, "shrinking tile whose final rect fits in bound must not be parked");
-        assert!(proxy, "moved tile still uses stand-in proxy during open_handoff");
+        assert_eq!(
+            rs,
+            Rect {
+                x: 1283,
+                y: 0,
+                w: 1988,
+                h: 1392
+            }
+        );
+        assert_eq!(
+            draw_clip,
+            Some(Rect {
+                x: 1283,
+                y: 0,
+                w: 1277,
+                h: 1392
+            })
+        );
+        assert!(
+            !park_window,
+            "shrinking tile whose final rect fits in bound must not be parked"
+        );
+        assert!(
+            proxy,
+            "moved tile still uses stand-in proxy during open_handoff"
+        );
 
         // 2. Growing tile whose final rect overflows bound (600 -> 1400 at x=1500):
         //    final_rect overflows (1500 + 1400 > 2560), so it MUST be parked AND drawn at its
         //    final size (`rs == grow_final`), not held at the old origin size.
-        let grow_origin = Rect { x: 1500, y: 0, w: 600, h: 1392 };
-        let grow_final = Rect { x: 1500, y: 0, w: 1400, h: 1392 };
+        let grow_origin = Rect {
+            x: 1500,
+            y: 0,
+            w: 600,
+            h: 1392,
+        };
+        let grow_final = Rect {
+            x: 1500,
+            y: 0,
+            w: 1400,
+            h: 1392,
+        };
         let (grow_rs, grow_clip, grow_park, grow_proxy) = tile_stand_in_and_park(
-            grow_origin, grow_final, grow_final, bound, 1.0, true, false, false, false, false, false,
+            grow_origin,
+            grow_final,
+            grow_final,
+            bound,
+            1.0,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
         );
-        assert_eq!(grow_rs, grow_final, "parked tile at t>=1 must draw at final rect, not old origin size");
-        assert_eq!(grow_clip, Some(Rect { x: 1500, y: 0, w: 1060, h: 1392 }));
-        assert!(grow_park, "growing tile whose final rect overflows bound must be parked");
+        assert_eq!(
+            grow_rs, grow_final,
+            "parked tile at t>=1 must draw at final rect, not old origin size"
+        );
+        assert_eq!(
+            grow_clip,
+            Some(Rect {
+                x: 1500,
+                y: 0,
+                w: 1060,
+                h: 1392
+            })
+        );
+        assert!(
+            grow_park,
+            "growing tile whose final rect overflows bound must be parked"
+        );
         assert!(grow_proxy);
 
         // 3. Unmoved tile during open_handoff must NOT become a thumbnail proxy and keeps its rect.
-        let still = Rect { x: 0, y: 0, w: 1277, h: 1392 };
+        let still = Rect {
+            x: 0,
+            y: 0,
+            w: 1277,
+            h: 1392,
+        };
         let (still_rs, _, still_park, still_proxy) = tile_stand_in_and_park(
             still, still, still, bound, 1.0, true, false, false, false, false, false,
         );
         assert_eq!(still_rs, still);
         assert!(!still_park);
-        assert!(!still_proxy, "unmoved tile must not create thumbnail proxy during open_handoff");
+        assert!(
+            !still_proxy,
+            "unmoved tile must not create thumbnail proxy during open_handoff"
+        );
 
         // 4. Portrait monitor: shrinking height at y > 0 lands (holds origin size while landing),
         //    growing height past bound parks and draws at final size.
-        let p_bound = Rect { x: -1440, y: 0, w: 1440, h: 2512 };
-        let p_shrink_o = Rect { x: -1440, y: 0, w: 1440, h: 2000 };
-        let p_shrink_f = Rect { x: -1440, y: 1259, w: 1440, h: 1253 };
+        let p_bound = Rect {
+            x: -1440,
+            y: 0,
+            w: 1440,
+            h: 2512,
+        };
+        let p_shrink_o = Rect {
+            x: -1440,
+            y: 0,
+            w: 1440,
+            h: 2000,
+        };
+        let p_shrink_f = Rect {
+            x: -1440,
+            y: 1259,
+            w: 1440,
+            h: 1253,
+        };
         let (p_shrink_rs, _, p_shrink_park, p_shrink_proxy) = tile_stand_in_and_park(
-            p_shrink_o, p_shrink_f, p_shrink_f, p_bound, 1.0, true, false, false, false, false, false,
+            p_shrink_o, p_shrink_f, p_shrink_f, p_bound, 1.0, true, false, false, false, false,
+            false,
         );
-        assert_eq!(p_shrink_rs, Rect { x: -1440, y: 1259, w: 1440, h: 2000 });
-        assert!(!p_shrink_park, "portrait shrinking tile at y>0 fits final bound and must not park");
+        assert_eq!(
+            p_shrink_rs,
+            Rect {
+                x: -1440,
+                y: 1259,
+                w: 1440,
+                h: 2000
+            }
+        );
+        assert!(
+            !p_shrink_park,
+            "portrait shrinking tile at y>0 fits final bound and must not park"
+        );
         assert!(p_shrink_proxy);
 
-        let p_grow_o = Rect { x: -1440, y: 1600, w: 1440, h: 600 };
-        let p_grow_f = Rect { x: -1440, y: 1600, w: 1440, h: 1253 };
+        let p_grow_o = Rect {
+            x: -1440,
+            y: 1600,
+            w: 1440,
+            h: 600,
+        };
+        let p_grow_f = Rect {
+            x: -1440,
+            y: 1600,
+            w: 1440,
+            h: 1253,
+        };
         let (p_grow_rs, _, p_grow_park, _) = tile_stand_in_and_park(
             p_grow_o, p_grow_f, p_grow_f, p_bound, 1.0, true, false, false, false, false, false,
         );
-        assert_eq!(p_grow_rs, p_grow_f, "portrait parked tile at t>=1 must draw at final rect");
-        assert!(p_grow_park, "portrait growing tile overflowing bottom bound must park");
+        assert_eq!(
+            p_grow_rs, p_grow_f,
+            "portrait parked tile at t>=1 must draw at final rect"
+        );
+        assert!(
+            p_grow_park,
+            "portrait growing tile overflowing bottom bound must park"
+        );
     }
 
     /// #36 (bundle 000644700 "in groups, the taskbar should remain in the foreground"): a 2-window group on a
@@ -4232,32 +5160,77 @@ mod tests {
     /// the taskbar. Every drawn part of a peek must stay inside the strip's work area.
     #[test]
     fn group_peek_never_draws_over_the_taskbar() {
-        let host = Rect { x: 0, y: 0, w: 2560, h: 1440 };
-        let bound = Rect { x: 0, y: 0, w: 2560, h: 1392 };
-        let peek = Rect { x: 0, y: 1364, w: 1277, h: 1364 };
-        let inside = |r: Rect| r.x >= bound.x && r.y >= bound.y && r.x + r.w <= bound.x + bound.w && r.y + r.h <= bound.y + bound.h;
+        let host = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1440,
+        };
+        let bound = Rect {
+            x: 0,
+            y: 0,
+            w: 2560,
+            h: 1392,
+        };
+        let peek = Rect {
+            x: 0,
+            y: 1364,
+            w: 1277,
+            h: 1364,
+        };
+        let inside = |r: Rect| {
+            r.x >= bound.x
+                && r.y >= bound.y
+                && r.x + r.w <= bound.x + bound.w
+                && r.y + r.h <= bound.y + bound.h
+        };
         // Settled (t = 1), moving (t = 0.5 from one row lower) and mid-roll from above the strip.
-        for (origin, t, moving) in [(peek, 1.0, false), (Rect { y: 1500, ..peek }, 0.5, true), (Rect { y: 1000, ..peek }, 0.5, true), (Rect { y: -1300, ..peek }, 0.3, true)] {
+        for (origin, t, moving) in [
+            (peek, 1.0, false),
+            (Rect { y: 1500, ..peek }, 0.5, true),
+            (Rect { y: 1000, ..peek }, 0.5, true),
+            (Rect { y: -1300, ..peek }, 0.3, true),
+        ] {
             let current = interpolate(origin, peek, t);
-            let (rs, clip, park, proxy) =
-                tile_stand_in_and_park(origin, current, peek, bound, t, false, moving, false, false, true, false);
+            let (rs, clip, park, proxy) = tile_stand_in_and_park(
+                origin, current, peek, bound, t, false, moving, false, false, true, false,
+            );
             assert!(park && proxy, "a group peek is parked and drawn as a proxy");
             // A stand-in entirely outside the strip draws nothing; the settled sliver is always visible.
             let Some(clip) = clip else {
                 assert!(moving, "the settled peek sliver is visible");
                 continue;
             };
-            assert!(inside(clip), "peek clip {clip:?} (stand-in {rs:?}) must lie inside the work area {bound:?}");
+            assert!(
+                inside(clip),
+                "peek clip {clip:?} (stand-in {rs:?}) must lie inside the work area {bound:?}"
+            );
             // WGC backing (any source size, with or without a live thumbnail) and the DWM thumbnail use the same
             // 1:1 blit: the destination never leaves the clip.
             for src in [(1277, 1364), (1293, 1372), (2576, 1400), (600, 400)] {
                 for thumb_ok in [false, true] {
-                    if let Some((_, dst)) = choose_proxy_backing(rs, clip, src, (8, 0), (host.x, host.y), moving, false, false, thumb_ok) {
-                        assert!(inside(dst), "backing dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                    if let Some((_, dst)) = choose_proxy_backing(
+                        rs,
+                        clip,
+                        src,
+                        (8, 0),
+                        (host.x, host.y),
+                        moving,
+                        false,
+                        false,
+                        thumb_ok,
+                    ) {
+                        assert!(
+                            inside(dst),
+                            "backing dst {dst:?} for source {src:?} leaves the work area {bound:?}"
+                        );
                     }
                 }
                 if let Some((_, dst)) = proxy_blit_rects(rs, clip, src, (8, 0), (host.x, host.y)) {
-                    assert!(inside(dst), "thumbnail dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                    assert!(
+                        inside(dst),
+                        "thumbnail dst {dst:?} for source {src:?} leaves the work area {bound:?}"
+                    );
                 }
             }
         }
@@ -4267,43 +5240,163 @@ mod tests {
     /// a deck taller than the strip) never strokes over the taskbar; host-local coordinates on a negative-origin host.
     #[test]
     fn border_lines_carry_the_work_area_clip() {
-        let host = Rect { x: -1440, y: -419, w: 1440, h: 2560 };
-        let bound = Rect { x: -1440, y: -419, w: 1440, h: 2512 };
-        let drawn = Rect { x: -1440, y: 2000, w: 1440, h: 1200 };
+        let host = Rect {
+            x: -1440,
+            y: -419,
+            w: 1440,
+            h: 2560,
+        };
+        let bound = Rect {
+            x: -1440,
+            y: -419,
+            w: 1440,
+            h: 2512,
+        };
+        let drawn = Rect {
+            x: -1440,
+            y: 2000,
+            w: 1440,
+            h: 1200,
+        };
         let l = border_line(drawn, 0xA855F7, bound, host);
-        assert_eq!(l.rect, Rect { x: 0, y: 2419, w: 1440, h: 1200 });
-        assert_eq!(l.clip, Rect { x: 0, y: 0, w: 1440, h: 2512 });
+        assert_eq!(
+            l.rect,
+            Rect {
+                x: 0,
+                y: 2419,
+                w: 1440,
+                h: 1200
+            }
+        );
+        assert_eq!(
+            l.clip,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1440,
+                h: 2512
+            }
+        );
         assert_eq!(l.color, 0xA855F7);
-        assert!(l.clip.y + l.clip.h <= host.h - 48, "the clip stops at the taskbar");
+        assert!(
+            l.clip.y + l.clip.h <= host.h - 48,
+            "the clip stops at the taskbar"
+        );
     }
 
     #[test]
     fn verify_reject_requires_matching_epoch_responsive_and_stable_size() {
-        let origin = Rect { x: 0, y: 0, w: 1000, h: 1000 };
-        let want = Rect { x: 0, y: 0, w: 600, h: 1000 };
-        let constrained = Rect { x: 0, y: 0, w: 800, h: 1000 };
-        let shrinking_prev = Rect { x: 0, y: 0, w: 950, h: 1000 };
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            w: 1000,
+            h: 1000,
+        };
+        let want = Rect {
+            x: 0,
+            y: 0,
+            w: 600,
+            h: 1000,
+        };
+        let constrained = Rect {
+            x: 0,
+            y: 0,
+            w: 800,
+            h: 1000,
+        };
+        let shrinking_prev = Rect {
+            x: 0,
+            y: 0,
+            w: 950,
+            h: 1000,
+        };
 
         // Epoch mismatch -> never reject.
-        assert!(!should_verify_reject(10, 11, want, Some(constrained), constrained, false, (800, 120)));
+        assert!(!should_verify_reject(
+            10,
+            11,
+            want,
+            Some(constrained),
+            constrained,
+            false,
+            (800, 120)
+        ));
         // Hung window -> never reject.
-        assert!(!should_verify_reject(10, 10, want, Some(constrained), constrained, true, (800, 120)));
+        assert!(!should_verify_reject(
+            10,
+            10,
+            want,
+            Some(constrained),
+            constrained,
+            true,
+            (800, 120)
+        ));
         // Still shrinking (size changed between pass 1 and pass 2) -> never reject.
-        assert!(!should_verify_reject(10, 10, want, Some(shrinking_prev), constrained, false, (800, 120)));
+        assert!(!should_verify_reject(
+            10,
+            10,
+            want,
+            Some(shrinking_prev),
+            constrained,
+            false,
+            (800, 120)
+        ));
         // Responsive but slow app with unchanged size equal to origin (no min_track constraint) -> never reject.
-        assert!(!should_verify_reject(10, 10, want, Some(origin), origin, false, (200, 120)));
+        assert!(!should_verify_reject(
+            10,
+            10,
+            want,
+            Some(origin),
+            origin,
+            false,
+            (200, 120)
+        ));
         // Timed-out handoff/cover without matching min_track -> never reject.
-        assert!(!should_verify_reject(10, 10, want, Some(constrained), constrained, false, (200, 120)));
+        assert!(!should_verify_reject(
+            10,
+            10,
+            want,
+            Some(constrained),
+            constrained,
+            false,
+            (200, 120)
+        ));
         // Stable, responsive, matching epoch, AND confirmed by real WM_GETMINMAXINFO minimum -> reject.
-        assert!(should_verify_reject(10, 10, want, Some(constrained), constrained, false, (800, 120)));
+        assert!(should_verify_reject(
+            10,
+            10,
+            want,
+            Some(constrained),
+            constrained,
+            false,
+            (800, 120)
+        ));
         // Even if timed out, a real WM_GETMINMAXINFO minimum matching `got` is rejected.
-        assert!(should_verify_reject(10, 10, want, Some(constrained), constrained, false, (800, 120)));
+        assert!(should_verify_reject(
+            10,
+            10,
+            want,
+            Some(constrained),
+            constrained,
+            false,
+            (800, 120)
+        ));
     }
 
     #[test]
     fn open_landing_accepts_exact_and_stable_character_grid_sizes() {
-        let origin = Rect { x: 100, y: 0, w: 800, h: 1392 };
-        let want = Rect { x: 100, y: 0, w: 1277, h: 1392 };
+        let origin = Rect {
+            x: 100,
+            y: 0,
+            w: 800,
+            h: 1392,
+        };
+        let want = Rect {
+            x: 100,
+            y: 0,
+            w: 1277,
+            h: 1392,
+        };
 
         // Exact arrival succeeds on first poll.
         let mut s = None;
@@ -4320,7 +5413,12 @@ mod tests {
 
         // Character-grid terminal resized from origin (800 -> 1269, 8 px narrower than target):
         // arrives after 3 stable polls.
-        let grid = Rect { x: 100, y: 0, w: 1269, h: 1384 };
+        let grid = Rect {
+            x: 100,
+            y: 0,
+            w: 1269,
+            h: 1384,
+        };
         let mut s_grid = None;
         assert!(!open_landing_item_arrived(origin, want, grid, &mut s_grid));
         assert!(!open_landing_item_arrived(origin, want, grid, &mut s_grid));
@@ -4328,47 +5426,114 @@ mod tests {
 
         // Still actively resizing -> resets stability counter, does not prematurely arrive.
         let mut s_move = None;
-        assert!(!open_landing_item_arrived(origin, want, Rect { w: 1200, ..want }, &mut s_move));
-        assert!(!open_landing_item_arrived(origin, want, Rect { w: 1230, ..want }, &mut s_move));
-        assert!(!open_landing_item_arrived(origin, want, Rect { w: 1260, ..want }, &mut s_move));
+        assert!(!open_landing_item_arrived(
+            origin,
+            want,
+            Rect { w: 1200, ..want },
+            &mut s_move
+        ));
+        assert!(!open_landing_item_arrived(
+            origin,
+            want,
+            Rect { w: 1230, ..want },
+            &mut s_move
+        ));
+        assert!(!open_landing_item_arrived(
+            origin,
+            want,
+            Rect { w: 1260, ..want },
+            &mut s_move
+        ));
     }
 
     #[test]
     fn all_targets_already_placed_checks_real_frames_and_force_place() {
-        let on_screen = Rect { x: 0, y: 0, w: 960, h: 1080 };
-        let parked = Rect { x: 3584, y: 0, w: 960, h: 1080 };
+        let on_screen = Rect {
+            x: 0,
+            y: 0,
+            w: 960,
+            h: 1080,
+        };
+        let parked = Rect {
+            x: 3584,
+            y: 0,
+            w: 960,
+            h: 1080,
+        };
         let placements = vec![(1, on_screen), (2, parked)];
 
         // Matches real OS frames (including parked window at park_x) -> skips placement.
-        assert!(all_targets_already_placed("idle", false, false, &placements, |id| {
-            Some(if id == 1 { on_screen } else { parked })
-        }));
+        assert!(all_targets_already_placed(
+            "idle",
+            false,
+            false,
+            &placements,
+            |id| { Some(if id == 1 { on_screen } else { parked }) }
+        ));
         // Drifted window -> must place.
-        assert!(!all_targets_already_placed("idle", false, false, &placements, |id| {
-            Some(if id == 1 { Rect { x: 20, ..on_screen } } else { parked })
-        }));
+        assert!(!all_targets_already_placed(
+            "idle",
+            false,
+            false,
+            &placements,
+            |id| {
+                Some(if id == 1 {
+                    Rect { x: 20, ..on_screen }
+                } else {
+                    parked
+                })
+            }
+        ));
         // `force_place = true` -> must place even if frames match.
-        assert!(!all_targets_already_placed("idle", true, false, &placements, |id| {
-            Some(if id == 1 { on_screen } else { parked })
-        }));
+        assert!(!all_targets_already_placed(
+            "idle",
+            true,
+            false,
+            &placements,
+            |id| { Some(if id == 1 { on_screen } else { parked }) }
+        ));
         // Non-idle action -> must place.
-        assert!(!all_targets_already_placed("scroll", false, false, &placements, |id| {
-            Some(if id == 1 { on_screen } else { parked })
-        }));
+        assert!(!all_targets_already_placed(
+            "scroll",
+            false,
+            false,
+            &placements,
+            |id| { Some(if id == 1 { on_screen } else { parked }) }
+        ));
     }
 
     #[test]
     fn any_on_screen_target_moved_skips_verify_when_no_on_screen_window_changed() {
         let park = 3584;
-        let on_screen = Rect { x: 0, y: 0, w: 957, h: 1140 };
-        let parked = Rect { x: park, y: 0, w: 957, h: 1140 };
+        let on_screen = Rect {
+            x: 0,
+            y: 0,
+            w: 957,
+            h: 1140,
+        };
+        let parked = Rect {
+            x: park,
+            y: 0,
+            w: 957,
+            h: 1140,
+        };
         let placements = vec![(1, on_screen), (2, parked)];
 
-        assert!(!any_on_screen_target_moved(park, false, &placements, |id| {
-            Some(if id == 1 { on_screen } else { parked })
-        }));
+        assert!(!any_on_screen_target_moved(
+            park,
+            false,
+            &placements,
+            |id| { Some(if id == 1 { on_screen } else { parked }) }
+        ));
         assert!(any_on_screen_target_moved(park, false, &placements, |id| {
-            Some(if id == 1 { Rect { x: 100, ..on_screen } } else { parked })
+            Some(if id == 1 {
+                Rect {
+                    x: 100,
+                    ..on_screen
+                }
+            } else {
+                parked
+            })
         }));
         assert!(any_on_screen_target_moved(park, true, &placements, |id| {
             Some(if id == 1 { on_screen } else { parked })
@@ -4378,22 +5543,43 @@ mod tests {
     #[test]
     fn update_scene_moved_preserves_verify_after_small_final_animated_step_and_skips_focus_only() {
         let park = 3584;
-        let target = Rect { x: 957, y: 0, w: 957, h: 1140 };
-        let parked = Rect { x: park, y: 0, w: 957, h: 1140 };
+        let target = Rect {
+            x: 957,
+            y: 0,
+            w: 957,
+            h: 1140,
+        };
+        let parked = Rect {
+            x: park,
+            y: 0,
+            w: 957,
+            h: 1140,
+        };
         let placements = vec![(1, target), (2, parked)];
         let mut scene_moved = (0u64, false);
 
         // (a) Animated scene (epoch 10): earlier frame moved > 2 px, final eased frame has <= 2 px left.
         let frame1 = any_on_screen_target_moved(park, false, &placements, |id| {
-            Some(if id == 1 { Rect { x: 0, ..target } } else { parked })
+            Some(if id == 1 {
+                Rect { x: 0, ..target }
+            } else {
+                parked
+            })
         });
         assert!(frame1);
         assert!(update_scene_moved(&mut scene_moved, 10, frame1));
 
         let final_frame = any_on_screen_target_moved(park, false, &placements, |id| {
-            Some(if id == 1 { Rect { x: 956, ..target } } else { parked })
+            Some(if id == 1 {
+                Rect { x: 956, ..target }
+            } else {
+                parked
+            })
         });
-        assert!(!final_frame, "final eased frame within 1 px has frame_moved=false");
+        assert!(
+            !final_frame,
+            "final eased frame within 1 px has frame_moved=false"
+        );
         assert!(
             update_scene_moved(&mut scene_moved, 10, final_frame),
             "scene_moved must stay true for epoch 10 so VerifyState still runs at settle"
@@ -4421,12 +5607,22 @@ mod tests {
             tiles: vec![Tile {
                 pinned: false,
                 hidden: false,
-                bound: Rect { x: 0, y: 0, w: 1920, h: 1080 },
+                bound: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1080,
+                },
                 fullscreen: false,
                 os_frame: None,
                 preview: false,
                 id: 101,
-                rect: Rect { x: 0, y: 0, w: 960, h: 1080 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 960,
+                    h: 1080,
+                },
                 monitor: "MON0".into(),
                 color: Some(0x3B82F6),
                 cookie: 1,
@@ -4442,15 +5638,23 @@ mod tests {
             live: false,
             force_place: false,
         };
-        let new_holes = std::sync::Arc::from([Rect { x: 200, y: 200, w: 400, h: 300 }]);
-        apply_overlay_update(&mut scene, std::sync::Arc::clone(&new_holes), &[(101, None)]);
+        let new_holes = std::sync::Arc::from([Rect {
+            x: 200,
+            y: 200,
+            w: 400,
+            h: 300,
+        }]);
+        apply_overlay_update(
+            &mut scene,
+            std::sync::Arc::clone(&new_holes),
+            &[(101, None)],
+        );
         assert_eq!(scene.epoch, 42);
         assert_eq!(scene.action, "open_close");
         assert_eq!(scene.duration, 180);
         assert_eq!(scene.holes.as_ref(), new_holes.as_ref());
         assert_eq!(scene.tiles[0].color, None);
     }
-
 
     /// #67: after a GPU device loss the settled scene is re-armed so the WGC pictures the device took with it are
     /// rebuilt; it must come back as a static idle frame (no motion, no zones, no forced placement) while keeping
@@ -4462,16 +5666,40 @@ mod tests {
             input: None,
             input_qpc_us: None,
             diagnostics: false,
-            monitors: std::sync::Arc::from([("MON0".to_owned(), Rect { x: 0, y: 0, w: 1920, h: 1140 }, Rect { x: 0, y: 0, w: 1920, h: 1200 })]),
+            monitors: std::sync::Arc::from([(
+                "MON0".to_owned(),
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1140,
+                },
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1200,
+                },
+            )]),
             tiles: vec![Tile {
                 pinned: false,
                 hidden: false,
-                bound: Rect { x: 0, y: 0, w: 1920, h: 1140 },
+                bound: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1140,
+                },
                 fullscreen: false,
                 os_frame: None,
                 preview: true,
                 id: 101,
-                rect: Rect { x: 0, y: 0, w: 28, h: 1140 },
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 28,
+                    h: 1140,
+                },
                 monitor: "MON0".into(),
                 color: Some(0x3B82F6),
                 cookie: 3,
@@ -4482,7 +5710,18 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5, kind: ZoneKind::Merge }],
+            zones: vec![Zone {
+                rect: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                },
+                monitor: "MON0".into(),
+                color: 0xA855F7,
+                alpha: 0.5,
+                kind: ZoneKind::Merge,
+            }],
             action: "open_close",
             live: true,
             force_place: true,
@@ -4490,13 +5729,25 @@ mod tests {
         let idle = idle_scene_from_settled(settled);
         assert_eq!(idle.action, "idle");
         assert_eq!(idle.duration, 0, "a re-armed scene must not animate");
-        assert!(!idle.live, "a re-armed scene must not park the real windows");
+        assert!(
+            !idle.live,
+            "a re-armed scene must not park the real windows"
+        );
         assert!(!idle.force_place, "windows are already placed; no OS move");
-        assert!(idle.zones.is_empty(), "stale drop zones must not be redrawn");
-        assert_eq!(idle.epoch, 77, "the epoch must survive so the daemon's overlay patches still match");
+        assert!(
+            idle.zones.is_empty(),
+            "stale drop zones must not be redrawn"
+        );
+        assert_eq!(
+            idle.epoch, 77,
+            "the epoch must survive so the daemon's overlay patches still match"
+        );
         assert_eq!(idle.tiles.len(), 1);
         assert_eq!(idle.tiles[0].id, 101);
-        assert_eq!(idle.tiles[0].cookie, 3, "the capture source key (id, cookie) must survive to be re-requested");
+        assert_eq!(
+            idle.tiles[0].cookie, 3,
+            "the capture source key (id, cookie) must survive to be re-requested"
+        );
         assert_eq!(idle.monitors.len(), 1);
     }
 
@@ -4523,16 +5774,34 @@ mod tests {
             force_place: true,
         };
         let mut live = scene(true);
-        let holes: std::sync::Arc<[Rect]> = std::sync::Arc::from([Rect { x: 10, y: 10, w: 50, h: 40 }]);
+        let holes: std::sync::Arc<[Rect]> = std::sync::Arc::from([Rect {
+            x: 10,
+            y: 10,
+            w: 50,
+            h: 40,
+        }]);
         apply_overlay_update(&mut live, std::sync::Arc::clone(&holes), &[]);
         let live = overlay_patched_settled_scene(live);
-        assert!(live.live, "a live settled scene stays live: its windows stay parked behind their stand-ins");
-        assert_eq!((live.action, live.duration, live.force_place), ("idle", 0, false), "no motion, no OS placement");
-        assert_eq!(live.epoch, 9, "the epoch survives so later patches still match");
+        assert!(
+            live.live,
+            "a live settled scene stays live: its windows stay parked behind their stand-ins"
+        );
+        assert_eq!(
+            (live.action, live.duration, live.force_place),
+            ("idle", 0, false),
+            "no motion, no OS placement"
+        );
+        assert_eq!(
+            live.epoch, 9,
+            "the epoch survives so later patches still match"
+        );
         assert_eq!(live.holes.as_ref(), holes.as_ref(), "the patch is applied");
         let idle = overlay_patched_settled_scene(scene(false));
         assert!(!idle.live);
-        assert_eq!((idle.action, idle.duration, idle.force_place), ("idle", 0, false));
+        assert_eq!(
+            (idle.action, idle.duration, idle.force_place),
+            ("idle", 0, false)
+        );
     }
 
     /// #67: the re-arm only happens once a surface actually came back, the device is not still dead, no scene is
@@ -4540,40 +5809,117 @@ mod tests {
     #[test]
     fn scene_rearm_after_recovery_is_gated() {
         assert!(needs_scene_rearm(true, None, false, true));
-        assert!(!needs_scene_rearm(false, None, false, true), "no surface recovered: nothing was dropped");
-        assert!(!needs_scene_rearm(true, Some(4), false, true), "device still dead: re-arming would just fail again");
-        assert!(!needs_scene_rearm(true, None, true, true), "a newer scene is already queued");
-        assert!(!needs_scene_rearm(true, None, false, false), "nothing settled to replay");
+        assert!(
+            !needs_scene_rearm(false, None, false, true),
+            "no surface recovered: nothing was dropped"
+        );
+        assert!(
+            !needs_scene_rearm(true, Some(4), false, true),
+            "device still dead: re-arming would just fail again"
+        );
+        assert!(
+            !needs_scene_rearm(true, None, true, true),
+            "a newer scene is already queued"
+        );
+        assert!(
+            !needs_scene_rearm(true, None, false, false),
+            "nothing settled to replay"
+        );
     }
     #[test]
     fn park_y_for_monitor_keeps_mixed_dpi_stacked_monitor_nearest() {
         // Exact 3-monitor layout from #75 / #77 / #78 Win+W bundles:
         // Monitor 0 (laptop, 150% DPI) sits below wider Monitor 1 (120% DPI), with Portrait Monitor 2 on left.
-        let mon0 = Rect { x: 0, y: 0, w: 1920, h: 1200 };
-        let mon1 = Rect { x: 0, y: -1440, w: 2560, h: 1440 };
-        let mon2 = Rect { x: -1440, y: -1859, w: 1440, h: 2560 };
+        let mon0 = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1200,
+        };
+        let mon1 = Rect {
+            x: 0,
+            y: -1440,
+            w: 2560,
+            h: 1440,
+        };
+        let mon2 = Rect {
+            x: -1440,
+            y: -1859,
+            w: 1440,
+            h: 2560,
+        };
         let all = [mon0, mon1, mon2];
         let park_x = 2560 + 1024; // 3584
 
         // Monitor 0 at y=0 would be closer to Monitor 1 (dx=1024 vs 1664); park_y_for_monitor must shift y
         // so Monitor 0 is strictly nearest (avoiding WM_DPICHANGED on park/unpark).
-        let y0 = super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &all);
+        let y0 = super::park_y_for_monitor(
+            park_x,
+            mon0,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1140,
+            },
+            &all,
+        );
         assert_ne!(y0, 0, "mon0 must not park at y=0 where mon1 is closer");
-        let r0 = Rect { x: park_x, y: y0, w: 1920, h: 1140 };
+        let r0 = Rect {
+            x: park_x,
+            y: y0,
+            w: 1920,
+            h: 1140,
+        };
         assert!(super::is_strictly_nearest_monitor(r0, mon0, &all));
 
         // Monitor 1 is already strictly nearest at its own bound.y (-1440).
-        let y1 = super::park_y_for_monitor(park_x, mon1, Rect { x: 0, y: -1440, w: 2560, h: 1392 }, &all);
+        let y1 = super::park_y_for_monitor(
+            park_x,
+            mon1,
+            Rect {
+                x: 0,
+                y: -1440,
+                w: 2560,
+                h: 1392,
+            },
+            &all,
+        );
         assert_eq!(y1, -1440);
 
         // Monitor 2 (portrait on left) must also get a y where mon2 is strictly nearest.
-        let y2 = super::park_y_for_monitor(park_x, mon2, Rect { x: -1440, y: -1859, w: 1440, h: 2512 }, &all);
-        let r2 = Rect { x: park_x, y: y2, w: 1440, h: 2512 };
+        let y2 = super::park_y_for_monitor(
+            park_x,
+            mon2,
+            Rect {
+                x: -1440,
+                y: -1859,
+                w: 1440,
+                h: 2512,
+            },
+            &all,
+        );
+        let r2 = Rect {
+            x: park_x,
+            y: y2,
+            w: 1440,
+            h: 2512,
+        };
         assert!(super::is_strictly_nearest_monitor(r2, mon2, &all));
 
         // Single-monitor fast path always keeps bound.y.
         assert_eq!(
-            super::park_y_for_monitor(park_x, mon0, Rect { x: 0, y: 0, w: 1920, h: 1140 }, &[mon0]),
+            super::park_y_for_monitor(
+                park_x,
+                mon0,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1140
+                },
+                &[mon0]
+            ),
             0
         );
     }
@@ -4581,51 +5927,120 @@ mod tests {
     #[test]
     fn park_y_for_monitor_stays_within_win32_coordinate_limits() {
         // Monitors stacked so far apart that the nearest-monitor search overshoots 16-bit coordinates.
-        let mon0 = Rect { x: 0, y: 0, w: 1920, h: 1080 };
-        let mon1 = Rect { x: 0, y: 990_000, w: 1920, h: 1080 };
-        let mon2 = Rect { x: 0, y: -990_000, w: 1920, h: 1080 };
+        let mon0 = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1080,
+        };
+        let mon1 = Rect {
+            x: 0,
+            y: 990_000,
+            w: 1920,
+            h: 1080,
+        };
+        let mon2 = Rect {
+            x: 0,
+            y: -990_000,
+            w: 1920,
+            h: 1080,
+        };
         let all = [mon0, mon1, mon2];
         let lim = super::WIN32_COORD_LIMIT;
         for m in all {
-            let bound = Rect { x: m.x, y: m.y, w: m.w, h: m.h - 40 };
+            let bound = Rect {
+                x: m.x,
+                y: m.y,
+                w: m.w,
+                h: m.h - 40,
+            };
             let y = super::park_y_for_monitor(m.x + 5000, m, bound, &all);
-            assert!(y >= -lim && y.saturating_add(m.h) <= lim, "y {y} for {m:?} beyond limits");
+            assert!(
+                y >= -lim && y.saturating_add(m.h) <= lim,
+                "y {y} for {m:?} beyond limits"
+            );
         }
         // Bounds themselves far beyond the limit are clamped, never wrapped.
-        let far = Rect { x: 0, y: 2_000_000_000, w: 100, h: 100 };
+        let far = Rect {
+            x: 0,
+            y: 2_000_000_000,
+            w: 100,
+            h: 100,
+        };
         let y = super::park_y_for_monitor(0, far, far, &[far, mon0]);
-        assert!(y >= -lim && y.saturating_add(far.h) <= lim, "far y {y} beyond limits");
+        assert!(
+            y >= -lim && y.saturating_add(far.h) <= lim,
+            "far y {y} beyond limits"
+        );
     }
 
     #[test]
     fn fullscreen_preserved_rect_keeps_near_exact_size_without_resize() {
-        let want = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+        let want = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1200,
+        };
         // Chromium borderless fullscreen often reports h - 1 (1199); preserve it when fullscreen.
-        let cur = Rect { x: 0, y: 0, w: 1920, h: 1199 };
+        let cur = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1199,
+        };
         assert_eq!(
             super::fullscreen_preserved_rect(want, Some(cur), true),
-            Rect { x: 0, y: 0, w: 1920, h: 1199 }
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1199
+            }
         );
         // Non-fullscreen tiles always snap to exact tile_rect.
-        assert_eq!(super::fullscreen_preserved_rect(want, Some(cur), false), want);
+        assert_eq!(
+            super::fullscreen_preserved_rect(want, Some(cur), false),
+            want
+        );
         // Larger size deltas (>2 px) are still corrected.
-        let smaller = Rect { x: 0, y: 0, w: 1920, h: 1140 };
-        assert_eq!(super::fullscreen_preserved_rect(want, Some(smaller), true), want);
+        let smaller = Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1140,
+        };
+        assert_eq!(
+            super::fullscreen_preserved_rect(want, Some(smaller), true),
+            want
+        );
     }
 
     #[test]
     fn should_register_peek_hit_only_for_settled_parked_proxies() {
         // Settled parked thumbnail -> clickable peek.
-        assert!(super::should_register_peek_hit(false, false, false, true, true, false));
+        assert!(super::should_register_peek_hit(
+            false, false, false, true, true, false
+        ));
         // Settled parked WGC-only fallback (thumb_ok == false) -> still clickable peek (#75).
-        assert!(super::should_register_peek_hit(false, false, false, true, false, true));
+        assert!(super::should_register_peek_hit(
+            false, false, false, true, false, true
+        ));
         // Live touchpad scroll -> must NOT intercept clicks as peeks (#75).
-        assert!(!super::should_register_peek_hit(false, true, false, true, true, true));
+        assert!(!super::should_register_peek_hit(
+            false, true, false, true, true, true
+        ));
         // Open/close handoff -> must NOT intercept clicks as peeks.
-        assert!(!super::should_register_peek_hit(false, false, true, true, true, true));
+        assert!(!super::should_register_peek_hit(
+            false, false, true, true, true, true
+        ));
         // Moving animation -> must NOT intercept clicks.
-        assert!(!super::should_register_peek_hit(true, false, false, true, true, true));
+        assert!(!super::should_register_peek_hit(
+            true, false, false, true, true, true
+        ));
         // On-screen unparked window -> never a peek hit.
-        assert!(!super::should_register_peek_hit(false, false, false, false, true, false));
+        assert!(!super::should_register_peek_hit(
+            false, false, false, false, true, false
+        ));
     }
 }

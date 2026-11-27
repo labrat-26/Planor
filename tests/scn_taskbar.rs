@@ -85,7 +85,9 @@ fn overlays_of(pid: u32) -> Vec<HWND> {
 fn is_overlay(h: HWND, pid: u32) -> bool {
     !h.is_null()
         && pid_of(h) == pid
-        && OVERLAY_EX.iter().all(|(flag, _)| (ex_style(h) & flag) == *flag)
+        && OVERLAY_EX
+            .iter()
+            .all(|(flag, _)| (ex_style(h) & flag) == *flag)
 }
 
 /// Restores the real cursor position when dropped (probes move the cursor).
@@ -122,17 +124,46 @@ fn taskbar_strips(mon: &(RECT, RECT)) -> Vec<(&'static str, RECT)> {
     if w.bottom < m.bottom {
         v.push((
             "bottom",
-            RECT { left: m.left, top: w.bottom, right: m.right, bottom: m.bottom },
+            RECT {
+                left: m.left,
+                top: w.bottom,
+                right: m.right,
+                bottom: m.bottom,
+            },
         ));
     }
     if w.top > m.top {
-        v.push(("top", RECT { left: m.left, top: m.top, right: m.right, bottom: w.top }));
+        v.push((
+            "top",
+            RECT {
+                left: m.left,
+                top: m.top,
+                right: m.right,
+                bottom: w.top,
+            },
+        ));
     }
     if w.left > m.left {
-        v.push(("left", RECT { left: m.left, top: m.top, right: w.left, bottom: m.bottom }));
+        v.push((
+            "left",
+            RECT {
+                left: m.left,
+                top: m.top,
+                right: w.left,
+                bottom: m.bottom,
+            },
+        ));
     }
     if w.right < m.right {
-        v.push(("right", RECT { left: w.right, top: m.top, right: m.right, bottom: m.bottom }));
+        v.push((
+            "right",
+            RECT {
+                left: w.right,
+                top: m.top,
+                right: m.right,
+                bottom: m.bottom,
+            },
+        ));
     }
     v
 }
@@ -178,7 +209,11 @@ fn assert_frames_unchanged(ws: &[Sentinel], before: &[RECT], when: &str) {
             ));
         }
     }
-    assert!(bad.is_empty(), "{when}: sentinel frames moved: {}", bad.join("; "));
+    assert!(
+        bad.is_empty(),
+        "{when}: sentinel frames moved: {}",
+        bad.join("; ")
+    );
 }
 
 /// Releases the Escape key on drop so the Start menu is always closed, even on panic.
@@ -210,7 +245,11 @@ fn tiles_stay_inside_work_area() {
     // With PLANOR_RECORD=1 the scenario is screen-recorded and the recording is checked against the pixels;
     // otherwise `rec` is inert and nothing changes.
     let rec = Recording::start("tiles_stay_inside_work_area", "s6-work");
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("s6-work");
     d.start();
     assert!(
@@ -322,7 +361,12 @@ fn click_at(x: i32, y: i32) {
 #[ignore]
 fn clicking_a_peek_reveals_that_window() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0), Sentinel::new(3, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+        Sentinel::new(3, 0),
+    ];
     let mut d = Daemon::new_with_hooks("s6-peek");
     d.start();
     thread::sleep(Duration::from_millis(1800));
@@ -342,7 +386,10 @@ fn clicking_a_peek_reveals_that_window() {
             .iter()
             .filter_map(|w| {
                 let v = w.visible();
-                (v.right > work.left && v.left < work.right && v.bottom > work.top && v.top < work.bottom)
+                (v.right > work.left
+                    && v.left < work.right
+                    && v.bottom > work.top
+                    && v.top < work.bottom)
                     .then_some((v.left.max(work.left), v.right.min(work.right)))
             })
             .collect();
@@ -390,7 +437,11 @@ fn clicking_a_peek_reveals_that_window() {
 #[ignore]
 fn overlay_click_through_everywhere_but_peek() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("s6-clk");
     d.start();
     assert!(
@@ -445,7 +496,11 @@ fn overlay_click_through_everywhere_but_peek() {
 #[ignore]
 fn fullscreen_covers_taskbar_and_is_scrollable_out() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("s6-full");
     d.start();
     assert!(
@@ -554,7 +609,11 @@ fn fullscreen_covers_taskbar_and_is_scrollable_out() {
 #[ignore]
 fn start_menu_open_keeps_layout() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("s6-start");
     d.start();
     assert!(

@@ -1,8 +1,6 @@
 mod backend;
-mod settings_model;
-mod settings_ui;
-mod daemon;
 mod config_watch;
+mod daemon;
 mod diag;
 mod gpu;
 mod guide;
@@ -11,10 +9,12 @@ mod install;
 mod note;
 mod perf;
 mod render;
-mod theme;
-mod tray;
+mod settings_model;
+mod settings_ui;
 #[cfg(test)]
 mod sim_tests;
+mod theme;
+mod tray;
 mod watchdog;
 mod win32;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -88,12 +88,13 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
 pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
     let typed = old.type_str() == v.type_str()
         && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
-        && v.as_float().is_none_or(|n| n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.));
+        && v.as_float()
+            .is_none_or(|n| n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.));
     let known = match (choices(k), k) {
         (Some(c), _) => v.as_str().is_some_and(|s| c.contains(&s)),
-        (None, k) if k.ends_with("_color") => v
-            .as_str()
-            .is_some_and(|v| v.len() == 7 && v.starts_with('#') && v[1..].bytes().all(|b| b.is_ascii_hexdigit())),
+        (None, k) if k.ends_with("_color") => v.as_str().is_some_and(|v| {
+            v.len() == 7 && v.starts_with('#') && v[1..].bytes().all(|b| b.is_ascii_hexdigit())
+        }),
         _ => true,
     };
     typed && known
@@ -498,7 +499,7 @@ fn main() -> Result<()> {
         }
         #[link(name = "ntdll")]
         unsafe extern "system" {}
-        if RtlGetVersion(info.as_mut_ptr())<0||info[1]!=10||info[70].to_le_bytes()[2]!=1 {
+        if RtlGetVersion(info.as_mut_ptr()) < 0 || info[1] != 10 || info[70].to_le_bytes()[2] != 1 {
             0
         } else {
             info[3]
@@ -510,7 +511,7 @@ fn main() -> Result<()> {
     let cmd = Cli::parse().cmd.unwrap_or(Command::Start);
     match cmd {
         Command::Start => daemon::run(),
-        Command::Autostart{mode}=>install::set_autostart(matches!(mode,Switch::On)),
+        Command::Autostart { mode } => install::set_autostart(matches!(mode, Switch::On)),
         Command::Diag {
             action: Diagnostic::Export { ref path },
         } => {
@@ -564,7 +565,10 @@ fn main() -> Result<()> {
             if let Ok(exe) = std::env::current_exe() {
                 let candidates = [
                     exe.parent().map(|d| d.join("planor-rec.exe")),
-                    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/planor-rec-bin/planor-rec.exe")),
+                    Some(
+                        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                            .join("tools/planor-rec-bin/planor-rec.exe"),
+                    ),
                 ];
                 if let Some(rec) = candidates.into_iter().flatten().find(|p| p.is_file()) {
                     let _ = std::process::Command::new(rec)
@@ -616,18 +620,36 @@ fn main() -> Result<()> {
                 // No daemon is listening: it crashed, was killed, or its console was closed. Restore
                 // whatever its journal still holds so no window stays parked off-screen.
                 let restored = daemon::recover()?;
-                println!("no daemon running; restored {restored} window(s) from the recovery journal");
+                println!(
+                    "no daemon running; restored {restored} window(s) from the recovery journal"
+                );
                 Ok(())
             }
         },
-        Command::Settings | Command::Config => settings_ui::run(&folder("APPDATA")?.join("planor.toml")),
+        Command::Settings | Command::Config => {
+            settings_ui::run(&folder("APPDATA")?.join("planor.toml"))
+        }
         Command::Gestures {
-            action: GestureAction::Record { name, seconds, out, passive },
+            action:
+                GestureAction::Record {
+                    name,
+                    seconds,
+                    out,
+                    passive,
+                },
         } => record_gestures(name, seconds, out, passive),
         Command::Gestures {
-            action: GestureAction::Guide { name, step_seconds, live, set },
+            action:
+                GestureAction::Guide {
+                    name,
+                    step_seconds,
+                    live,
+                    set,
+                },
         } => guide::run(name, step_seconds, live, set),
-        Command::Gestures { action: GestureAction::Analyze { file } } => analyze_gestures(&file),
+        Command::Gestures {
+            action: GestureAction::Analyze { file },
+        } => analyze_gestures(&file),
         _ => {
             println!("{}", client(&pipe_name(), &cmd)?);
             Ok(())
@@ -646,7 +668,9 @@ fn analyze_gestures(file: &std::path::Path) -> Result<()> {
     let mut clicks: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     let mut label = String::new();
     for line in text.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
         match v["kind"].as_str() {
             Some("mark") => {
                 let m = v["text"].as_str().unwrap_or("");
@@ -654,9 +678,10 @@ fn analyze_gestures(file: &std::path::Path) -> Result<()> {
                     label = m.to_string()
                 }
             }
-            Some("button") if v["down"].as_bool() == Some(true) => {
-                clicks.entry(label.clone()).or_default().push(v["button"].as_str().unwrap_or("?").to_string())
-            }
+            Some("button") if v["down"].as_bool() == Some(true) => clicks
+                .entry(label.clone())
+                .or_default()
+                .push(v["button"].as_str().unwrap_or("?").to_string()),
             _ => (),
         }
     }
@@ -664,8 +689,18 @@ fn analyze_gestures(file: &std::path::Path) -> Result<()> {
     for s in &segs {
         if current.as_deref() != Some(&s.label) {
             current = Some(s.label.clone());
-            let c = clicks.get(&s.label).map(|c| format!("   clicks: {}", c.join(" "))).unwrap_or_default();
-            println!("\n{}{c}", if s.label.is_empty() { "(no step)" } else { &s.label });
+            let c = clicks
+                .get(&s.label)
+                .map(|c| format!("   clicks: {}", c.join(" ")))
+                .unwrap_or_default();
+            println!(
+                "\n{}{c}",
+                if s.label.is_empty() {
+                    "(no step)"
+                } else {
+                    &s.label
+                }
+            );
         }
         let g = identify(s);
         let guided = !s.label.is_empty();
@@ -677,27 +712,48 @@ fn analyze_gestures(file: &std::path::Path) -> Result<()> {
         }
         println!(
             "  {} {:<34} travel ({:>5.0}, {:>5.0})  {:>5.0} ms{}",
-            if !guided { " " } else if good { "ok" } else { "--" },
+            if !guided {
+                " "
+            } else if good {
+                "ok"
+            } else {
+                "--"
+            },
             g.name(),
             g.dx,
             g.dy,
             g.ms,
-            if late { "   (late, belongs to the step before)" } else { "" }
+            if late {
+                "   (late, belongs to the step before)"
+            } else {
+                ""
+            }
         );
     }
-    println!("\n{} gestures: {ok} as instructed, {off} different from the step (\"--\").", segs.len());
+    println!(
+        "\n{} gestures: {ok} as instructed, {off} different from the step (\"--\").",
+        segs.len()
+    );
     Ok(())
 }
 fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bool) -> Result<()> {
     let slug: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let out = match out {
         Some(p) => std::path::absolute(p)?,
         None => {
             let stamp = diag::stamp().replace([':', '.'], "");
-            folder("LOCALAPPDATA")?.join("gestures").join(format!("{stamp}-{slug}.jsonl"))
+            folder("LOCALAPPDATA")?
+                .join("gestures")
+                .join(format!("{stamp}-{slug}.jsonl"))
         }
     };
     if let Some(dir) = out.parent() {
@@ -706,13 +762,24 @@ fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bo
     let _ = fs::remove_file(&out);
     let reply = client(
         &pipe_name(),
-        &Command::Gestures { action: GestureAction::Record { name: slug, seconds, out: Some(out.clone()), passive } },
+        &Command::Gestures {
+            action: GestureAction::Record {
+                name: slug,
+                seconds,
+                out: Some(out.clone()),
+                passive,
+            },
+        },
     )?;
     println!("{reply}");
-    println!("Recording for {seconds} s: do the gesture(s) now on the touchpad (each one, then lift all fingers).");
+    println!(
+        "Recording for {seconds} s: do the gesture(s) now on the touchpad (each one, then lift all fingers)."
+    );
     let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     while std::time::Instant::now() < until {
-        let left = until.saturating_duration_since(std::time::Instant::now()).as_secs();
+        let left = until
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
         print!("\r  {left:>3} s left ");
         let _ = io::stdout().flush();
         std::thread::sleep(std::time::Duration::from_millis(250));
@@ -723,7 +790,8 @@ fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bo
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     println!();
-    let text = fs::read_to_string(&out).map_err(|e| format!("no recording written to {}: {e}", out.display()))?;
+    let text = fs::read_to_string(&out)
+        .map_err(|e| format!("no recording written to {}: {e}", out.display()))?;
     let events = planor::replay::parse_events_jsonl(&text);
     let mut gestures = vec![];
     let mut fingers = 0;
@@ -746,7 +814,11 @@ fn record_gestures(name: String, seconds: u64, out: Option<PathBuf>, passive: bo
         "{} frames, {} gesture(s) ({}) -> {}",
         events.len(),
         gestures.len(),
-        gestures.iter().map(|f| format!("{f} fingers")).collect::<Vec<_>>().join(", "),
+        gestures
+            .iter()
+            .map(|f| format!("{f} fingers"))
+            .collect::<Vec<_>>()
+            .join(", "),
         out.display()
     );
     println!("Give this path to Claude to add it under tests/fixtures/gestures/recorded/.");

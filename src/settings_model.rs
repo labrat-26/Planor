@@ -60,24 +60,46 @@ impl Model {
         let doc: DocumentMut = user.parse()?;
         let (mut sections, mut entries) = (vec![], vec![]);
         for (name, item) in example.iter() {
-            let Some(table) = item.as_table() else { continue }; // [[rules]] is edited in the file
+            let Some(table) = item.as_table() else {
+                continue;
+            }; // [[rules]] is edited in the file
             sections.push(name.to_string());
             let mut first = true;
             for (key, value) in table.iter() {
-                let Some(default) = to_value(value) else { continue };
-                let mut help = comment_lines(table.key(key).and_then(|k| k.leaf_decor().prefix()).and_then(|p| p.as_str()));
+                let Some(default) = to_value(value) else {
+                    continue;
+                };
+                let mut help = comment_lines(
+                    table
+                        .key(key)
+                        .and_then(|k| k.leaf_decor().prefix())
+                        .and_then(|p| p.as_str()),
+                );
                 if first && help.is_empty() {
                     help = comment_lines(table.decor().suffix().and_then(|p| p.as_str()));
                 }
                 first = false;
-                entries.push(Entry { section: name.to_string(), key: key.to_string(), default, help });
+                entries.push(Entry {
+                    section: name.to_string(),
+                    key: key.to_string(),
+                    default,
+                    help,
+                });
             }
         }
-        Ok(Self { path: path.to_path_buf(), doc, sections, entries, dirty: false })
+        Ok(Self {
+            path: path.to_path_buf(),
+            doc,
+            sections,
+            entries,
+            dirty: false,
+        })
     }
 
     pub fn in_section(&self, section: &str) -> Vec<usize> {
-        (0..self.entries.len()).filter(|&i| self.entries[i].section == section).collect()
+        (0..self.entries.len())
+            .filter(|&i| self.entries[i].section == section)
+            .collect()
     }
 
     /// The value in effect: the user's when it is valid (what the daemon would use), else the default.
@@ -101,14 +123,26 @@ impl Model {
         if !crate::valid_value(&e.key, &e.default, &v) {
             return Err(match crate::choices(&e.key) {
                 Some(c) => format!("{} must be one of: {}", e.key, c.join(", ")),
-                None if e.key.ends_with("_color") => format!("{} must be a colour like #3B82F6", e.key),
-                None => format!("{} needs a {} ({})", e.key, e.default.type_str(), range_hint(&e)),
+                None if e.key.ends_with("_color") => {
+                    format!("{} must be a colour like #3B82F6", e.key)
+                }
+                None => format!(
+                    "{} needs a {} ({})",
+                    e.key,
+                    e.default.type_str(),
+                    range_hint(&e)
+                ),
             });
         }
         if self.value(i) == v {
             return Ok(());
         }
-        if self.doc.get(&e.section).and_then(|t| t.as_table()).is_none() {
+        if self
+            .doc
+            .get(&e.section)
+            .and_then(|t| t.as_table())
+            .is_none()
+        {
             self.doc.insert(&e.section, toml_edit::table());
         }
         let table = self.doc[&e.section].as_table_mut().ok_or("not a table")?;
@@ -136,7 +170,9 @@ impl Model {
                 "false" | "no" | "off" | "0" => toml::Value::Boolean(false),
                 _ => return Err("type yes or no".into()),
             },
-            toml::Value::Integer(_) => toml::Value::Integer(t.parse().map_err(|_| "type a whole number")?),
+            toml::Value::Integer(_) => {
+                toml::Value::Integer(t.parse().map_err(|_| "type a whole number")?)
+            }
             toml::Value::Float(_) => toml::Value::Float(t.parse().map_err(|_| "type a number")?),
             _ => toml::Value::String(t.trim_matches('"').to_string()),
         })
@@ -149,7 +185,13 @@ impl Model {
         Ok(match (self.value(i), crate::choices(&e.key)) {
             (toml::Value::Boolean(b), _) => toml::Value::Boolean(!b),
             (toml::Value::Integer(n), _) => {
-                let unit = if n.abs() >= 1000 { 100 } else if n.abs() >= 100 { 10 } else { 1 };
+                let unit = if n.abs() >= 1000 {
+                    100
+                } else if n.abs() >= 100 {
+                    10
+                } else {
+                    1
+                };
                 toml::Value::Integer((n + dir * unit).max(0))
             }
             (toml::Value::Float(f), _) => {
@@ -182,7 +224,6 @@ pub(crate) fn range_hint(e: &Entry) -> &'static str {
         _ => "text",
     }
 }
-
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuleMatch {
@@ -259,12 +300,19 @@ impl Model {
             "tile" => RuleAction::Tile,
             _ => return None,
         };
-        let (matcher, value) = match (t.get("process").and_then(|v| v.as_str()), t.get("class").and_then(|v| v.as_str())) {
+        let (matcher, value) = match (
+            t.get("process").and_then(|v| v.as_str()),
+            t.get("class").and_then(|v| v.as_str()),
+        ) {
             (Some(p), _) => (RuleMatch::Process, p),
             (None, Some(c)) => (RuleMatch::Class, c),
             _ => return None,
         };
-        Some(Rule { matcher, value: value.to_string(), action })
+        Some(Rule {
+            matcher,
+            value: value.to_string(),
+            action,
+        })
     }
 
     /// The rule rows in effect, each with the table it came from. A file with no `rules` key gets the example's
@@ -273,12 +321,19 @@ impl Model {
         let from = |doc: &DocumentMut| -> Vec<(Rule, toml_edit::Table)> {
             doc.get("rules")
                 .and_then(|r| r.as_array_of_tables())
-                .map(|rows| rows.iter().filter_map(|t| Self::rule_from(t).map(|r| (r, t.clone()))).collect())
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|t| Self::rule_from(t).map(|r| (r, t.clone())))
+                        .collect()
+                })
                 .unwrap_or_default()
         };
         match self.doc.get("rules") {
             Some(_) => from(&self.doc),
-            None => crate::EXAMPLE.parse::<DocumentMut>().map(|d| from(&d)).unwrap_or_default(),
+            None => crate::EXAMPLE
+                .parse::<DocumentMut>()
+                .map(|d| from(&d))
+                .unwrap_or_default(),
         }
     }
 
@@ -302,10 +357,14 @@ impl Model {
             .and_then(|r| r.as_array_of_tables())
             .and_then(|a| a.iter().next())
             .and_then(|t| t.decor().prefix().cloned());
-        let mut old: Vec<Option<(Rule, toml_edit::Table)>> = self.existing_rows().into_iter().map(Some).collect();
+        let mut old: Vec<Option<(Rule, toml_edit::Table)>> =
+            self.existing_rows().into_iter().map(Some).collect();
         let mut rows = toml_edit::ArrayOfTables::new();
         for (n, r) in rules.iter().enumerate() {
-            let reuse = old.iter().position(|o| o.as_ref().is_some_and(|(or, _)| or.matcher == r.matcher && or.value == r.value.trim()));
+            let reuse = old.iter().position(|o| {
+                o.as_ref()
+                    .is_some_and(|(or, _)| or.matcher == r.matcher && or.value == r.value.trim())
+            });
             let table = match reuse.and_then(|at| old[at].take()) {
                 Some((_, mut t)) => {
                     t["action"] = toml_edit::value(r.action.word());
@@ -315,7 +374,9 @@ impl Model {
                     let mut t = toml_edit::Table::new();
                     t.insert(r.matcher.key(), toml_edit::value(r.value.trim()));
                     t.insert("action", toml_edit::value(r.action.word()));
-                    if n == 0 && let Some(p) = &prefix {
+                    if n == 0
+                        && let Some(p) = &prefix
+                    {
                         t.decor_mut().set_prefix(p.clone());
                     }
                     t
@@ -324,15 +385,18 @@ impl Model {
             rows.push(table);
         }
         if rows.is_empty() {
-            self.doc.insert("rules", toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())));
+            self.doc.insert(
+                "rules",
+                toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new())),
+            );
         } else {
-            self.doc.insert("rules", toml_edit::Item::ArrayOfTables(rows));
+            self.doc
+                .insert("rules", toml_edit::Item::ArrayOfTables(rows));
         }
         self.dirty = true;
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -342,7 +406,10 @@ mod tests {
         Model::from_text(Path::new("planor.toml"), crate::EXAMPLE).unwrap()
     }
     fn idx(m: &Model, s: &str, k: &str) -> usize {
-        m.entries.iter().position(|e| e.section == s && e.key == k).unwrap()
+        m.entries
+            .iter()
+            .position(|e| e.section == s && e.key == k)
+            .unwrap()
     }
     fn temp(name: &str, text: &str) -> PathBuf {
         let p = std::env::temp_dir().join(format!("planor-{name}-{}.toml", std::process::id()));
@@ -361,13 +428,32 @@ mod tests {
     #[test]
     fn loads_every_section_and_key_of_the_example_with_help() {
         let m = model();
-        for s in ["layout", "borders", "animation", "touchpad", "mouse", "diagnostics", "hotkeys"] {
-            assert!(m.sections.contains(&s.to_string()), "section {s}: {:?}", m.sections);
+        for s in [
+            "layout",
+            "borders",
+            "animation",
+            "touchpad",
+            "mouse",
+            "diagnostics",
+            "hotkeys",
+        ] {
+            assert!(
+                m.sections.contains(&s.to_string()),
+                "section {s}: {:?}",
+                m.sections
+            );
         }
-        assert!(!m.sections.contains(&"rules".to_string()), "[[rules]] has its own editor");
+        assert!(
+            !m.sections.contains(&"rules".to_string()),
+            "[[rules]] has its own editor"
+        );
         let z = idx(&m, "layout", "stack_zone_percent");
         assert_eq!(m.value(z), toml::Value::Integer(50));
-        assert!(m.entries[z].help.contains("stack zone"), "help: {}", m.entries[z].help);
+        assert!(
+            m.entries[z].help.contains("stack zone"),
+            "help: {}",
+            m.entries[z].help
+        );
     }
 
     #[test]
@@ -378,10 +464,14 @@ mod tests {
         assert!(m.set(gap, toml::Value::String("wide".into())).is_err());
         m.set(gap, toml::Value::Integer(10)).unwrap();
         let share = idx(&m, "layout", "default_tile_share");
-        assert!(m.set(share, toml::Value::Float(1.5)).is_err(), "share is at most 1");
+        assert!(
+            m.set(share, toml::Value::Float(1.5)).is_err(),
+            "share is at most 1"
+        );
         let colour = idx(&m, "borders", "focused_color");
         assert!(m.set(colour, toml::Value::String("blue".into())).is_err());
-        m.set(colour, toml::Value::String("#112233".into())).unwrap();
+        m.set(colour, toml::Value::String("#112233".into()))
+            .unwrap();
         let curve = idx(&m, "animation", "curve");
         let next = m.stepped(curve, 1).unwrap();
         m.set(curve, next).unwrap();
@@ -392,12 +482,19 @@ mod tests {
         assert_eq!(m.value(inertia), toml::Value::Boolean(false));
         let gain = idx(&m, "touchpad", "swipe_scroll_gain");
         m.set(gain, toml::Value::Integer(3)).unwrap();
-        assert_eq!(m.value(gain), toml::Value::Float(3.0), "an integer typed for a decimal setting");
+        assert_eq!(
+            m.value(gain),
+            toml::Value::Float(3.0),
+            "an integer typed for a decimal setting"
+        );
         assert!(m.dirty);
         let text = m.doc.to_string();
         assert!(text.contains("gap_px = 10"));
         assert!(text.contains("focused_color = \"#112233\""));
-        assert!(text.contains("# A new window opens on the monitor under the mouse cursor."), "comments kept");
+        assert!(
+            text.contains("# A new window opens on the monitor under the mouse cursor."),
+            "comments kept"
+        );
         let cfg = crate::parse(&text).unwrap();
         assert_eq!(cfg["layout"]["gap_px"].as_integer(), Some(10));
         assert_eq!(cfg["animation"]["curve"].as_str(), Some("spring"));
@@ -409,21 +506,42 @@ mod tests {
 
     #[test]
     fn a_user_file_with_only_a_few_keys_and_an_invalid_one() {
-        let m = Model::from_text(Path::new("p.toml"), "[layout]\ngap_px = 12\nstack_zone_percent = -3\n").unwrap();
-        assert_eq!(m.value(idx(&m, "layout", "gap_px")), toml::Value::Integer(12));
-        assert_eq!(m.value(idx(&m, "layout", "stack_zone_percent")), toml::Value::Integer(50), "invalid -> default");
-        assert_eq!(m.value(idx(&m, "borders", "width_px")), toml::Value::Integer(2), "missing -> default");
+        let m = Model::from_text(
+            Path::new("p.toml"),
+            "[layout]\ngap_px = 12\nstack_zone_percent = -3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.value(idx(&m, "layout", "gap_px")),
+            toml::Value::Integer(12)
+        );
+        assert_eq!(
+            m.value(idx(&m, "layout", "stack_zone_percent")),
+            toml::Value::Integer(50),
+            "invalid -> default"
+        );
+        assert_eq!(
+            m.value(idx(&m, "borders", "width_px")),
+            toml::Value::Integer(2),
+            "missing -> default"
+        );
     }
-
 
     #[test]
     fn stepped_previews_without_changing_anything() {
         let m = model();
-        let (gap, share, curve) = (idx(&m, "layout", "gap_px"), idx(&m, "layout", "default_tile_share"), idx(&m, "animation", "curve"));
+        let (gap, share, curve) = (
+            idx(&m, "layout", "gap_px"),
+            idx(&m, "layout", "default_tile_share"),
+            idx(&m, "animation", "curve"),
+        );
         assert_eq!(m.stepped(gap, 1).unwrap(), toml::Value::Integer(7));
         assert_eq!(m.stepped(gap, -1).unwrap(), toml::Value::Integer(5));
         assert_eq!(m.stepped(share, 1).unwrap(), toml::Value::Float(0.55));
-        assert_eq!(m.stepped(curve, 1).unwrap(), toml::Value::String("spring".into()));
+        assert_eq!(
+            m.stepped(curve, 1).unwrap(),
+            toml::Value::String("spring".into())
+        );
         assert_eq!(m.value(gap), toml::Value::Integer(6));
         assert!(!m.dirty);
     }
@@ -451,10 +569,18 @@ mod tests {
         let mut m = Model::from_text(Path::new("planor.toml"), &text).unwrap();
         assert_eq!(
             m.rules(),
-            vec![Rule { matcher: RuleMatch::Process, value: "Taskmgr.exe".into(), action: RuleAction::Ignore }]
+            vec![Rule {
+                matcher: RuleMatch::Process,
+                value: "Taskmgr.exe".into(),
+                action: RuleAction::Ignore
+            }]
         );
         let mut rules = m.rules();
-        rules.push(Rule { matcher: RuleMatch::Class, value: "Shell_Dialog".into(), action: RuleAction::Float });
+        rules.push(Rule {
+            matcher: RuleMatch::Class,
+            value: "Shell_Dialog".into(),
+            action: RuleAction::Float,
+        });
         m.set_rules(&rules).unwrap();
         let out = m.doc.to_string();
         assert!(out.contains("# A new window opens on the monitor under the mouse cursor."));
@@ -464,9 +590,15 @@ mod tests {
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[1]["class"].as_str(), Some("Shell_Dialog"));
         assert_eq!(parsed[1]["action"].as_str(), Some("float"));
-        assert!(m.set_rules(&[Rule { matcher: RuleMatch::Process, value: "  ".into(), action: RuleAction::Tile }]).is_err());
+        assert!(
+            m.set_rules(&[Rule {
+                matcher: RuleMatch::Process,
+                value: "  ".into(),
+                action: RuleAction::Tile
+            }])
+            .is_err()
+        );
     }
-
 
     #[test]
     fn rules_with_both_keys_survive_other_edits() {
@@ -474,12 +606,20 @@ mod tests {
         let mut m = Model::from_text(Path::new("planor.toml"), text).unwrap();
         let mut rules = m.rules();
         assert_eq!(rules.len(), 1);
-        rules.push(Rule { matcher: RuleMatch::Process, value: "Calc.exe".into(), action: RuleAction::Ignore });
+        rules.push(Rule {
+            matcher: RuleMatch::Process,
+            value: "Calc.exe".into(),
+            action: RuleAction::Ignore,
+        });
         m.set_rules(&rules).unwrap();
         let cfg = crate::parse(&m.doc.to_string()).unwrap();
         let rows = cfg["rules"].as_array().unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["class"].as_str(), Some("#32770"), "the class half of the match is kept: {rows:?}");
+        assert_eq!(
+            rows[0]["class"].as_str(),
+            Some("#32770"),
+            "the class half of the match is kept: {rows:?}"
+        );
         assert_eq!(rows[0]["process"].as_str(), Some("Code.exe"));
         assert_eq!(rows[1]["process"].as_str(), Some("Calc.exe"));
     }
@@ -492,7 +632,12 @@ mod tests {
         rules[0].action = RuleAction::Tile;
         m.set_rules(&rules).unwrap();
         let out = m.doc.to_string();
-        assert!(out.contains("# keep me") && out.contains("class = \"#32770\"") && out.contains("action = \"tile\""), "{out}");
+        assert!(
+            out.contains("# keep me")
+                && out.contains("class = \"#32770\"")
+                && out.contains("action = \"tile\""),
+            "{out}"
+        );
     }
 
     #[test]
@@ -502,7 +647,14 @@ mod tests {
         m.set_rules(&[]).unwrap();
         let out = m.doc.to_string();
         assert!(out.contains("rules = []"), "{out}");
-        assert_eq!(crate::parse(&out).unwrap()["rules"].as_array().unwrap().len(), 0, "the daemon sees no rules, not the defaults");
+        assert_eq!(
+            crate::parse(&out).unwrap()["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0,
+            "the daemon sees no rules, not the defaults"
+        );
         let again = Model::from_text(Path::new("planor.toml"), &out).unwrap();
         assert!(again.rules().is_empty());
     }
@@ -510,11 +662,29 @@ mod tests {
     #[test]
     fn a_file_without_rules_shows_the_default_rules_in_effect() {
         let mut m = Model::from_text(Path::new("planor.toml"), "[layout]\ngap_px = 6\n").unwrap();
-        assert_eq!(m.rules(), vec![Rule { matcher: RuleMatch::Process, value: "Taskmgr.exe".into(), action: RuleAction::Ignore }]);
+        assert_eq!(
+            m.rules(),
+            vec![Rule {
+                matcher: RuleMatch::Process,
+                value: "Taskmgr.exe".into(),
+                action: RuleAction::Ignore
+            }]
+        );
         let mut rules = m.rules();
-        rules.push(Rule { matcher: RuleMatch::Class, value: "Foo".into(), action: RuleAction::Float });
+        rules.push(Rule {
+            matcher: RuleMatch::Class,
+            value: "Foo".into(),
+            action: RuleAction::Float,
+        });
         m.set_rules(&rules).unwrap();
-        assert_eq!(crate::parse(&m.doc.to_string()).unwrap()["rules"].as_array().unwrap().len(), 2, "the default rule is kept, not silently dropped");
+        assert_eq!(
+            crate::parse(&m.doc.to_string()).unwrap()["rules"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2,
+            "the default rule is kept, not silently dropped"
+        );
     }
     #[test]
     fn load_error_reports_invalid_toml() {
@@ -523,7 +693,10 @@ mod tests {
         assert!(Model::load(&bad).is_err());
         let good = temp("good", "[layout]\ngap_px = 7\n");
         assert!(Model::load_error(&good).is_none());
-        assert!(Model::load_error(Path::new("Z:/definitely/missing.toml")).is_none(), "missing is not an error");
+        assert!(
+            Model::load_error(Path::new("Z:/definitely/missing.toml")).is_none(),
+            "missing is not an error"
+        );
     }
 
     #[test]

@@ -7,7 +7,10 @@ use windows_sys::Win32::{
     Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
     System::LibraryLoader::GetModuleHandleW,
     UI::{
-        Shell::{NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW},
+        Shell::{
+            NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+            Shell_NotifyIconW,
+        },
         WindowsAndMessaging::*,
     },
 };
@@ -29,18 +32,41 @@ pub struct MenuItem {
 /// The menu for the current state: Pause (or Resume), Configure, a separator, Exit.
 pub fn menu_model(paused: bool) -> Vec<MenuItem> {
     vec![
-        MenuItem { id: 1001, label: if paused { "Resume" } else { "Pause" }, action: Some(TrayAction::TogglePause) },
-        MenuItem { id: 1002, label: "Configure...", action: Some(TrayAction::Configure) },
-        MenuItem { id: 1000, label: "", action: None },
-        MenuItem { id: 1003, label: "Exit", action: Some(TrayAction::Exit) },
+        MenuItem {
+            id: 1001,
+            label: if paused { "Resume" } else { "Pause" },
+            action: Some(TrayAction::TogglePause),
+        },
+        MenuItem {
+            id: 1002,
+            label: "Configure...",
+            action: Some(TrayAction::Configure),
+        },
+        MenuItem {
+            id: 1000,
+            label: "",
+            action: None,
+        },
+        MenuItem {
+            id: 1003,
+            label: "Exit",
+            action: Some(TrayAction::Exit),
+        },
     ]
 }
 pub fn tooltip(paused: bool) -> String {
-    if paused { "Planor (paused)".into() } else { "Planor".into() }
+    if paused {
+        "Planor (paused)".into()
+    } else {
+        "Planor".into()
+    }
 }
 /// `paused` out of `planor state --json`; anything unreadable counts as running.
 pub fn paused_from_state_json(json: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(json).ok().and_then(|v| v["paused"].as_bool()).unwrap_or(false)
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| v["paused"].as_bool())
+        .unwrap_or(false)
 }
 /// Test daemons run beside the real one and must not grow a second icon.
 pub fn should_start(test_mode: bool) -> bool {
@@ -48,17 +74,26 @@ pub fn should_start(test_mode: bool) -> bool {
 }
 
 fn query_paused() -> bool {
-    client(&pipe_name(), &Command::State { json: true }).map(|s| paused_from_state_json(&s)).unwrap_or(false)
+    client(&pipe_name(), &Command::State { json: true })
+        .map(|s| paused_from_state_json(&s))
+        .unwrap_or(false)
 }
 pub fn run_action(action: TrayAction) -> Result<()> {
     match action {
         TrayAction::TogglePause => {
-            let cmd = if query_paused() { Command::Resume } else { Command::Pause };
+            let cmd = if query_paused() {
+                Command::Resume
+            } else {
+                Command::Pause
+            };
             client(&pipe_name(), &cmd).map(|_| ())
         }
         TrayAction::Configure => {
             use std::os::windows::process::CommandExt;
-            std::process::Command::new(std::env::current_exe()?).arg("settings").creation_flags(0x0800_0000).spawn()?;
+            std::process::Command::new(std::env::current_exe()?)
+                .arg("settings")
+                .creation_flags(0x0800_0000)
+                .spawn()?;
             Ok(())
         }
         TrayAction::Exit => client(&pipe_name(), &Command::Stop).map(|_| ()),
@@ -78,7 +113,11 @@ fn icon_data(hwnd: HWND) -> NOTIFYICONDATAW {
     data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     data.uCallbackMessage = WM_TRAY;
     data.hIcon = crate::theme::app_icon(unsafe { GetSystemMetrics(SM_CXSMICON) });
-    for (slot, c) in data.szTip.iter_mut().zip(tooltip(PAUSED.load(Ordering::Relaxed)).encode_utf16().take(127)) {
+    for (slot, c) in data.szTip.iter_mut().zip(
+        tooltip(PAUSED.load(Ordering::Relaxed))
+            .encode_utf16()
+            .take(127),
+    ) {
         *slot = c;
     }
     data
@@ -115,10 +154,22 @@ fn show_menu(hwnd: HWND) {
         let mut at = POINT { x: 0, y: 0 };
         GetCursorPos(&mut at);
         SetForegroundWindow(hwnd); // otherwise the menu does not close when clicking elsewhere
-        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, at.x, at.y, 0, hwnd, std::ptr::null());
+        let picked = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN,
+            at.x,
+            at.y,
+            0,
+            hwnd,
+            std::ptr::null(),
+        );
         DestroyMenu(menu);
         PostMessageW(hwnd, WM_NULL, 0, 0);
-        if let Some(action) = model.iter().find(|i| i.id == picked as u32).and_then(|i| i.action) {
+        if let Some(action) = model
+            .iter()
+            .find(|i| i.id == picked as u32)
+            .and_then(|i| i.action)
+        {
             act(hwnd, action);
         }
     }
@@ -158,10 +209,18 @@ fn run() {
     crate::perf::register_thread("tray");
     crate::theme::enable_app_dark_mode();
     unsafe {
-        TASKBAR_CREATED.store(RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()), Ordering::Relaxed);
+        TASKBAR_CREATED.store(
+            RegisterWindowMessageW(wide("TaskbarCreated").as_ptr()),
+            Ordering::Relaxed,
+        );
         let instance = GetModuleHandleW(std::ptr::null());
         let class = wide("PlanorTray");
-        let wc = WNDCLASSW { lpfnWndProc: Some(proc), hInstance: instance, lpszClassName: class.as_ptr(), ..std::mem::zeroed() };
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(proc),
+            hInstance: instance,
+            lpszClassName: class.as_ptr(),
+            ..std::mem::zeroed()
+        };
         RegisterClassW(&wc);
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
@@ -212,7 +271,11 @@ mod tests {
     fn menu_model_has_configure_and_exit_last() {
         let m = menu_model(false);
         let labels: Vec<_> = m.iter().map(|i| i.label).collect();
-        assert_eq!(labels, ["Pause", "Configure...", "", "Exit"], "separator before Exit");
+        assert_eq!(
+            labels,
+            ["Pause", "Configure...", "", "Exit"],
+            "separator before Exit"
+        );
         assert_eq!(m.last().unwrap().action, Some(TrayAction::Exit));
         assert_eq!(m[1].action, Some(TrayAction::Configure));
         let mut ids: Vec<_> = m.iter().map(|i| i.id).collect();

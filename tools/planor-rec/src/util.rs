@@ -140,7 +140,9 @@ pub fn qpc_us() -> i64 {
 
 /// Run the calling thread above normal threads (the capture tick loop and its rotation helpers). Best effort.
 pub fn raise_current_thread_priority() {
-    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST};
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_HIGHEST,
+    };
     unsafe {
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     }
@@ -235,11 +237,7 @@ pub fn parse_iso_utc(s: &str) -> Option<i64> {
     let sec: f64 = t.next()?.parse().ok()?;
     let secs = sec.floor() as i64;
     let millis = ((sec - sec.floor()) * 1000.0).round() as i64;
-    Some(
-        days_from_civil(y, mo, da) * 86_400_000
-            + (h * 3600 + mi * 60 + secs) * 1000
-            + millis,
-    )
+    Some(days_from_civil(y, mo, da) * 86_400_000 + (h * 3600 + mi * 60 + secs) * 1000 + millis)
 }
 
 /// The UTC day (milliseconds) that contains `unix_ms`.

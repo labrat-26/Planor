@@ -8,8 +8,8 @@ use std::{
 use windows_sys::Win32::{
     Foundation::WAIT_OBJECT_0,
     Storage::FileSystem::{
-        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FindCloseChangeNotification,
-        FindFirstChangeNotificationW, FindNextChangeNotification,
+        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+        FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification,
     },
     System::Threading::{INFINITE, WaitForSingleObject},
 };
@@ -48,7 +48,9 @@ fn stamp(path: &Path) -> Option<(SystemTime, u64)> {
 
 /// Watch `path`'s folder on a background thread; `on_change` runs after each settled change of the file.
 pub fn spawn(path: PathBuf, on_change: impl Fn() + Send + 'static) {
-    let Some(dir) = path.parent().map(Path::to_path_buf) else { return };
+    let Some(dir) = path.parent().map(Path::to_path_buf) else {
+        return;
+    };
     std::thread::spawn(move || {
         crate::perf::register_thread("config-watch");
         let wide_dir = crate::wide(&dir.to_string_lossy());
@@ -56,7 +58,9 @@ pub fn spawn(path: PathBuf, on_change: impl Fn() + Send + 'static) {
             FindFirstChangeNotificationW(
                 wide_dir.as_ptr(),
                 0,
-                FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE,
+                FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_FILE_NAME
+                    | FILE_NOTIFY_CHANGE_SIZE,
             )
         };
         if handle.is_null() || handle as isize == -1 {
@@ -99,9 +103,15 @@ mod tests {
             d.event(t0 + Duration::from_millis(ms));
         }
         assert!(d.pending());
-        assert!(!d.due(t0 + Duration::from_millis(349)), "300 ms after the LAST event, not the first");
+        assert!(
+            !d.due(t0 + Duration::from_millis(349)),
+            "300 ms after the LAST event, not the first"
+        );
         assert!(d.due(t0 + Duration::from_millis(350)));
-        assert!(!d.due(t0 + Duration::from_millis(900)), "fires exactly once");
+        assert!(
+            !d.due(t0 + Duration::from_millis(900)),
+            "fires exactly once"
+        );
         assert!(!d.pending());
     }
 
@@ -118,7 +128,10 @@ mod tests {
 
     #[test]
     fn watcher_reports_a_real_edit_once() {
-        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
         let dir = std::env::temp_dir().join(format!("planor-watch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -132,10 +145,18 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
         std::fs::write(dir.join("other.txt"), "x").unwrap();
         std::thread::sleep(Duration::from_millis(700));
-        assert_eq!(hits.load(Ordering::SeqCst), 0, "another file in the folder is not a config change");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            0,
+            "another file in the folder is not a config change"
+        );
         std::fs::write(&file, "[layout]\ngap_px = 9\n").unwrap();
         std::fs::write(&file, "[layout]\ngap_px = 10\n").unwrap();
         std::thread::sleep(Duration::from_millis(900));
-        assert_eq!(hits.load(Ordering::SeqCst), 1, "a burst of writes reloads once");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "a burst of writes reloads once"
+        );
     }
 }

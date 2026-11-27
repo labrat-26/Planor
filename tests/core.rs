@@ -108,16 +108,44 @@ fn motion_drag() {
     }
     // Drop modes are positional only (N-012, N-015, N-016: no speed or dwell, so nothing flickers).
     // drag(in_zone, fraction, dragged window is grouped, target is its sibling)
-    assert_eq!(drag(true, 0.5, false, false, false), Drag::Stack, "in the stack zone: join");
-    assert_eq!(drag(false, 0.1, false, false, false), Drag::Swap, "lone window on a window: swap");
+    assert_eq!(
+        drag(true, 0.5, false, false, false),
+        Drag::Stack,
+        "in the stack zone: join"
+    );
+    assert_eq!(
+        drag(false, 0.1, false, false, false),
+        Drag::Swap,
+        "lone window on a window: swap"
+    );
     assert_eq!(drag(false, 0.9, false, false, false), Drag::Swap);
-    assert_eq!(drag(false, 0.1, true, false, false), Drag::Before, "grouped window pulled out: beside, left half");
+    assert_eq!(
+        drag(false, 0.1, true, false, false),
+        Drag::Before,
+        "grouped window pulled out: beside, left half"
+    );
     assert_eq!(drag(false, 0.9, true, false, false), Drag::After);
-    assert_eq!(drag(false, 0.5, true, true, false), Drag::Swap, "onto a sibling peek: reorder within the group (N-018)");
-    assert_eq!(drag(false, 0.2, false, false, true), Drag::Before, "from another monitor: beside, never a swap");
+    assert_eq!(
+        drag(false, 0.5, true, true, false),
+        Drag::Swap,
+        "onto a sibling peek: reorder within the group (N-018)"
+    );
+    assert_eq!(
+        drag(false, 0.2, false, false, true),
+        Drag::Before,
+        "from another monitor: beside, never a swap"
+    );
     assert_eq!(drag(false, 0.8, false, false, true), Drag::After);
-    assert_eq!(drag(true, 0.5, false, false, true), Drag::Stack, "the zone works across monitors too");
-    assert_eq!(drag(true, 0.5, true, true, false), Drag::Swap, "own group is never a stack target")
+    assert_eq!(
+        drag(true, 0.5, false, false, true),
+        Drag::Stack,
+        "the zone works across monitors too"
+    );
+    assert_eq!(
+        drag(true, 0.5, true, true, false),
+        Drag::Swap,
+        "own group is never a stack target"
+    )
 }
 #[test]
 fn synthetic_contacts() {
@@ -145,9 +173,15 @@ fn synthetic_contacts() {
     assert_eq!(g.sample(&[(0., 0.); 4], 12., 100.), Swipe::None);
     assert_eq!(g.sample(&[(5., 5.); 4], 12., 100.), Swipe::None);
     assert_eq!(g.sample(&[(20., 5.); 4], 12., 100.), Swipe::DragStart);
-    assert_eq!(g.sample(&[(30., 25.); 4], 12., 100.), Swipe::DragMove(30. - 0., 25. - 0.));
+    assert_eq!(
+        g.sample(&[(30., 25.); 4], 12., 100.),
+        Swipe::DragMove(30. - 0., 25. - 0.)
+    );
     assert_eq!(g.sample(&[(30., 25.); 4], 12., 100.), Swipe::None);
-    assert_eq!(g.sample(&[(25., 40.); 4], 12., 100.), Swipe::DragMove(-5., 15.));
+    assert_eq!(
+        g.sample(&[(25., 40.); 4], 12., 100.),
+        Swipe::DragMove(-5., 15.)
+    );
     assert_eq!(g.sample(&[], 12., 100.), Swipe::DragEnd);
     assert_eq!(g.sample(&[], 12., 100.), Swipe::None);
 }
@@ -175,7 +209,18 @@ fn reorder_stack_member() {
     assert_eq!(s.focus, 0);
     assert_eq!(s.columns[2].members, [2]);
 }
-#[test]fn hybrid_hid_reports(){let mut f=ContactFrame::default();assert_eq!(f.packet(3,[(5,(1.,1.))]),None);assert_eq!(f.packet(0,[(9,(2.,2.))]),None);assert_eq!(f.packet(0,[(10,(3.,3.))]).unwrap().len(),3);assert!(f.packet(1,[(2,(0.,0.))]).unwrap().is_empty());let mut f4=ContactFrame::default();assert_eq!(f4.packet(4,[(5,(1.,1.)),(6,(1.,1.))]),None);assert_eq!(f4.packet(0,[(7,(1.,1.))]),None);assert_eq!(f4.packet(0,[(8,(1.,1.))]).unwrap().len(),4)}
+#[test]
+fn hybrid_hid_reports() {
+    let mut f = ContactFrame::default();
+    assert_eq!(f.packet(3, [(5, (1., 1.))]), None);
+    assert_eq!(f.packet(0, [(9, (2., 2.))]), None);
+    assert_eq!(f.packet(0, [(10, (3., 3.))]).unwrap().len(), 3);
+    assert!(f.packet(1, [(2, (0., 0.))]).unwrap().is_empty());
+    let mut f4 = ContactFrame::default();
+    assert_eq!(f4.packet(4, [(5, (1., 1.)), (6, (1., 1.))]), None);
+    assert_eq!(f4.packet(0, [(7, (1., 1.))]), None);
+    assert_eq!(f4.packet(0, [(8, (1., 1.))]).unwrap().len(), 4)
+}
 
 // ---- Regression tests for problems the user reported (see docs/superpowers/specs and the Win+W notes) ----
 fn group_of_three(area: Rect) -> Strip {
@@ -197,7 +242,12 @@ fn group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape() {
     // Landscape strip: the group loses height. Every member has the same size; the next one starts right
     // below the active one (only `peek` px of it show, the rest is beyond the column and clipped), and with
     // three or more members the previous one ends right above it. Nothing is squashed or resized.
-    let area = Rect { x: 0, y: 0, w: 1000, h: 600 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    };
     let mut pair = Strip::new(area);
     pair.insert(1, 1);
     pair.insert(2, 1);
@@ -205,51 +255,121 @@ fn group_is_a_deck_of_equal_windows_with_peeking_neighbours_in_landscape() {
     let two = pair.rects(28);
     // N-010 (2026-11-22): a pair does not wrap. Grouping makes the dropped window (the second member)
     // active, so the first peeks ABOVE it; it used to be drawn below, as if the deck looped round.
-    assert_eq!((rect_of(&two, 2).y, rect_of(&two, 2).h), (28, 600 - 28), "active member of a pair: full height minus one peek");
-    assert_eq!((rect_of(&two, 1).y + rect_of(&two, 1).h, rect_of(&two, 1).h), (28, 600 - 28), "the pair's other member is full size, ending at the peek line above");
+    assert_eq!(
+        (rect_of(&two, 2).y, rect_of(&two, 2).h),
+        (28, 600 - 28),
+        "active member of a pair: full height minus one peek"
+    );
+    assert_eq!(
+        (rect_of(&two, 1).y + rect_of(&two, 1).h, rect_of(&two, 1).h),
+        (28, 600 - 28),
+        "the pair's other member is full size, ending at the peek line above"
+    );
     pair.select(1);
     let first = pair.rects(28);
-    assert_eq!((rect_of(&first, 1).y, rect_of(&first, 2).y), (0, 600 - 28), "first member active: the second peeks below");
+    assert_eq!(
+        (rect_of(&first, 1).y, rect_of(&first, 2).y),
+        (0, 600 - 28),
+        "first member active: the second peeks below"
+    );
     let three = group_of_three(area).rects(28);
     let active = rect_of(&three, 3);
-    assert_eq!((active.y, active.h), (28, 600 - 56), "active member of three sits between two peeks");
+    assert_eq!(
+        (active.y, active.h),
+        (28, 600 - 56),
+        "active member of three sits between two peeks"
+    );
     assert_eq!(active.w, area.w, "landscape: the column keeps its width");
     let prev = rect_of(&three, 2);
     let next = rect_of(&three, 1);
-    assert_eq!((prev.y + prev.h, prev.h), (28, active.h), "previous member ends where the active one starts, same size");
-    assert_eq!((next.y, next.h), (28 + active.h, active.h), "next member starts where the active one ends, same size");
+    assert_eq!(
+        (prev.y + prev.h, prev.h),
+        (28, active.h),
+        "previous member ends where the active one starts, same size"
+    );
+    assert_eq!(
+        (next.y, next.h),
+        (28 + active.h, active.h),
+        "next member starts where the active one ends, same size"
+    );
     let mut four = group_of_three(area);
     four.insert(4, 1);
     four.group(4, 1);
     let four = four.rects(28);
-    assert_eq!(rect_of(&four, 4).h, 600 - 56, "a fourth member does not change the size");
+    assert_eq!(
+        rect_of(&four, 4).h,
+        600 - 56,
+        "a fourth member does not change the size"
+    );
     // The visible part of a neighbour is exactly the peek: its rectangle clipped to the column.
-    assert_eq!(600 - next.y, 28, "28 px of the next member show below the active one");
-    assert_eq!(prev.y + prev.h, 28, "28 px of the previous member show above it");
+    assert_eq!(
+        600 - next.y,
+        28,
+        "28 px of the next member show below the active one"
+    );
+    assert_eq!(
+        prev.y + prev.h,
+        28,
+        "28 px of the previous member show above it"
+    );
 }
 #[test]
 fn group_is_a_deck_sideways_in_portrait() {
     // Portrait strip: the inverse, the deck runs left to right and the peeks are at the left and right edges.
-    let area = Rect { x: 0, y: 0, w: 600, h: 1000 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 600,
+        h: 1000,
+    };
     let three = group_of_three(area).rects(28);
     let active = rect_of(&three, 3);
-    assert_eq!((active.x, active.w, active.h), (28, 600 - 56, area.h), "portrait: width shrinks, length is kept");
+    assert_eq!(
+        (active.x, active.w, active.h),
+        (28, 600 - 56, area.h),
+        "portrait: width shrinks, length is kept"
+    );
     let (prev, next) = (rect_of(&three, 2), rect_of(&three, 1));
-    assert_eq!(prev.x + prev.w, 28, "previous member ends where the active one starts");
-    assert_eq!(next.x, 28 + active.w, "next member starts where the active one ends");
-    assert_eq!((prev.w, next.w), (active.w, active.w), "all members the same width");
+    assert_eq!(
+        prev.x + prev.w,
+        28,
+        "previous member ends where the active one starts"
+    );
+    assert_eq!(
+        next.x,
+        28 + active.w,
+        "next member starts where the active one ends"
+    );
+    assert_eq!(
+        (prev.w, next.w),
+        (active.w, active.w),
+        "all members the same width"
+    );
 }
 #[test]
 fn only_the_active_and_neighbouring_members_are_shown() {
-    let mut s = group_of_three(Rect { x: 0, y: 0, w: 1000, h: 600 });
+    let mut s = group_of_three(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    });
     let shown: Vec<bool> = (0..3).map(|j| s.columns[0].shown(j)).collect();
-    assert_eq!(shown, [true, true, true], "three members: all visible (previous, active, next)");
+    assert_eq!(
+        shown,
+        [true, true, true],
+        "three members: all visible (previous, active, next)"
+    );
     s.insert(4, 1);
     s.group(4, 1);
     let c = &s.columns[0];
     assert_eq!(c.members, [1, 2, 3, 4]);
     let shown: Vec<bool> = (0..4).map(|j| c.shown(j)).collect();
-    assert_eq!(shown, [true, false, true, true], "four members: active (3), next (0, wrapping), previous (2) only");
+    assert_eq!(
+        shown,
+        [true, false, true, true],
+        "four members: active (3), next (0, wrapping), previous (2) only"
+    );
 }
 #[test]
 fn focusing_a_visible_window_never_slides_the_strip() {
@@ -265,7 +385,10 @@ fn focusing_a_visible_window_never_slides_the_strip() {
         s.select(id);
         s.reveal(48 + 6);
         if s.in_view(id) {
-            assert_eq!(s.offset, before, "focusing window {id}, already fully in view, moved the strip");
+            assert_eq!(
+                s.offset, before,
+                "focusing window {id}, already fully in view, moved the strip"
+            );
         }
     }
 }
@@ -278,14 +401,24 @@ fn touchpad_scroll_can_reach_the_first_and_last_window() {
     }
     s.scroll(10_000);
     s.focus_nearest_center();
-    assert_eq!(s.focus, 4, "scrolled to the end: the last window must have focus");
+    assert_eq!(
+        s.focus, 4,
+        "scrolled to the end: the last window must have focus"
+    );
     s.scroll(-10_000);
     s.focus_nearest_center();
-    assert_eq!(s.focus, 0, "scrolled to the start: the first window must have focus");
+    assert_eq!(
+        s.focus, 0,
+        "scrolled to the start: the first window must have focus"
+    );
     s.scroll(10_000);
     s.scroll(-(s.offset / 2));
     s.focus_nearest_center();
-    assert!(s.focus > 0 && s.focus < 4, "scrolled to the middle: a middle window has focus, got {}", s.focus);
+    assert!(
+        s.focus > 0 && s.focus < 4,
+        "scrolled to the middle: a middle window has focus, got {}",
+        s.focus
+    );
 }
 #[test]
 fn resizing_a_pair_keeps_it_filling_the_monitor() {
@@ -299,11 +432,17 @@ fn resizing_a_pair_keeps_it_filling_the_monitor() {
     // Drag the left edge of the right window to the left: the LEFT window gives way.
     s.resize(1, s.columns[1].length + 100, true);
     assert_eq!((s.columns[0].length, s.columns[1].length), (397, 597));
-    assert!(filled(&s), "pair must still fill the monitor after a leading-edge resize");
+    assert!(
+        filled(&s),
+        "pair must still fill the monitor after a leading-edge resize"
+    );
     // Drag the right edge of the left window to the right: the RIGHT window gives way.
     s.resize(0, s.columns[0].length + 50, false);
     assert_eq!((s.columns[0].length, s.columns[1].length), (447, 547));
-    assert!(filled(&s), "pair must still fill the monitor after a trailing-edge resize");
+    assert!(
+        filled(&s),
+        "pair must still fill the monitor after a trailing-edge resize"
+    );
 }
 #[test]
 fn resizing_a_pair_cannot_squeeze_the_neighbour_below_its_minimum() {
@@ -311,8 +450,15 @@ fn resizing_a_pair_cannot_squeeze_the_neighbour_below_its_minimum() {
     s.insert(1, 400);
     s.insert(2, 400);
     s.resize(1, 990, true);
-    assert!(s.columns[0].length >= 400, "neighbour shrank below its minimum: {}", s.columns[0].length);
-    assert_eq!(s.columns[0].length + s.columns[1].length + s.gap, s.area.length());
+    assert!(
+        s.columns[0].length >= 400,
+        "neighbour shrank below its minimum: {}",
+        s.columns[0].length
+    );
+    assert_eq!(
+        s.columns[0].length + s.columns[1].length + s.gap,
+        s.area.length()
+    );
 }
 #[test]
 fn a_window_left_alone_fills_the_monitor() {
@@ -341,14 +487,23 @@ fn dragging_the_leading_edge_moves_only_that_edge() {
     let after = s.rects(0);
     let (a2, a3) = (rect_of(&after, 2), rect_of(&after, 3));
     assert_eq!(a2.w, b2.w + 50, "the window grew by the dragged amount");
-    assert_eq!(a2.x + a2.w, right_edge, "the trailing (right) edge must not move");
+    assert_eq!(
+        a2.x + a2.w,
+        right_edge,
+        "the trailing (right) edge must not move"
+    );
     assert_eq!(a3, b3, "the window to the right must not move at all");
 }
 #[test]
 fn rolling_a_group_is_continuous_and_settles_on_the_nearest_member() {
     // Reported: "scroll continuously like an app switcher". A roll moves the deck smoothly: the active
     // member glides toward the next peek, the next one up into the active slot, and it settles on a member.
-    let area = Rect { x: 0, y: 0, w: 1000, h: 600 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    };
     let mut s = group_of_three(area);
     let at = |s: &Strip, id| rect_of(&s.rects(28), id);
     let (a0, n0) = (at(&s, 3), at(&s, 1)); // active, next
@@ -356,22 +511,43 @@ fn rolling_a_group_is_continuous_and_settles_on_the_nearest_member() {
     for _ in 0..8 {
         assert!(s.roll(0.1));
         let y = at(&s, 3).y;
-        assert!(y <= last, "active member must keep moving up while rolling forward: {last} then {y}");
+        assert!(
+            y <= last,
+            "active member must keep moving up while rolling forward: {last} then {y}"
+        );
         last = y;
     }
-    assert!(last < a0.y, "the active member must have moved toward the previous peek (content scrolls up)");
+    assert!(
+        last < a0.y,
+        "the active member must have moved toward the previous peek (content scrolls up)"
+    );
     // Halfway: the member coming in is between the peek slot and the active slot.
     let mut half = group_of_three(area);
     half.roll(0.5);
     let incoming = rect_of(&half.rects(28), 1);
-    assert!(incoming.y < n0.y && incoming.y > a0.y, "incoming member sits between the peek and active slots: {incoming:?}");
+    assert!(
+        incoming.y < n0.y && incoming.y > a0.y,
+        "incoming member sits between the peek and active slots: {incoming:?}"
+    );
     half.settle_roll();
     assert_eq!(half.columns[0].frac, 0.);
-    assert_eq!(half.rects(28).iter().find(|r| r.0 == half.active().unwrap()).unwrap().1, a0.clone(), "settled: back to the standard active slot");
+    assert_eq!(
+        half.rects(28)
+            .iter()
+            .find(|r| r.0 == half.active().unwrap())
+            .unwrap()
+            .1,
+        a0.clone(),
+        "settled: back to the standard active slot"
+    );
     // Rolling past a whole member changes which member is active; backwards wraps too.
     let mut w = group_of_three(area);
     w.roll(1.2);
-    assert_eq!(w.active(), Some(1), "rolled forward past the end wraps to the first member");
+    assert_eq!(
+        w.active(),
+        Some(1),
+        "rolled forward past the end wraps to the first member"
+    );
     w.roll(-1.4);
     assert_eq!(w.active(), Some(3), "rolled back wraps to the last member");
 }
@@ -385,54 +561,89 @@ fn no_empty_space_when_the_columns_do_not_reach_the_end() {
     s.resize(0, 300, false);
     s.remove(3);
     let end = |s: &Strip| s.rects(0).iter().map(|r| r.1.x + r.1.w).max().unwrap();
-    assert!(end(&s) < s.area.x + s.area.w, "precondition: the strip is short of the screen edge");
+    assert!(
+        end(&s) < s.area.x + s.area.w,
+        "precondition: the strip is short of the screen edge"
+    );
     s.fill_gaps();
-    assert_eq!(end(&s), s.area.x + s.area.w, "the last column must reach the edge of the monitor");
+    assert_eq!(
+        end(&s),
+        s.area.x + s.area.w,
+        "the last column must reach the edge of the monitor"
+    );
 }
 
 // ---- Section 3.2: Invariant check tests (intentionally break each of the 5 invariants) ----
 
 #[test]
 fn invariant_breaks_no_gap() {
-    let mut s = Strip::new(Rect { x: 0, y: 0, w: 1000, h: 600 });
+    let mut s = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    });
     s.insert(1, 1);
     s.insert(2, 1);
     s.columns[0].length = 300;
     s.columns[1].length = 300; // 606 < 1000 -> leaves gap at end of monitor
     let vs = check_strip_invariants(&s, 28);
     assert!(
-        vs.iter().any(|v| v.trace_line().starts_with("INVARIANT no_gap ")),
+        vs.iter()
+            .any(|v| v.trace_line().starts_with("INVARIANT no_gap ")),
         "expected INVARIANT no_gap line, got {vs:?}"
     );
 }
 
 #[test]
 fn invariant_breaks_no_overlap() {
-    let mut s = Strip::new(Rect { x: 0, y: 0, w: 1000, h: 600 });
+    let mut s = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    });
     s.insert(1, 1);
     s.insert(2, 1);
     s.gap = -20; // forces overlap between adjacent columns
     let vs = check_strip_invariants(&s, 28);
     assert!(
-        vs.iter().any(|v| v.trace_line().starts_with("INVARIANT no_overlap ")),
+        vs.iter()
+            .any(|v| v.trace_line().starts_with("INVARIANT no_overlap ")),
         "expected INVARIANT no_overlap line, got {vs:?}"
     );
 }
 
 #[test]
 fn invariant_breaks_inside_monitor() {
-    let mut s = Strip::new(Rect { x: 0, y: 0, w: 1000, h: 600 });
+    let mut s = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    });
     s.insert(1, 1);
     // Force an off-monitor cross-axis/tile overflow by pushing a huge stack_peek via invalid area or length:
     // Make strip column 0 wider than monitor and in_view broken? Better: column 0 is longer than monitor!
     s.columns[0].length = 1200;
-    s.area = Rect { x: 0, y: 0, w: 1000, h: 600 };
+    s.area = Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    };
     // Also test cross-axis escape with negative depth:
-    let mut s_cross = Strip::new(Rect { x: 0, y: 0, w: 1000, h: 0 });
+    let mut s_cross = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 0,
+    });
     s_cross.insert(1, 1);
     let vs = check_strip_invariants(&s_cross, 28);
     assert!(
-        vs.iter().any(|v| v.trace_line().starts_with("INVARIANT inside_monitor ")),
+        vs.iter()
+            .any(|v| v.trace_line().starts_with("INVARIANT inside_monitor ")),
         "expected INVARIANT inside_monitor line, got {vs:?}"
     );
     // Also verify a window placed outside monitor on a 2-column strip is caught when in_view/cross-axis breaks:
@@ -441,21 +652,30 @@ fn invariant_breaks_inside_monitor() {
 
 #[test]
 fn invariant_breaks_one_active_per_group() {
-    let mut s = Strip::new(Rect { x: 0, y: 0, w: 1000, h: 600 });
+    let mut s = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 600,
+    });
     s.insert(1, 1);
     s.insert(2, 1);
     s.group(2, 1);
     s.columns[0].active = 99; // invalid active index
     let vs = check_strip_invariants(&s, 28);
     assert!(
-        vs.iter().any(|v| v.trace_line().starts_with("INVARIANT one_active_per_group ")),
+        vs.iter().any(|v| v
+            .trace_line()
+            .starts_with("INVARIANT one_active_per_group ")),
         "expected INVARIANT one_active_per_group line, got {vs:?}"
     );
     // Empty column members also triggers one_active_per_group.
     s.columns[0].members.clear();
     let vs2 = check_strip_invariants(&s, 28);
     assert!(
-        vs2.iter().any(|v| v.trace_line().starts_with("INVARIANT one_active_per_group ")),
+        vs2.iter().any(|v| v
+            .trace_line()
+            .starts_with("INVARIANT one_active_per_group ")),
         "expected INVARIANT one_active_per_group for empty members, got {vs2:?}"
     );
 }
@@ -463,22 +683,50 @@ fn invariant_breaks_one_active_per_group() {
 #[test]
 fn invariant_breaks_no_window_left_parked() {
     let park_x = 3000;
-    let bound = Rect { x: 0, y: 0, w: 1920, h: 1152 };
+    let bound = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1152,
+    };
     let tiles = vec![SettledTile {
         id: 42,
-        rect: Rect { x: 0, y: 0, w: 957, h: 1152 },
+        rect: Rect {
+            x: 0,
+            y: 0,
+            w: 957,
+            h: 1152,
+        },
         bound,
         expect_on_screen: true,
         focused: true,
     }];
-    let actuals = vec![(42, Rect { x: park_x, y: 0, w: 957, h: 1152 })];
+    let actuals = vec![(
+        42,
+        Rect {
+            x: park_x,
+            y: 0,
+            w: 957,
+            h: 1152,
+        },
+    )];
     let vs = check_settled_parked(&tiles, &actuals, park_x);
     assert!(
-        vs.iter().any(|v| v.trace_line().starts_with("INVARIANT no_window_left_parked ")),
+        vs.iter().any(|v| v
+            .trace_line()
+            .starts_with("INVARIANT no_window_left_parked ")),
         "expected INVARIANT no_window_left_parked line, got {vs:?}"
     );
     // Healthy actual at tile.rect produces zero violations.
-    let healthy = vec![(42, Rect { x: 0, y: 0, w: 957, h: 1152 })];
+    let healthy = vec![(
+        42,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 957,
+            h: 1152,
+        },
+    )];
     assert!(check_settled_parked(&tiles, &healthy, park_x).is_empty());
 }
 
@@ -487,9 +735,17 @@ fn invariant_breaks_no_window_left_parked() {
 #[test]
 fn mockup_landscape_0_to_6_windows() {
     // Mockup states: landscape_0_windows .. landscape_6_windows
-    let area = Rect { x: 0, y: 0, w: 1920, h: 1152 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1152,
+    };
     let empty = Strip::new(area);
-    assert!(empty.rects(28).is_empty(), "landscape_0_windows: 0 tiles expected");
+    assert!(
+        empty.rects(28).is_empty(),
+        "landscape_0_windows: 0 tiles expected"
+    );
 
     for n in 1..=6isize {
         let mut s = Strip::new(area);
@@ -497,29 +753,58 @@ fn mockup_landscape_0_to_6_windows() {
             s.insert(id, 1);
             s.reveal(54);
         }
-        assert_eq!(s.columns.len(), n as usize, "landscape_{n}_windows column count");
-        assert_eq!(s.active(), Some(n), "landscape_{n}_windows focuses newest window");
-        assert!(s.in_view(n), "landscape_{n}_windows focused window is fully in view");
+        assert_eq!(
+            s.columns.len(),
+            n as usize,
+            "landscape_{n}_windows column count"
+        );
+        assert_eq!(
+            s.active(),
+            Some(n),
+            "landscape_{n}_windows focuses newest window"
+        );
+        assert!(
+            s.in_view(n),
+            "landscape_{n}_windows focused window is fully in view"
+        );
         let rects = s.rects(28);
         assert_eq!(rects.len(), n as usize);
         if n == 1 {
             assert_eq!(rects[0].1, area, "landscape_1_window fills monitor");
         } else if n == 2 {
-            assert_eq!(rects[0].1.w + rects[1].1.w + s.gap, area.w, "landscape_2_windows_pair fills 100% width");
-            assert!((rects[0].1.w - rects[1].1.w).abs() <= 1, "landscape_2_windows_pair 50/50 split");
+            assert_eq!(
+                rects[0].1.w + rects[1].1.w + s.gap,
+                area.w,
+                "landscape_2_windows_pair fills 100% width"
+            );
+            assert!(
+                (rects[0].1.w - rects[1].1.w).abs() <= 1,
+                "landscape_2_windows_pair 50/50 split"
+            );
         } else {
             let expected_w = ((area.w - s.gap) as f64 * 0.5).round() as i32;
             assert!((rects[(n - 1) as usize].1.w - expected_w).abs() <= 2);
-            assert!(rects[0].1.x < 0, "landscape_{n}_windows scrolls earlier windows left off-screen");
+            assert!(
+                rects[0].1.x < 0,
+                "landscape_{n}_windows scrolls earlier windows left off-screen"
+            );
         }
-        assert!(check_strip_invariants(&s, 28).is_empty(), "landscape_{n}_windows invariants clean");
+        assert!(
+            check_strip_invariants(&s, 28).is_empty(),
+            "landscape_{n}_windows invariants clean"
+        );
     }
 }
 
 #[test]
 fn mockup_portrait_0_to_6_windows() {
     // Mockup states: portrait_0_windows .. portrait_6_windows
-    let area = Rect { x: 0, y: 0, w: 1440, h: 2512 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1440,
+        h: 2512,
+    };
     assert!(!area.horizontal());
     assert!(Strip::new(area).rects(28).is_empty(), "portrait_0_windows");
 
@@ -537,11 +822,18 @@ fn mockup_portrait_0_to_6_windows() {
         if n == 1 {
             assert_eq!(rects[0].1, area, "portrait_1_window fills monitor");
         } else if n == 2 {
-            assert_eq!(rects[0].1.h + rects[1].1.h + s.gap, area.h, "portrait_2_windows_pair fills height");
+            assert_eq!(
+                rects[0].1.h + rects[1].1.h + s.gap,
+                area.h,
+                "portrait_2_windows_pair fills height"
+            );
         } else {
             assert!(rects[0].1.y < 0, "portrait_{n}_windows scrolls vertically");
         }
-        assert!(check_strip_invariants(&s, 28).is_empty(), "portrait_{n}_windows invariants clean");
+        assert!(
+            check_strip_invariants(&s, 28).is_empty(),
+            "portrait_{n}_windows invariants clean"
+        );
     }
 }
 
@@ -549,8 +841,18 @@ fn mockup_portrait_0_to_6_windows() {
 fn mockup_groups_2_to_4_landscape_and_portrait() {
     // Mockup states: landscape_group_2..4, portrait_group_2..4
     for area in [
-        Rect { x: 0, y: 0, w: 1920, h: 1152 },
-        Rect { x: 0, y: 0, w: 1440, h: 2512 },
+        Rect {
+            x: 0,
+            y: 0,
+            w: 1920,
+            h: 1152,
+        },
+        Rect {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 2512,
+        },
     ] {
         for count in 2..=4isize {
             let mut s = Strip::new(area);
@@ -586,22 +888,41 @@ fn mockup_groups_2_to_4_landscape_and_portrait() {
 #[test]
 fn mockup_group_roll_fractions_and_wrap() {
     // Mockup states: group_roll_fraction_positive, group_roll_fraction_negative, group_roll_wrap_and_settle
-    let area = Rect { x: 0, y: 0, w: 1920, h: 1152 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1152,
+    };
     let mut s = group_of_three(area);
     let base_y = rect_of(&s.rects(28), 3).y;
     assert!(s.roll(0.25));
     assert!((s.columns[0].frac - 0.25).abs() < 1e-9);
-    assert!(rect_of(&s.rects(28), 3).y < base_y, "positive frac glides active up");
+    assert!(
+        rect_of(&s.rects(28), 3).y < base_y,
+        "positive frac glides active up"
+    );
     assert!(s.roll(-0.5));
     assert!((s.columns[0].frac - (-0.25)).abs() < 1e-9);
-    assert!(rect_of(&s.rects(28), 3).y > base_y, "negative frac glides active down");
+    assert!(
+        rect_of(&s.rects(28), 3).y > base_y,
+        "negative frac glides active down"
+    );
     s.settle_roll();
     assert_eq!(s.columns[0].frac, 0.0);
-    assert_eq!(s.active(), Some(3), "small roll fraction settles back onto active member");
+    assert_eq!(
+        s.active(),
+        Some(3),
+        "small roll fraction settles back onto active member"
+    );
 
     assert!(s.roll(0.65));
     s.settle_roll();
-    assert_eq!(s.active(), Some(1), "roll fraction > 0.5 settles onto next member");
+    assert_eq!(
+        s.active(),
+        Some(1),
+        "roll fraction > 0.5 settles onto next member"
+    );
 }
 
 #[test]
@@ -614,10 +935,18 @@ fn mockup_insert_after_focused_and_reorder_after_dropped_on() {
     s.select(1);
     s.insert(4, 1);
     let ids: Vec<WindowId> = s.columns.iter().map(|c| c.members[0]).collect();
-    assert_eq!(ids, [1, 4, 2, 3], "new window inserts immediately after focused column");
+    assert_eq!(
+        ids,
+        [1, 4, 2, 3],
+        "new window inserts immediately after focused column"
+    );
     s.reorder(4, 3, true); // drop onto right zone -> insert after dropped-on window
     let ids: Vec<WindowId> = s.columns.iter().map(|c| c.members[0]).collect();
-    assert_eq!(ids, [1, 2, 3, 4], "drop After inserts right after target window 3");
+    assert_eq!(
+        ids,
+        [1, 2, 3, 4],
+        "drop After inserts right after target window 3"
+    );
 }
 
 #[test]
@@ -631,20 +960,37 @@ fn mockup_pull_out_close_and_fill_gaps() {
     assert_eq!(s.columns.len(), 2, "pull_out ungroups into 2 columns");
     assert_eq!(s.active(), Some(2), "focus follows pulled-out window");
     s.fill_gaps();
-    assert_eq!(s.columns[0].length + s.columns[1].length + s.gap, s.area.length());
+    assert_eq!(
+        s.columns[0].length + s.columns[1].length + s.gap,
+        s.area.length()
+    );
 
     s.remove(2);
     s.fill();
     s.fill_gaps();
     assert_eq!(s.columns.len(), 1);
-    assert_eq!(s.columns[0].length, s.area.length(), "close_window_refill restores full monitor width");
+    assert_eq!(
+        s.columns[0].length,
+        s.area.length(),
+        "close_window_refill restores full monitor width"
+    );
 }
 
 #[test]
 fn mockup_cross_monitor_insert_rule() {
     // Mockup state: cross_monitor_insert_rule
-    let mut src = Strip::new(Rect { x: 0, y: 0, w: 1920, h: 1152 });
-    let mut dst = Strip::new(Rect { x: 0, y: -1440, w: 2560, h: 1392 });
+    let mut src = Strip::new(Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1152,
+    });
+    let mut dst = Strip::new(Rect {
+        x: 0,
+        y: -1440,
+        w: 2560,
+        h: 1392,
+    });
     src.insert(1, 1);
     src.insert(2, 1);
     dst.insert(10, 1);
@@ -657,7 +1003,10 @@ fn mockup_cross_monitor_insert_rule() {
     dst.select(2);
     dst.reveal(54);
     assert_eq!(src.columns.len(), 1);
-    assert_eq!(src.columns[0].length, src.area.w, "source strip refills after cross-monitor leave");
+    assert_eq!(
+        src.columns[0].length, src.area.w,
+        "source strip refills after cross-monitor leave"
+    );
     assert_eq!(dst.columns[0].members, [2]);
     assert_eq!(dst.active(), Some(2));
     assert!(check_strip_invariants(&src, 28).is_empty());
@@ -667,7 +1016,8 @@ fn mockup_cross_monitor_insert_rule() {
 #[test]
 fn mockup_spec_states_match_layout() {
     // Section 9.8: Percent-based atlas validation across three monitor sizes.
-    let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/scroll_states_spec.json");
+    let spec_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/scroll_states_spec.json");
     let raw = std::fs::read_to_string(&spec_path).expect("read docs/scroll_states_spec.json");
     let doc: serde_json::Value = serde_json::from_str(&raw).expect("parse scroll_states_spec.json");
     assert_eq!(doc["schema_version"].as_u64(), Some(1));
@@ -681,13 +1031,33 @@ fn mockup_spec_states_match_layout() {
         let orient = state["orientation"].as_str().unwrap_or("landscape");
         let areas = if orient == "portrait" {
             vec![
-                Rect { x: 0, y: 0, w: 1440, h: 2512 },
-                Rect { x: -1440, y: -1440, w: 1080, h: 1920 },
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1440,
+                    h: 2512,
+                },
+                Rect {
+                    x: -1440,
+                    y: -1440,
+                    w: 1080,
+                    h: 1920,
+                },
             ]
         } else {
             vec![
-                Rect { x: 0, y: 0, w: 1920, h: 1152 },
-                Rect { x: 0, y: -1440, w: 2560, h: 1392 },
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1152,
+                },
+                Rect {
+                    x: 0,
+                    y: -1440,
+                    w: 2560,
+                    h: 1392,
+                },
             ]
         };
 
@@ -703,8 +1073,15 @@ fn mockup_spec_states_match_layout() {
                 let peek = state["stack_peek_px"].as_i64().unwrap_or(28) as i32;
                 let col = &s.columns[0];
                 let shown = (0..col.members.len()).filter(|&j| col.shown(j)).count() as u64;
-                assert_eq!(Some(shown), state["shown_count"].as_u64(), "state {id} shown_count");
-                assert!(check_strip_invariants(&s, peek).is_empty(), "state {id} invariants");
+                assert_eq!(
+                    Some(shown),
+                    state["shown_count"].as_u64(),
+                    "state {id} shown_count"
+                );
+                assert!(
+                    check_strip_invariants(&s, peek).is_empty(),
+                    "state {id} invariants"
+                );
                 continue;
             }
             let count = state["windows"].as_u64().unwrap_or(0) as isize;
@@ -719,7 +1096,11 @@ fn mockup_spec_states_match_layout() {
             }
             s.reveal(peek);
             s.fill_gaps();
-            assert_eq!(s.columns.len() as u64, state["columns"].as_u64().unwrap_or(0), "state {id}");
+            assert_eq!(
+                s.columns.len() as u64,
+                state["columns"].as_u64().unwrap_or(0),
+                "state {id}"
+            );
             let rects = s.rects(28);
             if let Some(expected_tiles) = state["expected_tiles"].as_array() {
                 for et in expected_tiles {
@@ -734,11 +1115,18 @@ fn mockup_spec_states_match_layout() {
                         "state {id} area {area:?} tile {wid}: expected ({w_pct:.2}, {h_pct:.2}), observed ({obs_w_pct:.2}, {obs_h_pct:.2})"
                     );
                     if let Some(on_screen) = et["on_screen"].as_bool() {
-                        assert_eq!(s.in_view(wid), on_screen, "state {id} area {area:?} tile {wid} on_screen");
+                        assert_eq!(
+                            s.in_view(wid),
+                            on_screen,
+                            "state {id} area {area:?} tile {wid} on_screen"
+                        );
                     }
                 }
             }
-            assert!(check_strip_invariants(&s, 28).is_empty(), "state {id} invariants on {area:?}");
+            assert!(
+                check_strip_invariants(&s, 28).is_empty(),
+                "state {id} invariants on {area:?}"
+            );
         }
     }
 }
@@ -748,21 +1136,62 @@ fn drop_zone_is_the_middle_half_of_the_window_owner_decision() {
     // Owner decisions: N-012 (2026-11-22) replaced the mockup's outer 20 % / middle 60 % bands with a centre box;
     // after a 120 px box was hit by only 5 of 12 real four-finger drops, the owner chose "way bigger, like 50 %
     // of the window in the center". Everything else on a window swaps.
-    let r = Rect { x: 100, y: 50, w: 1200, h: 900 };
+    let r = Rect {
+        x: 100,
+        y: 50,
+        w: 1200,
+        h: 900,
+    };
     // #103: merge zones span full window height on landscape and full window width on portrait,
     // keeping the middle 50 % along the strip axis (half of the area).
-    assert_eq!(stack_zone(r, 50, true), Rect { x: 400, y: 50, w: 600, h: 900 });
+    assert_eq!(
+        stack_zone(r, 50, true),
+        Rect {
+            x: 400,
+            y: 50,
+            w: 600,
+            h: 900
+        }
+    );
     let zl = stack_zone(r, 50, true);
-    assert_eq!((zl.x + zl.w / 2, zl.y + zl.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "landscape centred");
-    assert_eq!((zl.y, zl.h), (r.y, r.h), "landscape spans full window height");
+    assert_eq!(
+        (zl.x + zl.w / 2, zl.y + zl.h / 2),
+        (r.x + r.w / 2, r.y + r.h / 2),
+        "landscape centred"
+    );
+    assert_eq!(
+        (zl.y, zl.h),
+        (r.y, r.h),
+        "landscape spans full window height"
+    );
     let half_l = (zl.w * zl.h) as f64 / (r.w * r.h) as f64;
-    assert!((half_l - 0.50).abs() < 0.01, "landscape: middle half width x full height = half area");
-    assert_eq!(stack_zone(r, 50, false), Rect { x: 100, y: 275, w: 1200, h: 450 });
+    assert!(
+        (half_l - 0.50).abs() < 0.01,
+        "landscape: middle half width x full height = half area"
+    );
+    assert_eq!(
+        stack_zone(r, 50, false),
+        Rect {
+            x: 100,
+            y: 275,
+            w: 1200,
+            h: 450
+        }
+    );
     let zp = stack_zone(r, 50, false);
-    assert_eq!((zp.x + zp.w / 2, zp.y + zp.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "portrait centred");
+    assert_eq!(
+        (zp.x + zp.w / 2, zp.y + zp.h / 2),
+        (r.x + r.w / 2, r.y + r.h / 2),
+        "portrait centred"
+    );
     assert_eq!((zp.x, zp.w), (r.x, r.w), "portrait spans full window width");
-    assert_eq!(stack_zone(r, 500, true), stack_zone(r, 95, true), "never the whole window: there must be room to swap");
-}#[test]
+    assert_eq!(
+        stack_zone(r, 500, true),
+        stack_zone(r, 95, true),
+        "never the whole window: there must be room to swap"
+    );
+}
+#[test]
 fn replay_three_finger_scroll_pad_trace_matches_within_tolerance() {
     let raw = include_str!("fixtures/gestures/three_finger_scroll_right.pad.log");
     let events = replay::parse_pad_trace(raw);
@@ -787,7 +1216,12 @@ fn replay_three_finger_group_roll_portrait_matches_within_tolerance() {
     let raw = include_str!("fixtures/gestures/three_finger_group_roll_portrait.pad.log");
     let events = replay::parse_pad_trace(raw);
     let cfg = replay::ReplayConfig {
-        area: Rect { x: 0, y: 0, w: 1440, h: 2512 },
+        area: Rect {
+            x: 0,
+            y: 0,
+            w: 1440,
+            h: 2512,
+        },
         window_count: 3,
         grouped: 3,
         settle_after_end: false,
@@ -807,7 +1241,10 @@ fn replay_three_finger_group_roll_portrait_matches_within_tolerance() {
         },
     );
     assert!(settled.final_frac.abs() <= 0.02);
-    assert_eq!(settled.final_active_member, 1, "settled onto next stack member");
+    assert_eq!(
+        settled.final_active_member, 1,
+        "settled onto next stack member"
+    );
 }
 
 #[test]
@@ -822,7 +1259,12 @@ fn replay_four_finger_drag_events_jsonl() {
 
 #[test]
 fn unmaximizing_or_shrinking_clamps_offset_no_empty_space_on_right() {
-    let area = Rect { x: 0, y: 0, w: 1920, h: 1032 };
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1032,
+    };
     let mut s = Strip::new(area);
     // Reproduce sequence found by prop_core: [Open(4, 146), Open(5, 325), Maximize, Maximize]
     // (preceded by columns filling past the viewport).
@@ -887,8 +1329,18 @@ fn pair(area: Rect) -> Strip {
     assert_eq!(s.columns[0].members, [1, 2]);
     s
 }
-const LANDSCAPE: Rect = Rect { x: 0, y: 0, w: 2560, h: 1392 };
-const PORTRAIT: Rect = Rect { x: -1440, y: -1859, w: 1440, h: 2512 };
+const LANDSCAPE: Rect = Rect {
+    x: 0,
+    y: 0,
+    w: 2560,
+    h: 1392,
+};
+const PORTRAIT: Rect = Rect {
+    x: -1440,
+    y: -1859,
+    w: 1440,
+    h: 2512,
+};
 
 #[test]
 fn n010_a_pair_does_not_loop_around() {
@@ -897,15 +1349,31 @@ fn n010_a_pair_does_not_loop_around() {
     for area in [LANDSCAPE, PORTRAIT] {
         let mut s = pair(area);
         s.roll(-0.4);
-        assert_eq!((s.active(), s.columns[0].frac), (Some(1), 0.), "{area:?}: rolling back from the first member stays put");
+        assert_eq!(
+            (s.active(), s.columns[0].frac),
+            (Some(1), 0.),
+            "{area:?}: rolling back from the first member stays put"
+        );
         s.roll(3.7);
-        assert_eq!((s.active(), s.columns[0].frac), (Some(2), 0.), "{area:?}: rolling forward stops at the last member");
+        assert_eq!(
+            (s.active(), s.columns[0].frac),
+            (Some(2), 0.),
+            "{area:?}: rolling forward stops at the last member"
+        );
         s.roll(-0.3);
         s.settle_roll();
-        assert_eq!(s.active(), Some(2), "{area:?}: a small roll back settles where it was");
+        assert_eq!(
+            s.active(),
+            Some(2),
+            "{area:?}: a small roll back settles where it was"
+        );
         s.roll(-0.7);
         s.settle_roll();
-        assert_eq!(s.active(), Some(1), "{area:?}: past half way back settles on the first member");
+        assert_eq!(
+            s.active(),
+            Some(1),
+            "{area:?}: past half way back settles on the first member"
+        );
         assert!(check_strip_invariants(&s, 96).is_empty());
     }
     // Three or more still wrap: the previous member peeks above, so there is something to come back to.
@@ -921,7 +1389,11 @@ fn n017_past_half_way_the_next_member_takes_over() {
         let mut s = pair(area);
         s.roll(0.55);
         s.settle_roll();
-        assert_eq!(s.active(), Some(2), "{area:?}: 55% settles on the next member");
+        assert_eq!(
+            s.active(),
+            Some(2),
+            "{area:?}: 55% settles on the next member"
+        );
         let mut s = pair(area);
         s.roll(0.45);
         s.settle_roll();
@@ -938,7 +1410,10 @@ fn a_member_sliding_out_stays_drawn_until_it_has_left() {
     // It used to be hidden at half way (a pop while rolling).
     let mut s = pair(LANDSCAPE);
     s.roll(0.7);
-    assert!(s.columns[0].shown(0), "70% rolled: the outgoing member is still partly in the column");
+    assert!(
+        s.columns[0].shown(0),
+        "70% rolled: the outgoing member is still partly in the column"
+    );
     assert!(s.columns[0].shown(1));
     s.settle_roll();
     let c = &s.columns[0];
@@ -946,8 +1421,15 @@ fn a_member_sliding_out_stays_drawn_until_it_has_left() {
     // Settled on the second member of a pair, the first peeks ABOVE it (it used to wrap round below).
     let rs = s.rects(96);
     let (first, second) = (rect_of(&rs, 1), rect_of(&rs, 2));
-    assert_eq!(first.y + first.h, second.y, "first member ends where the active second one starts");
-    assert_eq!(second.y, 96, "peek strip above, active member fills the rest");
+    assert_eq!(
+        first.y + first.h,
+        second.y,
+        "first member ends where the active second one starts"
+    );
+    assert_eq!(
+        second.y, 96,
+        "peek strip above, active member fills the rest"
+    );
     assert_eq!(second.y + second.h, LANDSCAPE.h);
 }
 
@@ -962,8 +1444,16 @@ fn n012_swap_exchanges_places_and_slots_keep_their_size() {
         s.swap(3, 1);
         let order: Vec<WindowId> = s.columns.iter().map(|c| c.members[0]).collect();
         assert_eq!(order, [3, 2, 1], "{area:?}");
-        assert_eq!(s.columns.iter().map(|c| c.length).collect::<Vec<_>>(), lengths, "{area:?}: slot sizes unchanged");
-        assert_eq!(s.active(), Some(3), "{area:?}: the dropped window has the focus");
+        assert_eq!(
+            s.columns.iter().map(|c| c.length).collect::<Vec<_>>(),
+            lengths,
+            "{area:?}: slot sizes unchanged"
+        );
+        assert_eq!(
+            s.active(),
+            Some(3),
+            "{area:?}: the dropped window has the focus"
+        );
         assert!(check_strip_invariants(&s, 96).is_empty());
     }
 }
@@ -982,7 +1472,6 @@ fn n018_swap_reorders_within_a_group() {
     }
 }
 
-
 #[test]
 fn gesture_survives_fingers_lifting_one_by_one() {
     // Trace 14:31:00.804: four fingers -> three at lift ended the drag and the remaining three started a
@@ -990,12 +1479,22 @@ fn gesture_survives_fingers_lifting_one_by_one() {
     let mut g = Gesture::default();
     g.sample(&[(0., 0.); 4], 12., 100.);
     assert_eq!(g.sample(&[(20., 0.); 4], 12., 100.), Swipe::DragStart);
-    assert_eq!(g.sample(&[(30., 0.); 4], 12., 100.), Swipe::DragMove(30., 0.));
+    assert_eq!(
+        g.sample(&[(30., 0.); 4], 12., 100.),
+        Swipe::DragMove(30., 0.)
+    );
     // One finger lifts: its absence moves the centroid, which must not count as travel.
     assert_eq!(g.sample(&[(80., 40.); 3], 12., 100.), Swipe::None);
-    assert_eq!(g.sample(&[(85., 40.); 3], 12., 100.), Swipe::DragMove(5., 0.));
+    assert_eq!(
+        g.sample(&[(85., 40.); 3], 12., 100.),
+        Swipe::DragMove(5., 0.)
+    );
     assert_eq!(g.sample(&[(85., 40.); 2], 12., 100.), Swipe::DragEnd);
-    assert_eq!(g.sample(&[], 12., 100.), Swipe::None, "no scroll and no second drop after the lift");
+    assert_eq!(
+        g.sample(&[], 12., 100.),
+        Swipe::None,
+        "no scroll and no second drop after the lift"
+    );
     // A fourth finger touching an established scroll (past the dead zone) does not pick a window up.
     let mut g = Gesture::default();
     g.sample(&[(0., 0.); 3], 12., 100.);
@@ -1009,7 +1508,16 @@ fn gesture_survives_fingers_lifting_one_by_one() {
 fn axis_lock_waits_for_a_clear_direction_owner_recording() {
     // First 8 centroids of gesture #5 in tests/fixtures/gestures/recorded/owner-mixed-3and4-finger.jsonl, a
     // sideways swipe (+142, -22 overall) whose fingers settled downwards first. It was locked vertical.
-    let start = [(110.3, 94.2), (110.5, 93.8), (110.8, 93.2), (110.8, 93.2), (111.1, 92.6), (111.6, 92.0), (112.3, 91.4), (113.4, 90.9)];
+    let start = [
+        (110.3, 94.2),
+        (110.5, 93.8),
+        (110.8, 93.2),
+        (110.8, 93.2),
+        (111.1, 92.6),
+        (111.6, 92.0),
+        (112.3, 91.4),
+        (113.4, 90.9),
+    ];
     let mut g = Gesture::default();
     let mut first = None;
     let mut c = start.to_vec();
@@ -1023,7 +1531,10 @@ fn axis_lock_waits_for_a_clear_direction_owner_recording() {
             _ => (),
         }
     }
-    assert!(matches!(first, Some(Swipe::Scroll(d)) if d > 0.), "sideways swipe must scroll sideways, got {first:?}");
+    assert!(
+        matches!(first, Some(Swipe::Scroll(d)) if d > 0.),
+        "sideways swipe must scroll sideways, got {first:?}"
+    );
     // A clean swipe still starts at 3 units.
     let mut g = Gesture::default();
     g.sample(&[(0., 0.); 3], 12., 60.);
@@ -1034,11 +1545,18 @@ fn axis_lock_waits_for_a_clear_direction_owner_recording() {
 fn contact_frames_of_any_finger_count_while_recording() {
     // Normally only 3 and 4 fingers are assembled; a recording (`all`) also wants 1, 2 and 5.
     let mut f = ContactFrame::default();
-    assert!(f.packet(1, [(1, (5., 5.))]).unwrap().is_empty(), "one finger is ignored normally");
+    assert!(
+        f.packet(1, [(1, (5., 5.))]).unwrap().is_empty(),
+        "one finger is ignored normally"
+    );
     let mut f = ContactFrame::default();
     f.all = true;
     assert_eq!(f.packet(1, [(1, (5., 5.))]), Some(vec![(5., 5.)]));
-    assert_eq!(f.packet(2, [(1, (5., 5.))]), None, "waits for the second finger");
+    assert_eq!(
+        f.packet(2, [(1, (5., 5.))]),
+        None,
+        "waits for the second finger"
+    );
     assert_eq!(f.packet(0, [(2, (9., 5.))]).unwrap().len(), 2);
     // The lift: a frame that opens with no finger touching (the contact is reported with its tip up).
     assert_eq!(f.packet(1, []), Some(vec![]));
@@ -1049,7 +1567,11 @@ fn classifier_names_the_owners_guided_recording() {
     // tests/fixtures/gestures/recorded/owner-guided-full-range.jsonl: 24 guided steps, recorded without
     // lift frames (split on time gaps). The owner did not follow every instruction; these steps they did.
     use planor::replay::{Kind, fits, identify, parse_events_jsonl, segments};
-    let text = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/gestures/recorded/owner-guided-full-range.jsonl")).unwrap();
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/gestures/recorded/owner-guided-full-range.jsonl"
+    ))
+    .unwrap();
     let segs = segments(&parse_events_jsonl(&text));
     assert_eq!(segs.len(), 114, "gestures found");
     // A gesture made in the get-ready gap that fits the step before belongs to that step.
@@ -1059,20 +1581,55 @@ fn classifier_names_the_owners_guided_recording() {
     };
     let in_step = |n: u32| -> Vec<planor::replay::Identified> {
         let p = format!("step {n}:");
-        segs.iter().filter(|s| s.label.starts_with(&p) && !late(s)).map(identify).collect()
+        segs.iter()
+            .filter(|s| s.label.starts_with(&p) && !late(s))
+            .map(identify)
+            .collect()
     };
     let all = |n: u32, f: &dyn Fn(&planor::replay::Identified) -> bool, what: &str| {
         let g = in_step(n);
-        assert!(!g.is_empty() && g.iter().all(f), "step {n} should be all {what}: {:?}", g.iter().map(|g| g.name()).collect::<Vec<_>>());
+        assert!(
+            !g.is_empty() && g.iter().all(f),
+            "step {n} should be all {what}: {:?}",
+            g.iter().map(|g| g.name()).collect::<Vec<_>>()
+        );
     };
-    all(4, &|g| g.fingers == 2 && g.kind == Kind::Tap, "two-finger taps");
-    all(7, &|g| g.fingers == 2 && g.kind == Kind::Scroll && (g.direction == "left" || g.direction == "right"), "sideways two-finger scrolls");
+    all(
+        4,
+        &|g| g.fingers == 2 && g.kind == Kind::Tap,
+        "two-finger taps",
+    );
+    all(
+        7,
+        &|g| {
+            g.fingers == 2
+                && g.kind == Kind::Scroll
+                && (g.direction == "left" || g.direction == "right")
+        },
+        "sideways two-finger scrolls",
+    );
     all(8, &|g| matches!(g.kind, Kind::Pinch { .. }), "pinches");
-    all(9, &|g| g.fingers == 3 && g.kind == Kind::Tap, "three-finger taps");
-    all(13, &|g| g.fingers == 3 && g.direction == "down", "three-finger swipes down");
-    all(15, &|g| g.fingers == 3 && g.direction == "right", "three-finger swipes right");
+    all(
+        9,
+        &|g| g.fingers == 3 && g.kind == Kind::Tap,
+        "three-finger taps",
+    );
+    all(
+        13,
+        &|g| g.fingers == 3 && g.direction == "down",
+        "three-finger swipes down",
+    );
+    all(
+        15,
+        &|g| g.fingers == 3 && g.direction == "right",
+        "three-finger swipes right",
+    );
     all(16, &|g| g.direction.contains('-'), "diagonals");
-    all(17, &|g| g.fingers == 4 && g.kind == Kind::Tap, "four-finger taps");
+    all(
+        17,
+        &|g| g.fingers == 4 && g.kind == Kind::Tap,
+        "four-finger taps",
+    );
     all(22, &|g| g.kind == Kind::Circle, "circles");
     // Overall agreement with the instructions (late gestures may belong to the step before).
     let ok = segs
@@ -1092,7 +1649,11 @@ fn fingers_landing_one_by_one_still_make_a_four_finger_drag() {
     let mut g = Gesture::default();
     g.sample(&[(0., 0.); 3], 12., 100.);
     assert_eq!(g.sample(&[(4., 0.); 3], 12., 100.), Swipe::Scroll(4.));
-    assert_eq!(g.sample(&[(4., 0.); 4], 12., 100.), Swipe::ScrollEnd, "young scroll gives way");
+    assert_eq!(
+        g.sample(&[(4., 0.); 4], 12., 100.),
+        Swipe::ScrollEnd,
+        "young scroll gives way"
+    );
     g.sample(&[(4., 0.); 4], 12., 100.);
     assert_eq!(g.sample(&[(30., 0.); 4], 12., 100.), Swipe::DragStart);
 }
@@ -1106,7 +1667,11 @@ fn five_fingers_veto_and_cancel_what_the_first_fingers_started() {
     assert_eq!(g.sample(&[(20., 0.); 4], 12., 100.), Swipe::DragStart);
     assert_eq!(g.sample(&[(25., 0.); 5], 12., 100.), Swipe::DragCancel);
     assert_eq!(g.sample(&[(90., 0.); 5], 12., 100.), Swipe::None);
-    assert_eq!(g.sample(&[(150., 0.); 4], 12., 100.), Swipe::None, "lifting back through 4 fingers starts nothing");
+    assert_eq!(
+        g.sample(&[(150., 0.); 4], 12., 100.),
+        Swipe::None,
+        "lifting back through 4 fingers starts nothing"
+    );
     assert_eq!(g.sample(&[(160., 0.); 3], 12., 100.), Swipe::None);
     assert_eq!(g.sample(&[], 12., 100.), Swipe::None);
     // After the lift, gestures work again.
@@ -1146,10 +1711,20 @@ fn cover_slow_window_fades_spinner_and_rotates_rate_independently() {
     let v_start = cover::eval_cover(cfg, cfg.spinner_delay_ms, None, false);
     assert!(v_start.active && v_start.spinner_alpha == 0.0);
 
-    let v_mid = cover::eval_cover(cfg, cfg.spinner_delay_ms + cfg.spinner_fade_ms / 2, None, false);
+    let v_mid = cover::eval_cover(
+        cfg,
+        cfg.spinner_delay_ms + cfg.spinner_fade_ms / 2,
+        None,
+        false,
+    );
     assert!(v_mid.active && v_mid.spinner_alpha > 0.45 && v_mid.spinner_alpha < 0.55);
 
-    let v_full = cover::eval_cover(cfg, cfg.spinner_delay_ms + cfg.spinner_fade_ms + 20, None, false);
+    let v_full = cover::eval_cover(
+        cfg,
+        cfg.spinner_delay_ms + cfg.spinner_fade_ms + 20,
+        None,
+        false,
+    );
     assert!(v_full.active && (v_full.spinner_alpha - 1.0).abs() < 1e-6);
 
     // Spinner angle is pure elapsed wall time, so 24/48/60/120/240 Hz VRR steps advance at the exact same speed.
@@ -1201,8 +1776,15 @@ fn pacing_drr_and_vrr_frame_classification_uses_per_frame_refresh() {
     for &hz in &[120.0, 120.0, 72.0, 48.0, 24.0, 60.0, 120.0, 240.0] {
         let r = pacing::period_us(hz);
         let interval = (r * 1.05).round() as u64;
-        let s = FrameSample { interval_us: interval, refresh_us: r };
-        assert_eq!(pacing::classify_frame(s), FrameVerdict::Ok, "healthy frame at {hz} Hz");
+        let s = FrameSample {
+            interval_us: interval,
+            refresh_us: r,
+        };
+        assert_eq!(
+            pacing::classify_frame(s),
+            FrameVerdict::Ok,
+            "healthy frame at {hz} Hz"
+        );
         samples.push(s);
     }
     let clean = pacing::summarize_frames(&samples);
@@ -1213,15 +1795,24 @@ fn pacing_drr_and_vrr_frame_classification_uses_per_frame_refresh() {
 
     // Real hitch at 120 Hz (15 ms gap when refresh is 8.33 ms) is flagged Late, while 19 ms at 48 Hz is Ok!
     assert_eq!(
-        pacing::classify_frame(FrameSample { interval_us: 15_000, refresh_us: pacing::period_us(120.0) }),
+        pacing::classify_frame(FrameSample {
+            interval_us: 15_000,
+            refresh_us: pacing::period_us(120.0)
+        }),
         FrameVerdict::Late
     );
     assert_eq!(
-        pacing::classify_frame(FrameSample { interval_us: 23_000, refresh_us: pacing::period_us(120.0) }),
+        pacing::classify_frame(FrameSample {
+            interval_us: 23_000,
+            refresh_us: pacing::period_us(120.0)
+        }),
         FrameVerdict::Dropped
     );
     assert_eq!(
-        pacing::classify_frame(FrameSample { interval_us: 19_000, refresh_us: pacing::period_us(48.0) }),
+        pacing::classify_frame(FrameSample {
+            interval_us: 19_000,
+            refresh_us: pacing::period_us(48.0)
+        }),
         FrameVerdict::Ok
     );
 }
@@ -1235,7 +1826,10 @@ fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
         let mut empty = Strip::new(area);
         empty.resize(0, 500, false);
         empty.resize(0, 500, true);
-        assert!(empty.columns.is_empty(), "{area:?}: empty resize stays empty");
+        assert!(
+            empty.columns.is_empty(),
+            "{area:?}: empty resize stays empty"
+        );
 
         let mut s = Strip::new(area);
         s.insert(1, 200);
@@ -1266,16 +1860,26 @@ fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
             three_lens,
             "{area:?}: 3-col col 0 leading-edge resize ignored"
         );
-        assert_eq!(s.offset, off_before, "{area:?}: ignored col 0 leading resize preserves offset");
+        assert_eq!(
+            s.offset, off_before,
+            "{area:?}: ignored col 0 leading resize preserves offset"
+        );
 
         // 3. Zero, negative, i32::MIN, and sub-minimum lengths clamp to >= minimum with zero violations.
         for bad in [0, -1, -500, i32::MIN, 50] {
             let mut single = Strip::new(area);
             single.insert(1, 250);
             single.resize(0, bad, false);
-            assert!(single.columns[0].length >= 250, "{area:?}: single col length {} < min on {bad}", single.columns[0].length);
+            assert!(
+                single.columns[0].length >= 250,
+                "{area:?}: single col length {} < min on {bad}",
+                single.columns[0].length
+            );
             single.fill_gaps();
-            assert_eq!(single.columns[0].length, span, "{area:?}: lone column snap-back on {bad}");
+            assert_eq!(
+                single.columns[0].length, span,
+                "{area:?}: lone column snap-back on {bad}"
+            );
             assert!(check_strip_invariants(&single, 28).is_empty());
 
             let mut three = Strip::new(area);
@@ -1284,10 +1888,19 @@ fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
             three.insert(3, 300);
             three.resize(1, bad, false);
             three.resize(2, bad, true);
-            assert!(three.columns[1].length >= 300, "{area:?}: col 1 clamped on {bad}");
-            assert!(three.columns[2].length >= 300, "{area:?}: col 2 clamped on {bad}");
+            assert!(
+                three.columns[1].length >= 300,
+                "{area:?}: col 1 clamped on {bad}"
+            );
+            assert!(
+                three.columns[2].length >= 300,
+                "{area:?}: col 2 clamped on {bad}"
+            );
             three.fill_gaps();
-            assert!(check_strip_invariants(&three, 28).is_empty(), "{area:?}: invariants after bad len {bad}");
+            assert!(
+                check_strip_invariants(&three, 28).is_empty(),
+                "{area:?}: invariants after bad len {bad}"
+            );
         }
 
         // 4. Pair squeeze below neighbour minimum and adversarial i32::MAX do not overflow or crush neighbour.
@@ -1296,8 +1909,16 @@ fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
             p.insert(1, 450);
             p.insert(2, 450);
             p.resize(idx, i32::MAX, leading);
-            assert!(p.columns[0].length >= 450 && p.columns[1].length >= 450, "{area:?}: neighbour crushed ({idx}, {leading}): {:?}", p.columns);
-            assert_eq!(p.columns[0].length + p.columns[1].length + p.gap, span, "{area:?}: pair sum must still fill monitor");
+            assert!(
+                p.columns[0].length >= 450 && p.columns[1].length >= 450,
+                "{area:?}: neighbour crushed ({idx}, {leading}): {:?}",
+                p.columns
+            );
+            assert_eq!(
+                p.columns[0].length + p.columns[1].length + p.gap,
+                span,
+                "{area:?}: pair sum must still fill monitor"
+            );
             assert!(check_strip_invariants(&p, 28).is_empty());
         }
 
@@ -1322,7 +1943,10 @@ fn resize_disallowed_cases_are_rejected_or_clamped_on_both_orientations() {
         fs.resize(1, 700, true);
         fs.fullscreen(false, area);
         fs.fill_gaps();
-        assert!(check_strip_invariants(&fs, 28).is_empty(), "{area:?}: invariants after resize in fullscreen");
+        assert!(
+            check_strip_invariants(&fs, 28).is_empty(),
+            "{area:?}: invariants after resize in fullscreen"
+        );
     }
 }
 
@@ -1346,15 +1970,31 @@ fn resize_varied_valid_operations_on_landscape_and_portrait() {
         let trailing_before = axis_start(r2_before) + axis_len(r2_before);
         s.resize(1, s.columns[1].length + 90, true);
         let r2_after = rect_of_id(&s, 2);
-        assert_eq!(axis_len(r2_after), axis_len(r2_before) + 90, "{area:?}: col 1 grew from leading edge");
-        assert_eq!(axis_start(r2_after) + axis_len(r2_after), trailing_before, "{area:?}: col 1 trailing edge anchored");
+        assert_eq!(
+            axis_len(r2_after),
+            axis_len(r2_before) + 90,
+            "{area:?}: col 1 grew from leading edge"
+        );
+        assert_eq!(
+            axis_start(r2_after) + axis_len(r2_after),
+            trailing_before,
+            "{area:?}: col 1 trailing edge anchored"
+        );
 
         let r3_before = rect_of_id(&s, 3);
         let r3_trailing = axis_start(r3_before) + axis_len(r3_before);
         s.resize(2, s.columns[2].length - 60, true);
         let r3_after = rect_of_id(&s, 3);
-        assert_eq!(axis_len(r3_after), axis_len(r3_before) - 60, "{area:?}: col 2 shrank from leading edge");
-        assert_eq!(axis_start(r3_after) + axis_len(r3_after), r3_trailing, "{area:?}: col 2 trailing edge anchored");
+        assert_eq!(
+            axis_len(r3_after),
+            axis_len(r3_before) - 60,
+            "{area:?}: col 2 shrank from leading edge"
+        );
+        assert_eq!(
+            axis_start(r3_after) + axis_len(r3_after),
+            r3_trailing,
+            "{area:?}: col 2 trailing edge anchored"
+        );
 
         s.resize(0, s.columns[0].length + 75, false);
         s.fill_gaps();
@@ -1374,10 +2014,22 @@ fn resize_varied_valid_operations_on_landscape_and_portrait() {
         let mut tight = Strip::new(area);
         tight.insert(10, 400);
         tight.insert(11, 400);
-        tight.set_area(Rect { x: 0, y: 0, w: 600, h: 400 });
-        assert!(tight.columns.iter().all(|c| c.length >= 400), "set_area clamps to minimum when area shrinks below mins");
+        tight.set_area(Rect {
+            x: 0,
+            y: 0,
+            w: 600,
+            h: 400,
+        });
+        assert!(
+            tight.columns.iter().all(|c| c.length >= 400),
+            "set_area clamps to minimum when area shrinks below mins"
+        );
         assert!(check_strip_invariants(&tight, 28).is_empty());
-        let other = if area.horizontal() { PORTRAIT } else { LANDSCAPE };
+        let other = if area.horizontal() {
+            PORTRAIT
+        } else {
+            LANDSCAPE
+        };
         tight.set_area(other);
         tight.fill_gaps();
         assert!(check_strip_invariants(&tight, 28).is_empty());
@@ -1396,15 +2048,27 @@ fn remove_focuses_right_then_left_then_empty() {
 
         // Removing a non-rightmost focused window selects the next window to the right.
         s.remove(2);
-        assert_eq!(s.active(), Some(3), "{area:?}: should focus window to the right");
+        assert_eq!(
+            s.active(),
+            Some(3),
+            "{area:?}: should focus window to the right"
+        );
 
         // Removing the rightmost focused window selects the nearest window to the left.
         s.remove(3);
-        assert_eq!(s.active(), Some(1), "{area:?}: should focus window to the left");
+        assert_eq!(
+            s.active(),
+            Some(1),
+            "{area:?}: should focus window to the left"
+        );
 
         // Removing the only remaining window leaves no active window.
         s.remove(1);
-        assert_eq!(s.active(), None, "{area:?}: empty strip has no active window");
+        assert_eq!(
+            s.active(),
+            None,
+            "{area:?}: empty strip has no active window"
+        );
     }
 }
 #[test]
@@ -1413,9 +2077,24 @@ fn monitor_rays_on_owner_layout_reach_each_neighbour() {
     // up-left of the laptop (its bottom part beside the laptop's left edge). Rays start at the drag's actual
     // start point (the cursor over the picked-up window), and a ray that would cross a third monitor on the way
     // to its target is not offered: the carry would enter that monitor first and the drop would land there.
-    let laptop = Rect { x: 0, y: 0, w: 1920, h: 1200 };
-    let above = Rect { x: 0, y: -1440, w: 2560, h: 1440 };
-    let portrait = Rect { x: -1440, y: -1800, w: 1440, h: 2560 };
+    let laptop = Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1200,
+    };
+    let above = Rect {
+        x: 0,
+        y: -1440,
+        w: 2560,
+        h: 1440,
+    };
+    let portrait = Rect {
+        x: -1440,
+        y: -1800,
+        w: 1440,
+        h: 2560,
+    };
     let all = [laptop, above, portrait];
     let centre = |r: Rect| (r.x as f64 + r.w as f64 * 0.5, r.y as f64 + r.h as f64 * 0.5);
 
@@ -1423,20 +2102,41 @@ fn monitor_rays_on_owner_layout_reach_each_neighbour() {
     // portrait. No ray along the strip axis (the strip itself goes left/right).
     let w101 = (480., 570.);
     let rays = monitor_rays(laptop, &all, true, w101);
-    assert_eq!(rays.len(), 2, "laptop from {w101:?}: one ray to each neighbour: {rays:?}");
+    assert_eq!(
+        rays.len(),
+        2,
+        "laptop from {w101:?}: one ray to each neighbour: {rays:?}"
+    );
     for (rx, ry) in &rays {
         assert!((rx.hypot(*ry) - 1.).abs() < 1e-9, "unit rays: {rays:?}");
         assert!(*ry < -0.25, "laptop: both neighbours are up: {rays:?}");
     }
-    assert!(rays.iter().any(|r| r.0 < -0.25), "laptop: a diagonal up-left ray toward the portrait: {rays:?}");
+    assert!(
+        rays.iter().any(|r| r.0 < -0.25),
+        "laptop: a diagonal up-left ray toward the portrait: {rays:?}"
+    );
     // Window 101 sits under the monitor above, so its ray is the perpendicular: exactly straight up.
-    assert!(rays.contains(&(0., -1.)), "laptop: a straight-up ray toward the monitor above: {rays:?}");
+    assert!(
+        rays.contains(&(0., -1.)),
+        "laptop: a straight-up ray toward the monitor above: {rays:?}"
+    );
     // A finger swipe up-left picks the portrait ray, straight up the monitor-above ray, sideways none.
     let up_left = best_ray(-300., -260., &rays).expect("up-left swipe picks a ray");
-    assert!(up_left.0 < -0.25, "up-left swipe goes toward the portrait: {up_left:?}");
+    assert!(
+        up_left.0 < -0.25,
+        "up-left swipe goes toward the portrait: {up_left:?}"
+    );
     let up = best_ray(40., -300., &rays).expect("up swipe picks a ray");
-    assert_eq!(up, (0., -1.), "up swipe goes straight up toward the monitor above");
-    assert_eq!(best_ray(300., 0., &rays), None, "a swipe along the strip picks no monitor ray");
+    assert_eq!(
+        up,
+        (0., -1.),
+        "up swipe goes straight up toward the monitor above"
+    );
+    assert_eq!(
+        best_ray(300., 0., &rays),
+        None,
+        "a swipe along the strip picks no monitor ray"
+    );
     assert_eq!(best_ray(0., 300., &rays), None, "nothing below the laptop");
 
     // (#102 review) From the laptop's right half (window 102's centre at (1440, 570)) the centre line to the
@@ -1445,21 +2145,48 @@ fn monitor_rays_on_owner_layout_reach_each_neighbour() {
     // The strip axis reaches the portrait directly from this cursor, so only the upward ray stays.
     let w102 = (1440., 570.);
     let rays = monitor_rays(laptop, &all, true, w102);
-    assert_eq!(rays.len(), 1, "laptop from {w102:?}: the portrait centre ray crosses the monitor above: {rays:?}");
-    assert!(rays[0].1 < -0.9 && rays[0].0.abs() < 0.5, "the remaining ray goes up toward the monitor above: {rays:?}");
+    assert_eq!(
+        rays.len(),
+        1,
+        "laptop from {w102:?}: the portrait centre ray crosses the monitor above: {rays:?}"
+    );
+    assert!(
+        rays[0].1 < -0.9 && rays[0].0.abs() < 0.5,
+        "the remaining ray goes up toward the monitor above: {rays:?}"
+    );
 
     // From the portrait (vertical strip, window 301's centre): right toward the monitor above and down-right
     // toward the laptop. The centre line to the laptop clips the monitor above's corner, so the laptop ray
     // falls back to the nearest point of the laptop (its top-left corner) and still points down-right.
-    let w301 = centre(Rect { x: -1440, y: -1800, w: 1440, h: 1256 });
+    let w301 = centre(Rect {
+        x: -1440,
+        y: -1800,
+        w: 1440,
+        h: 1256,
+    });
     let rays = monitor_rays(portrait, &all, false, w301);
-    assert_eq!(rays.len(), 2, "portrait from {w301:?}: one ray to each neighbour: {rays:?}");
-    assert!(rays.iter().all(|r| r.0 > 0.25), "portrait: both neighbours are to the right: {rays:?}");
+    assert_eq!(
+        rays.len(),
+        2,
+        "portrait from {w301:?}: one ray to each neighbour: {rays:?}"
+    );
+    assert!(
+        rays.iter().all(|r| r.0 > 0.25),
+        "portrait: both neighbours are to the right: {rays:?}"
+    );
     let down_right = best_ray(300., 250., &rays).expect("down-right swipe picks a ray");
-    assert!(down_right.1 > 0., "down-right swipe goes toward the laptop: {down_right:?}");
+    assert!(
+        down_right.1 > 0.,
+        "down-right swipe goes toward the laptop: {down_right:?}"
+    );
 
     // A monitor two hops away (not touching) gets no ray.
-    let far = Rect { x: 5000, y: 0, w: 1920, h: 1080 };
+    let far = Rect {
+        x: 5000,
+        y: 0,
+        w: 1920,
+        h: 1080,
+    };
     assert!(
         monitor_rays(laptop, &[laptop, far], true, centre(laptop)).is_empty(),
         "non-adjacent monitors get no ray"
@@ -1487,12 +2214,31 @@ fn locked_drag_start_strip_axis_wins_ties_against_a_diagonal_monitor_ray() {
     // Sideways with some upward drift: along 30, cross 12, proj onto the ray 31.2 > 30 but < 1.2 * 30.
     let (dx, dy) = (-30., -12.);
     let proj = dx * ray.0 + dy * ray.1;
-    assert!(proj > dx.abs() && proj < RAY_LEAD_MARGIN * dx.abs(), "the case is a near tie: proj {proj}");
-    assert_eq!(start(dx, dy), (Swipe::DragStart, false, None), "a strip-qualifying start keeps the strip axis");
+    assert!(
+        proj > dx.abs() && proj < RAY_LEAD_MARGIN * dx.abs(),
+        "the case is a near tie: proj {proj}"
+    );
+    assert_eq!(
+        start(dx, dy),
+        (Swipe::DragStart, false, None),
+        "a strip-qualifying start keeps the strip axis"
+    );
     // Clearly diagonal (strip axis does not qualify): the monitor ray wins.
-    assert_eq!(start(-30., -22.), (Swipe::DragStart, true, Some(ray)), "a diagonal start takes the monitor ray");
+    assert_eq!(
+        start(-30., -22.),
+        (Swipe::DragStart, true, Some(ray)),
+        "a diagonal start takes the monitor ray"
+    );
     // Along the ray exactly: the ray wins.
-    assert_eq!(start(-24., -18.), (Swipe::DragStart, true, Some(ray)), "a start along the ray takes it");
+    assert_eq!(
+        start(-24., -18.),
+        (Swipe::DragStart, true, Some(ray)),
+        "a start along the ray takes it"
+    );
     // Pure strip-axis start: no ray.
-    assert_eq!(start(-30., 0.), (Swipe::DragStart, false, None), "a straight start keeps the strip axis");
+    assert_eq!(
+        start(-30., 0.),
+        (Swipe::DragStart, false, None),
+        "a straight start keeps the strip axis"
+    );
 }

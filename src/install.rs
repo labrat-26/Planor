@@ -17,7 +17,10 @@ pub fn install_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("PLANOR_INSTALL_DIR") {
         return Ok(PathBuf::from(dir));
     }
-    Ok(PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("missing LOCALAPPDATA")?).join("Planor"))
+    Ok(
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").ok_or("missing LOCALAPPDATA")?)
+            .join("Planor"),
+    )
 }
 pub fn installed_exe() -> Result<PathBuf> {
     Ok(install_dir()?.join("planor.exe"))
@@ -26,7 +29,10 @@ pub fn installed_exe() -> Result<PathBuf> {
 fn normal(p: &Path) -> String {
     let p = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     let s = p.to_string_lossy().to_lowercase().replace('/', "\\");
-    s.strip_prefix(r"\\?\").unwrap_or(&s).trim_end_matches('\\').to_string()
+    s.strip_prefix(r"\\?\")
+        .unwrap_or(&s)
+        .trim_end_matches('\\')
+        .to_string()
 }
 /// Whether `running` is the installed copy (case, slashes and `\\?\` prefixes do not matter).
 pub fn is_installed_exe(running: &Path, installed: &Path) -> bool {
@@ -57,7 +63,11 @@ fn open_run_key(access: u32) -> io::Result<HKEY> {
             &mut key,
             std::ptr::null_mut(),
         );
-        if status != 0 { Err(io::Error::from_raw_os_error(status as i32)) } else { Ok(key) }
+        if status != 0 {
+            Err(io::Error::from_raw_os_error(status as i32))
+        } else {
+            Ok(key)
+        }
     }
 }
 fn write_run_value(value: Option<&str>) -> Result<()> {
@@ -67,7 +77,14 @@ fn write_run_value(value: Option<&str>) -> Result<()> {
         let status = match value {
             Some(v) => {
                 let data = wide(v);
-                RegSetValueExW(key, name.as_ptr(), 0, REG_SZ, data.as_ptr().cast(), (data.len() * 2) as u32)
+                RegSetValueExW(
+                    key,
+                    name.as_ptr(),
+                    0,
+                    REG_SZ,
+                    data.as_ptr().cast(),
+                    (data.len() * 2) as u32,
+                )
             }
             None => RegDeleteValueW(key, name.as_ptr()),
         };
@@ -83,15 +100,32 @@ fn read_run_value() -> Option<String> {
         let key = open_run_key(KEY_QUERY_VALUE).ok()?;
         let name = wide(RUN_NAME);
         let (mut ty, mut len) = (0u32, 0u32);
-        let mut status = RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut ty, std::ptr::null_mut(), &mut len);
+        let mut status = RegQueryValueExW(
+            key,
+            name.as_ptr(),
+            std::ptr::null(),
+            &mut ty,
+            std::ptr::null_mut(),
+            &mut len,
+        );
         let mut data = vec![0u16; len as usize / 2 + 1];
         if status == 0 {
             len = (data.len() * 2) as u32;
-            status = RegQueryValueExW(key, name.as_ptr(), std::ptr::null(), &mut ty, data.as_mut_ptr().cast(), &mut len);
+            status = RegQueryValueExW(
+                key,
+                name.as_ptr(),
+                std::ptr::null(),
+                &mut ty,
+                data.as_mut_ptr().cast(),
+                &mut len,
+            );
         }
         RegCloseKey(key);
-        (status == 0 && ty == REG_SZ)
-            .then(|| String::from_utf16_lossy(&data[..(len as usize / 2)]).trim_end_matches('\0').to_string())
+        (status == 0 && ty == REG_SZ).then(|| {
+            String::from_utf16_lossy(&data[..(len as usize / 2)])
+                .trim_end_matches('\0')
+                .to_string()
+        })
     }
 }
 
@@ -107,7 +141,9 @@ pub fn set_autostart(on: bool) -> Result<()> {
     write_run_value(Some(&run_value(&exe)))
 }
 pub fn autostart_enabled() -> bool {
-    installed_exe().ok().is_some_and(|exe| read_run_value().as_deref() == Some(run_value(&exe).as_str()))
+    installed_exe()
+        .ok()
+        .is_some_and(|exe| read_run_value().as_deref() == Some(run_value(&exe).as_str()))
 }
 
 /// Ask whatever daemon owns the pipe to stop and wait (up to 6 s) until the pipe is gone.
@@ -147,13 +183,21 @@ pub fn replace_file(src: &Path, dest: &Path, attempts: u32) -> io::Result<()> {
 
 fn spawn_detached(exe: &Path) -> io::Result<()> {
     use std::os::windows::process::CommandExt;
-    std::process::Command::new(exe).arg("start").creation_flags(0x0800_0008).spawn().map(|_| ())
+    std::process::Command::new(exe)
+        .arg("start")
+        .creation_flags(0x0800_0008)
+        .spawn()
+        .map(|_| ())
 }
 
 /// Which exe to bring back when an install fails after the running Planor was stopped: the previous installed
 /// copy if there was one, otherwise the copy the user started the install from.
 pub fn restart_target(installed_before: bool, installed: &Path, current: &Path) -> PathBuf {
-    if installed_before { installed.to_path_buf() } else { current.to_path_buf() }
+    if installed_before {
+        installed.to_path_buf()
+    } else {
+        current.to_path_buf()
+    }
 }
 
 /// Install: stop the running daemon, copy this exe into the install dir, start the installed copy.
@@ -221,14 +265,23 @@ mod tests {
     #[test]
     fn is_installed_exe_ignores_case_and_slashes() {
         let a = Path::new(r"C:\Users\Me\AppData\Local\Planor\planor.exe");
-        assert!(is_installed_exe(a, Path::new("c:/users/me/appdata/local/PLANOR/Planor.exe")));
-        assert!(!is_installed_exe(a, Path::new(r"C:\repo\target\release\planor.exe")));
+        assert!(is_installed_exe(
+            a,
+            Path::new("c:/users/me/appdata/local/PLANOR/Planor.exe")
+        ));
+        assert!(!is_installed_exe(
+            a,
+            Path::new(r"C:\repo\target\release\planor.exe")
+        ));
     }
 
     #[test]
     fn run_value_quotes_paths_with_spaces_and_unicode() {
         let p = PathBuf::from(r"C:\Users\Zoë Ünï\AppData\Local\Planor\planor.exe");
-        assert_eq!(run_value(&p), "\"C:\\Users\\Zoë Ünï\\AppData\\Local\\Planor\\planor.exe\" start");
+        assert_eq!(
+            run_value(&p),
+            "\"C:\\Users\\Zoë Ünï\\AppData\\Local\\Planor\\planor.exe\" start"
+        );
     }
 
     #[test]
@@ -239,7 +292,6 @@ mod tests {
         assert_eq!(err, "not installed");
         assert!(!autostart_enabled());
     }
-
 
     #[test]
     fn a_failed_copy_leaves_no_temp_file_and_the_old_exe() {
@@ -266,10 +318,17 @@ mod tests {
         std::fs::write(&src, b"new").unwrap();
         std::fs::write(&dest, b"old").unwrap();
         // Held open without delete sharing: the rename must fail and the old file survive.
-        let held = std::fs::OpenOptions::new().read(true).share_mode(1).open(&dest).unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&dest)
+            .unwrap();
         assert!(replace_file(&src, &dest, 2).is_err());
         assert_eq!(std::fs::read(&dest).unwrap(), b"old");
-        assert!(!dest.with_extension("exe.tmp").exists(), "temp copy cleaned up");
+        assert!(
+            !dest.with_extension("exe.tmp").exists(),
+            "temp copy cleaned up"
+        );
         drop(held);
         replace_file(&src, &dest, 2).unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");

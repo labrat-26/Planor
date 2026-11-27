@@ -9,7 +9,7 @@ use crate::{
     image::{self, Image},
     util,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// Total size the review folder may reach; later items are left out beyond it.
@@ -18,7 +18,13 @@ const CROP_WIDTH: i32 = 800;
 const OVERVIEW_WIDTH: i32 = 480;
 
 /// Kinds that have no picture worth looking at (they are measured from the clock or the events).
-const NO_IMAGE_KINDS: [&str; 5] = ["capture_lost", "frames_dropped", "topology_change", "pacing", "lag"];
+const NO_IMAGE_KINDS: [&str; 5] = [
+    "capture_lost",
+    "frames_dropped",
+    "topology_change",
+    "pacing",
+    "lag",
+];
 
 pub const PROMPT: &str = "\
 # Visual check of flagged Planor screen moments
@@ -64,7 +70,13 @@ fn brief_event(e: &Value) -> Option<Value> {
 }
 
 /// One manifest item from a suspect, its check and the report. Pure, so it is unit-testable.
-pub fn manifest_item(id: usize, suspect: &Value, check: Option<&Value>, image: &str, overview: Option<&str>) -> Value {
+pub fn manifest_item(
+    id: usize,
+    suspect: &Value,
+    check: Option<&Value>,
+    image: &str,
+    overview: Option<&str>,
+) -> Value {
     let nearby: Vec<Value> = suspect
         .get("nearby_events")
         .and_then(|n| n.as_array())
@@ -90,7 +102,11 @@ pub fn manifest_item(id: usize, suspect: &Value, check: Option<&Value>, image: &
 
 /// Which suspects go into the pack: those with a crop, not of an image-less kind, failures first
 /// (unmeasurable only on request), near-duplicates (same kind and monitor within 2 s) dropped, capped.
-pub fn select_suspects(suspects: &[Value], max_images: usize, include_unmeasurable: bool) -> Vec<Value> {
+pub fn select_suspects(
+    suspects: &[Value],
+    max_images: usize,
+    include_unmeasurable: bool,
+) -> Vec<Value> {
     let mut candidates: Vec<&Value> = suspects
         .iter()
         .filter(|s| s.get("crop").and_then(|c| c.as_str()).is_some())
@@ -104,7 +120,10 @@ pub fn select_suspects(suspects: &[Value], max_images: usize, include_unmeasurab
         .collect();
     candidates.sort_by_key(|s| {
         let fail = s.get("verdict").and_then(|v| v.as_str()) == Some("fail");
-        (!fail, s.get("time_qpc_us").and_then(|t| t.as_i64()).unwrap_or(0))
+        (
+            !fail,
+            s.get("time_qpc_us").and_then(|t| t.as_i64()).unwrap_or(0),
+        )
     });
     let mut out: Vec<Value> = Vec::new();
     for s in candidates {
@@ -114,7 +133,8 @@ pub fn select_suspects(suspects: &[Value], max_images: usize, include_unmeasurab
         let duplicate = out.iter().any(|o| {
             o.get("kind").and_then(|k| k.as_str()) == Some(kind)
                 && o.get("monitor").and_then(|m| m.as_i64()) == monitor
-                && (o.get("time_qpc_us").and_then(|x| x.as_i64()).unwrap_or(0) - t).abs() < 2_000_000
+                && (o.get("time_qpc_us").and_then(|x| x.as_i64()).unwrap_or(0) - t).abs()
+                    < 2_000_000
         });
         if duplicate {
             continue;
@@ -131,20 +151,23 @@ pub fn run(dir: &Path, max_images: usize) -> util::anyhow_lite::Result<()> {
     run_with(dir, max_images, false)
 }
 
-pub fn run_with(dir: &Path, max_images: usize, include_unmeasurable: bool) -> util::anyhow_lite::Result<()> {
+pub fn run_with(
+    dir: &Path,
+    max_images: usize,
+    include_unmeasurable: bool,
+) -> util::anyhow_lite::Result<()> {
     let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
     let suspects_path = dir.join("suspects").join("suspects.json");
     let report_path = dir.join("report.json");
-    let suspects: Vec<Value> = serde_json::from_str(
-        &std::fs::read_to_string(&suspects_path).map_err(|e| {
+    let suspects: Vec<Value> =
+        serde_json::from_str(&std::fs::read_to_string(&suspects_path).map_err(|e| {
             util::fmt_err(format!(
                 "reading {}: {e} (run `planor-rec analyze {}` first)",
                 suspects_path.display(),
                 dir.display()
             ))
-        })?,
-    )
-    .map_err(|e| util::fmt_err(format!("parsing {}: {e}", suspects_path.display())))?;
+        })?)
+        .map_err(|e| util::fmt_err(format!("parsing {}: {e}", suspects_path.display())))?;
     let report: Value = std::fs::read_to_string(&report_path)
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
@@ -175,7 +198,12 @@ pub fn run_with(dir: &Path, max_images: usize, include_unmeasurable: bool) -> ut
         let kind = s.get("kind").and_then(|k| k.as_str()).unwrap_or("finding");
         let monitor = s.get("monitor").and_then(|m| m.as_i64()).unwrap_or(0);
         let time_ms = s.get("time_ms").and_then(|t| t.as_i64()).unwrap_or(0);
-        let crop_src = dir.join(s["crop"].as_str().unwrap_or("").replace('/', std::path::MAIN_SEPARATOR_STR));
+        let crop_src = dir.join(
+            s["crop"]
+                .as_str()
+                .unwrap_or("")
+                .replace('/', std::path::MAIN_SEPARATOR_STR),
+        );
         let crop_name = format!("{id:02}-{kind}-m{monitor}-{time_ms}ms.png");
         match write_scaled(&crop_src, &review_dir.join(&crop_name), CROP_WIDTH) {
             Ok(b) => bytes += b,
@@ -195,11 +223,18 @@ pub fn run_with(dir: &Path, max_images: usize, include_unmeasurable: bool) -> ut
                 }
             }
         }
-        let check = s
-            .get("check_id")
-            .and_then(|c| c.as_u64())
-            .and_then(|cid| checks.iter().find(|c| c.get("id").and_then(|i| i.as_u64()) == Some(cid)));
-        items.push(manifest_item(id, s, check, &crop_name, overview_name.as_deref()));
+        let check = s.get("check_id").and_then(|c| c.as_u64()).and_then(|cid| {
+            checks
+                .iter()
+                .find(|c| c.get("id").and_then(|i| i.as_u64()) == Some(cid))
+        });
+        items.push(manifest_item(
+            id,
+            s,
+            check,
+            &crop_name,
+            overview_name.as_deref(),
+        ));
     }
 
     let manifest = json!({
@@ -243,7 +278,13 @@ mod tests {
     #[test]
     fn selection_prefers_failures_skips_image_less_kinds_and_dedupes() {
         let list = vec![
-            suspect("position", "unmeasurable", 0, 1_000_000, Some("suspects/a.png")),
+            suspect(
+                "position",
+                "unmeasurable",
+                0,
+                1_000_000,
+                Some("suspects/a.png"),
+            ),
             suspect("border", "fail", 0, 5_000_000, Some("suspects/b.png")),
             suspect("border", "fail", 0, 5_500_000, Some("suspects/c.png")), // duplicate of b
             suspect("capture_lost", "fail", 0, 6_000_000, Some("suspects/d.png")),
@@ -264,7 +305,13 @@ mod tests {
         let s = suspect("border", "fail", 2, 5_000_000, Some("suspects/b.png"));
         let check = json!({"id": 5_000_000, "expected": {"x":1,"y":2,"w":3,"h":4},
                            "reported": {"x":1,"y":2,"w":3,"h":5}, "measured": {"x":9,"y":2,"w":3,"h":4}});
-        let item = manifest_item(3, &s, Some(&check), "03-border.png", Some("03-overview.png"));
+        let item = manifest_item(
+            3,
+            &s,
+            Some(&check),
+            "03-border.png",
+            Some("03-overview.png"),
+        );
         assert_eq!(item["id"], 3);
         assert_eq!(item["image"], "03-border.png");
         assert_eq!(item["overview"], "03-overview.png");
@@ -275,7 +322,11 @@ mod tests {
         assert_eq!(item["measured"]["x"], 9);
         assert_eq!(item["nearest_note"], "NOTE x");
         let events = item["surrounding_events"].as_array().unwrap();
-        assert_eq!(events.len(), 1, "mouse moves and os snapshots are left out: {events:?}");
+        assert_eq!(
+            events.len(),
+            1,
+            "mouse moves and os snapshots are left out: {events:?}"
+        );
         assert_eq!(events[0]["text"], "look here");
     }
 
@@ -297,7 +348,11 @@ mod tests {
         let mut crop = Image::solid(1200, 700, [0, 0, 90]);
         crop.fill(crate::util::Rect::new(100, 100, 600, 300), [200, 200, 200]);
         image::write_png(&dir.join("suspects/s1.png"), &crop).unwrap();
-        image::write_png(&dir.join("suspects/s1-monitor.png"), &Image::solid(640, 360, [0, 0, 90])).unwrap();
+        image::write_png(
+            &dir.join("suspects/s1-monitor.png"),
+            &Image::solid(640, 360, [0, 0, 90]),
+        )
+        .unwrap();
         let suspects = json!([{
             "check_id": 1, "monitor": 0, "frame_index": 5, "time_qpc_us": 1_000, "time_ms": 1,
             "kind": "border", "verdict": "fail", "detail": "stray", "note": null,
@@ -305,13 +360,19 @@ mod tests {
             "crop": "suspects/s1.png", "monitor_png": "suspects/s1-monitor.png", "nearby_events": []
         }]);
         std::fs::write(dir.join("suspects/suspects.json"), suspects.to_string()).unwrap();
-        std::fs::write(dir.join("report.json"), json!({"checks": [{"id": 1, "expected": null}]}).to_string()).unwrap();
+        std::fs::write(
+            dir.join("report.json"),
+            json!({"checks": [{"id": 1, "expected": null}]}).to_string(),
+        )
+        .unwrap();
         // A video that must NOT be copied.
         std::fs::write(dir.join("video-0.mp4"), vec![0u8; 5000]).unwrap();
 
         run(&dir, 12).unwrap();
         let review = dir.join("review");
-        let manifest: Value = serde_json::from_str(&std::fs::read_to_string(review.join("manifest.json")).unwrap()).unwrap();
+        let manifest: Value =
+            serde_json::from_str(&std::fs::read_to_string(review.join("manifest.json")).unwrap())
+                .unwrap();
         assert_eq!(manifest["images_in_pack"], 1);
         let item = &manifest["items"][0];
         let img = image::read_png(&review.join(item["image"].as_str().unwrap())).unwrap();
@@ -319,7 +380,11 @@ mod tests {
         let ov = image::read_png(&review.join(item["overview"].as_str().unwrap())).unwrap();
         assert_eq!(ov.w, OVERVIEW_WIDTH, "overview is downscaled");
         assert!(review.join("PROMPT.md").is_file());
-        let names: Vec<String> = std::fs::read_dir(&review).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        let names: Vec<String> = std::fs::read_dir(&review)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
         assert!(names.iter().all(|n| !n.ends_with(".mp4")), "{names:?}");
         assert!(manifest["pack_bytes"].as_u64().unwrap() < MAX_PACK_BYTES);
         let _ = std::fs::remove_dir_all(&dir);

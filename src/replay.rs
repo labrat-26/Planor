@@ -316,7 +316,11 @@ pub fn replay_gesture(events: &[ReplayEvent], cfg: &ReplayConfig) -> ReplayResul
                     Swipe::DragEnd | Swipe::DragCancel => drag_ends += 1,
                     Swipe::None | Swipe::Step { .. } => {}
                 }
-                let frac = strip.columns.get(strip.focus).map(|c| c.frac).unwrap_or(0.0);
+                let frac = strip
+                    .columns
+                    .get(strip.focus)
+                    .map(|c| c.frac)
+                    .unwrap_or(0.0);
                 steps.push(ReplayStep {
                     t_us: ev.t_us,
                     swipe: label,
@@ -377,7 +381,11 @@ pub fn segments(events: &[ReplayEvent]) -> Vec<Segment> {
     for e in events {
         match &e.kind {
             ReplayKind::Mark(m) if m.starts_with("end ") => {
-                since_end = Some((out.len() + usize::from(cur.is_some()), e.t_us, label.clone()));
+                since_end = Some((
+                    out.len() + usize::from(cur.is_some()),
+                    e.t_us,
+                    label.clone(),
+                ));
             }
             ReplayKind::Mark(m) => {
                 if let Some((from, at, prev)) = since_end.take() {
@@ -400,9 +408,14 @@ pub fn segments(events: &[ReplayEvent]) -> Vec<Segment> {
                     out.extend(cur.take());
                 }
                 last_t = e.t_us;
-                cur.get_or_insert_with(|| Segment { label: label.clone(), previous: String::new(), start_us: e.t_us, frames: vec![] })
-                    .frames
-                    .push((e.t_us, p.clone()));
+                cur.get_or_insert_with(|| Segment {
+                    label: label.clone(),
+                    previous: String::new(),
+                    start_us: e.t_us,
+                    frames: vec![],
+                })
+                .frames
+                .push((e.t_us, p.clone()));
             }
             _ => (),
         }
@@ -419,7 +432,9 @@ pub enum Kind {
     /// Two fingers moving together.
     Scroll,
     /// Two fingers moving apart (`out`) or together.
-    Pinch { out: bool },
+    Pinch {
+        out: bool,
+    },
     /// Three or more fingers moving one way.
     Swipe,
     /// Four or more fingers going round.
@@ -451,7 +466,13 @@ impl Identified {
             Kind::Tap => "tap".to_string(),
             Kind::Move => format!("move {}", self.direction),
             Kind::Scroll => format!("scroll {}", self.direction),
-            Kind::Pinch { out } => if *out { "pinch out".into() } else { "pinch in".into() },
+            Kind::Pinch { out } => {
+                if *out {
+                    "pinch out".into()
+                } else {
+                    "pinch in".into()
+                }
+            }
             Kind::Swipe if f >= 4 => format!("drag {}", self.direction),
             Kind::Swipe => format!("swipe {}", self.direction),
             Kind::Circle => "circle".into(),
@@ -461,7 +482,11 @@ impl Identified {
             Kind::Swipe if self.speed() > 900. && self.ms < 220. => " flick",
             _ => "",
         };
-        let lift = if self.staggered_lift { ", lifted one by one" } else { "" };
+        let lift = if self.staggered_lift {
+            ", lifted one by one"
+        } else {
+            ""
+        };
         format!("{f}f {what}{pace}{lift}")
     }
 }
@@ -486,9 +511,13 @@ pub fn identify(seg: &Segment) -> Identified {
     let fingers = seg.frames.iter().map(|f| f.1.len()).max().unwrap_or(0);
     let centroid = |p: &Vec<(f64, f64)>| {
         let n = p.len().max(1) as f64;
-        (p.iter().map(|q| q.0).sum::<f64>() / n, p.iter().map(|q| q.1).sum::<f64>() / n)
+        (
+            p.iter().map(|q| q.0).sum::<f64>() / n,
+            p.iter().map(|q| q.1).sum::<f64>() / n,
+        )
     };
-    let full: Vec<&(i64, Vec<(f64, f64)>)> = seg.frames.iter().filter(|f| f.1.len() == fingers).collect();
+    let full: Vec<&(i64, Vec<(f64, f64)>)> =
+        seg.frames.iter().filter(|f| f.1.len() == fingers).collect();
     let (mut path, mut prev) = (0., None);
     for f in &full {
         let c = centroid(&f.1);
@@ -511,7 +540,13 @@ pub fn identify(seg: &Segment) -> Identified {
     let steps_down = counts[peak..].windows(2).filter(|w| w[1] < w[0]).count();
     let staggered_lift = fingers >= 3 && steps_down >= 2;
     let net = dx.hypot(dy);
-    let spread = |p: &Vec<(f64, f64)>| if p.len() >= 2 { f64::hypot(p[0].0 - p[1].0, p[0].1 - p[1].1) } else { 0. };
+    let spread = |p: &Vec<(f64, f64)>| {
+        if p.len() >= 2 {
+            f64::hypot(p[0].0 - p[1].0, p[0].1 - p[1].1)
+        } else {
+            0.
+        }
+    };
     let (s0, s1) = match (full.first(), full.last()) {
         (Some(a), Some(b)) => (spread(&a.1), spread(&b.1)),
         _ => (0., 0.),
@@ -534,7 +569,16 @@ pub fn identify(seg: &Segment) -> Identified {
         Kind::Move | Kind::Scroll | Kind::Swipe => direction(dx, dy),
         _ => "",
     };
-    Identified { fingers, kind, direction, dx, dy, path, ms, staggered_lift }
+    Identified {
+        fingers,
+        kind,
+        direction,
+        dx,
+        dy,
+        path,
+        ms,
+        staggered_lift,
+    }
 }
 
 /// Does what was done fit the guided step's instruction? Steps name a finger count and what to do
@@ -545,10 +589,16 @@ pub fn fits(step: &str, g: &Identified) -> bool {
         // Physical clicks: the finger pressing the pad shows as a short touch (the button lines prove the click).
         return g.fingers <= 2;
     }
-    let want = [("ONE", 1), ("TWO", 2), ("THREE", 3), ("FOUR", 4), ("FIVE", 5)]
-        .iter()
-        .find(|(w, _)| s.contains(&format!("{w} FINGER")))
-        .map(|w| w.1);
+    let want = [
+        ("ONE", 1),
+        ("TWO", 2),
+        ("THREE", 3),
+        ("FOUR", 4),
+        ("FIVE", 5),
+    ]
+    .iter()
+    .find(|(w, _)| s.contains(&format!("{w} FINGER")))
+    .map(|w| w.1);
     if want.is_some_and(|w| w != g.fingers) {
         return false;
     }
@@ -578,5 +628,6 @@ pub fn fits(step: &str, g: &Identified) -> bool {
         .filter(|d| s.contains(d))
         .map(|d| d.to_ascii_lowercase())
         .collect();
-    matches!(g.kind, Kind::Swipe | Kind::Scroll) && (dirs.is_empty() || dirs.iter().any(|d| g.direction.contains(d.as_str())))
+    matches!(g.kind, Kind::Swipe | Kind::Scroll)
+        && (dirs.is_empty() || dirs.iter().any(|d| g.direction.contains(d.as_str())))
 }

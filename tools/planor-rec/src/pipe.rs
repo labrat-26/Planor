@@ -5,24 +5,24 @@ use serde_json::json;
 use std::{
     io,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 use windows_sys::Win32::{
     Foundation::{
-        CloseHandle, GetLastError, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, HANDLE,
+        CloseHandle, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE,
         INVALID_HANDLE_VALUE,
     },
     Storage::FileSystem::{
-        CreateFileW, ReadFile, WriteFile, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
-        PIPE_ACCESS_DUPLEX,
+        CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+        ReadFile, WriteFile,
     },
     System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_TYPE_BYTE,
-        PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+        PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
     },
 };
 
@@ -88,7 +88,10 @@ pub fn client(command: &str, pipe: Option<&str>) -> io::Result<String> {
         }
         CloseHandle(handle);
         if bytes.is_empty() {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "empty pipe reply"));
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "empty pipe reply",
+            ));
         }
         Ok(String::from_utf8_lossy(&bytes).trim().to_string())
     }

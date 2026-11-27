@@ -14,12 +14,25 @@ impl Rect {
     }
     pub fn intersect(self, o: Rect) -> Option<Rect> {
         let (x, y) = (self.x.max(o.x), self.y.max(o.y));
-        let (r, b) = ((self.x + self.w).min(o.x + o.w), (self.y + self.h).min(o.y + o.h));
-        (r > x && b > y).then_some(Rect { x, y, w: r - x, h: b - y })
+        let (r, b) = (
+            (self.x + self.w).min(o.x + o.w),
+            (self.y + self.h).min(o.y + o.h),
+        );
+        (r > x && b > y).then_some(Rect {
+            x,
+            y,
+            w: r - x,
+            h: b - y,
+        })
     }
     pub fn union(self, o: Rect) -> Rect {
         let (x, y) = (self.x.min(o.x), self.y.min(o.y));
-        Rect { x, y, w: (self.x + self.w).max(o.x + o.w) - x, h: (self.y + self.h).max(o.y + o.h) - y }
+        Rect {
+            x,
+            y,
+            w: (self.x + self.w).max(o.x + o.w) - x,
+            h: (self.y + self.h).max(o.y + o.h) - y,
+        }
     }
     pub fn length(self) -> i32 {
         if self.horizontal() { self.w } else { self.h }
@@ -168,7 +181,11 @@ impl Strip {
         if let Some((i, j)) = self.locate(id) {
             // A destroyed fullscreen window must not leave its tuple behind: it would block
             // fill_gaps, set_area rescale and every future fullscreen on this strip for good.
-            if self.fullscreen.as_ref().is_some_and(|(fid, _, _)| *fid == id) {
+            if self
+                .fullscreen
+                .as_ref()
+                .is_some_and(|(fid, _, _)| *fid == id)
+            {
                 self.fullscreen = None;
             }
             let c = &mut self.columns[i];
@@ -381,9 +398,7 @@ impl Strip {
                 self.focus = self.columns.len();
                 self.columns.push(c)
             }
-        } else if !enter
-            && let Some((id, i, length)) = self.fullscreen.take()
-        {
+        } else if !enter && let Some((id, i, length)) = self.fullscreen.take() {
             if let Some((j, _)) = self.locate(id) {
                 let mut c = self.columns.remove(j);
                 c.length = length;
@@ -482,7 +497,11 @@ impl Strip {
             // A pair does not wrap: its other member peeks below while the first is active and above
             // while the second is, sliding smoothly between the two as the deck rolls.
             let both = n >= 3;
-            let peek = if n > 1 { stack_peek.clamp(0, depth / if both { 4 } else { 2 }) } else { 0 };
+            let peek = if n > 1 {
+                stack_peek.clamp(0, depth / if both { 4 } else { 2 })
+            } else {
+                0
+            };
             let size = depth - peek - if both { peek } else { 0 };
             let before = if both {
                 peek as f64
@@ -494,7 +513,11 @@ impl Strip {
             for (j, &id) in c.members.iter().enumerate() {
                 let r = if n > 1 { c.relative(j) } else { 0. };
                 let cross = before + r * size as f64;
-                out.push((id, self.area.project(start, c.length, cross.round() as i32, size)));
+                out.push((
+                    id,
+                    self.area
+                        .project(start, c.length, cross.round() as i32, size),
+                ));
             }
             start += c.length + self.gap
         }
@@ -530,10 +553,20 @@ pub fn stack_zone(r: Rect, percent: i32, horizontal: bool) -> Rect {
     let p = percent.clamp(5, 95);
     if horizontal {
         let w = (r.w * p / 100).max(1);
-        Rect { x: r.x + (r.w - w) / 2, y: r.y, w, h: r.h }
+        Rect {
+            x: r.x + (r.w - w) / 2,
+            y: r.y,
+            w,
+            h: r.h,
+        }
     } else {
         let h = (r.h * p / 100).max(1);
-        Rect { x: r.x, y: r.y + (r.h - h) / 2, w: r.w, h }
+        Rect {
+            x: r.x,
+            y: r.y + (r.h - h) / 2,
+            w: r.w,
+            h,
+        }
     }
 }
 /// What a drop does. Purely positional (no speed or dwell), so it never flickers:
@@ -604,7 +637,11 @@ pub enum Swipe {
     /// A fifth finger touched while carrying a window: put it back, drop nothing.
     DragCancel,
     /// `direction` is +1 for rightwards/downwards finger travel and -1 for leftwards/upwards.
-    Step { fingers: usize, horizontal: bool, direction: isize },
+    Step {
+        fingers: usize,
+        horizontal: bool,
+        direction: isize,
+    },
 }
 impl Gesture {
     pub fn sample(&mut self, points: &[(f64, f64)], deadzone: f64, step: f64) -> Swipe {
@@ -618,13 +655,17 @@ impl Gesture {
             // fingers in the owner's recording), so whatever the first fingers started is cancelled and
             // everything is ignored until fewer than three fingers remain.
             let was = (self.dragging, self.scrolling);
-            *self = Self { vetoed: true, ..Self::default() };
+            *self = Self {
+                vetoed: true,
+                ..Self::default()
+            };
             return match was {
                 (true, _) => Swipe::DragCancel,
                 (_, true) => Swipe::ScrollEnd,
                 _ => Swipe::None,
             };
-        }        let ended = |g: &Self| {
+        }
+        let ended = |g: &Self| {
             if g.dragging {
                 Swipe::DragEnd
             } else if g.scrolling {
@@ -646,7 +687,10 @@ impl Gesture {
             if self.scrolling && n == 4 && self.fingers == 3 && self.travel < 2. * deadzone {
                 // Fingers also LAND one at a time: the owner's recorded four-finger drags often touched with
                 // three first for a few frames. A scroll that has barely moved becomes the drag.
-                *self = Self { fingers: n, ..Self::default() };
+                *self = Self {
+                    fingers: n,
+                    ..Self::default()
+                };
                 return Swipe::ScrollEnd;
             }
             if self.dragging || self.scrolling {
@@ -658,7 +702,10 @@ impl Gesture {
                 return Swipe::None;
             }
             // Still inside the dead zone: start over with the new count.
-            *self = Self { fingers: n, ..Self::default() };
+            *self = Self {
+                fingers: n,
+                ..Self::default()
+            };
         }
         let Some(origin) = self.origin else {
             self.origin = Some(pos);
@@ -675,7 +722,11 @@ impl Gesture {
                 if let Some(h) = lock {
                     // Pick the nearest offered ray (strip axis or a neighbouring monitor ray, #102)
                     // using the same 1.5x lead rule as the three-finger scroll.
-                    let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
+                    let (along, cross) = if h {
+                        (dx.abs(), dy.abs())
+                    } else {
+                        (dy.abs(), dx.abs())
+                    };
                     let strip_ok = along >= 1.5 * cross;
                     let mon_ray = best_ray(dx, dy, &self.monitor_rays);
                     let mon_proj = mon_ray.map(|(rx, ry)| dx * rx + dy * ry);
@@ -686,7 +737,11 @@ impl Gesture {
                         self.started_ray = Some(ray);
                     } else if !strip_ok {
                         let across = if h { dy } else { dx };
-                        let allowed = if across > 0. { self.cross_ok.1 } else { self.cross_ok.0 };
+                        let allowed = if across > 0. {
+                            self.cross_ok.1
+                        } else {
+                            self.cross_ok.0
+                        };
                         if cross >= 1.5 * along && allowed {
                             self.started_cross = true;
                             self.started_ray = None;
@@ -704,7 +759,11 @@ impl Gesture {
             }
             let (mx, my) = (pos.0 - self.last.0, pos.1 - self.last.1);
             self.last = pos;
-            return if mx == 0. && my == 0. { Swipe::None } else { Swipe::DragMove(mx, my) };
+            return if mx == 0. && my == 0. {
+                Swipe::None
+            } else {
+                Swipe::DragMove(mx, my)
+            };
         }
         // Three fingers start scrolling almost at once: the axis is picked after 3 units of travel when one
         // axis clearly leads (1.5x), else once the travel reaches the full dead zone. Fingers settle as they
@@ -723,17 +782,29 @@ impl Gesture {
             self.last = origin;
         }
         let horizontal = self.horizontal.unwrap_or(true);
-        let delta = if horizontal { pos.0 - self.last.0 } else { pos.1 - self.last.1 };
+        let delta = if horizontal {
+            pos.0 - self.last.0
+        } else {
+            pos.1 - self.last.1
+        };
         self.last = pos;
         self.travel += delta.abs();
         if horizontal {
             // Sideways: scroll continuously, with the focus following the window nearest the centre.
             self.scrolling = true;
-            return if delta == 0. { Swipe::None } else { Swipe::Scroll(delta) };
+            return if delta == 0. {
+                Swipe::None
+            } else {
+                Swipe::Scroll(delta)
+            };
         }
         let _ = step;
         self.scrolling = true;
-        if delta == 0. { Swipe::None } else { Swipe::ScrollV(delta) }
+        if delta == 0. {
+            Swipe::None
+        } else {
+            Swipe::ScrollV(delta)
+        }
     }
 }
 pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize> {
@@ -796,7 +867,14 @@ pub const RAY_LEAD_MARGIN: f64 = 1.2;
 /// Whether the ray `origin + t * dir` (t in 0..=`len`, `dir` a unit vector) passes more than 2 px
 /// into the interior of any monitor in `others` except `target` and `home` (#102 review): a carry
 /// along such a ray would enter that monitor first and the drop would land there, not on `target`.
-fn ray_blocked(dir: (f64, f64), len: f64, origin: (f64, f64), target: Rect, home: Rect, others: &[Rect]) -> bool {
+fn ray_blocked(
+    dir: (f64, f64),
+    len: f64,
+    origin: (f64, f64),
+    target: Rect,
+    home: Rect,
+    others: &[Rect],
+) -> bool {
     const PAD: f64 = 2.0;
     others.iter().any(|&m| {
         if m == target || m == home {
@@ -837,7 +915,12 @@ fn ray_blocked(dir: (f64, f64), len: f64, origin: (f64, f64), target: Rect, home
 /// else the neighbour's centre; when that ray would cross a third monitor on the way (the carry
 /// would enter it first and the drop would land there, #102 review) or run along the strip axis,
 /// the nearest point of the neighbour's rect is tried before giving up on that neighbour.
-pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool, origin: (f64, f64)) -> Vec<(f64, f64)> {
+pub fn monitor_rays(
+    home: Rect,
+    others: &[Rect],
+    horizontal: bool,
+    origin: (f64, f64),
+) -> Vec<(f64, f64)> {
     let (ox, oy) = origin;
     let mut rays = Vec::new();
     for &b in others {
@@ -866,17 +949,24 @@ pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool, origin: (f64,
         // in one coordinate only), the perpendicular ray reaches it by the shortest path: straight up
         // from under a monitor above carries straight up instead of slanting toward its centre.
         let straight = (nearest.0 == ox || nearest.1 == oy).then_some(nearest);
-        let dir = straight.into_iter().chain([centre, nearest]).find_map(|(tx, ty)| {
-            let (dx, dy) = (tx - ox, ty - oy);
-            let len = dx.hypot(dy);
-            let unit = (dx / len.max(1e-9), dy / len.max(1e-9));
-            let cross = if horizontal { unit.1.abs() } else { unit.0.abs() };
-            // A ray nearly along the strip axis is not offered: the strip axis already gets there.
-            if len < 1.0 || cross < 0.25 || ray_blocked(unit, len, (ox, oy), b, home, others) {
-                return None;
-            }
-            Some(unit)
-        });
+        let dir = straight
+            .into_iter()
+            .chain([centre, nearest])
+            .find_map(|(tx, ty)| {
+                let (dx, dy) = (tx - ox, ty - oy);
+                let len = dx.hypot(dy);
+                let unit = (dx / len.max(1e-9), dy / len.max(1e-9));
+                let cross = if horizontal {
+                    unit.1.abs()
+                } else {
+                    unit.0.abs()
+                };
+                // A ray nearly along the strip axis is not offered: the strip axis already gets there.
+                if len < 1.0 || cross < 0.25 || ray_blocked(unit, len, (ox, oy), b, home, others) {
+                    return None;
+                }
+                Some(unit)
+            });
         let Some((rx, ry)) = dir else {
             continue;
         };
@@ -1088,7 +1178,11 @@ pub fn check_strip_invariants(strip: &Strip, stack_peek: i32) -> Vec<InvariantVi
     if strip.focus >= strip.columns.len() {
         out.push(InvariantViolation {
             name: "one_active_per_group",
-            details: format!("focus {} out of range for {} columns", strip.focus, strip.columns.len()),
+            details: format!(
+                "focus {} out of range for {} columns",
+                strip.focus,
+                strip.columns.len()
+            ),
         });
     }
     let mut seen_ids = std::collections::HashSet::new();
@@ -1505,7 +1599,9 @@ mod contact_frame_tests {
         assert!(!f.all);
         for n in [3u32, 4, 5] {
             let pts: Vec<_> = (1..=n).map(|i| (i, (i as f64 * 10.0, 10.0))).collect();
-            let frame = f.packet_with_slots(n, 5, pts).expect("parallel touch completes");
+            let frame = f
+                .packet_with_slots(n, 5, pts)
+                .expect("parallel touch completes");
             assert_eq!(frame.len(), n as usize);
             assert_eq!(
                 f.packet_with_slots(n, 5, []),
@@ -1526,17 +1622,29 @@ mod contact_frame_tests {
 
         // (b) Hybrid 1-per-report: first report tip-up, next 3 tip-down => NO false lift.
         let mut h1 = ContactFrame::default();
-        assert_eq!(h1.packet_with_slots(4, 1, []), None, "hybrid 1/report must wait for continuations");
+        assert_eq!(
+            h1.packet_with_slots(4, 1, []),
+            None,
+            "hybrid 1/report must wait for continuations"
+        );
         assert_eq!(h1.packet_with_slots(0, 1, [(2, (2.0, 1.0))]), None);
         assert_eq!(h1.packet_with_slots(0, 1, [(3, (3.0, 1.0))]), None);
         let h1_done = h1
             .packet_with_slots(0, 1, [(4, (4.0, 1.0))])
             .expect("hybrid 1/report completes on 4th slot");
-        assert_eq!(h1_done.len(), 3, "3 remaining tip-down contacts emitted without false lift");
+        assert_eq!(
+            h1_done.len(),
+            3,
+            "3 remaining tip-down contacts emitted without false lift"
+        );
 
         // Hybrid 2-per-report: first report all tip-up, second report 2 tip-down => NO early lift on report 1.
         let mut h2 = ContactFrame::default();
-        assert_eq!(h2.packet_with_slots(4, 2, []), None, "hybrid 2/report must wait for continuation");
+        assert_eq!(
+            h2.packet_with_slots(4, 2, []),
+            None,
+            "hybrid 2/report must wait for continuation"
+        );
         assert_eq!(
             h2.packet_with_slots(0, 2, [(3, (3.0, 1.0)), (4, (4.0, 1.0))]),
             Some(vec![]),
@@ -1552,7 +1660,11 @@ mod contact_frame_tests {
         // (c) Hybrid full lift across reports => None on opening report, Some([]) once complete.
         let mut hl = ContactFrame::default();
         assert_eq!(hl.packet_with_slots(4, 2, []), None);
-        assert_eq!(hl.packet_with_slots(0, 2, []), Some(vec![]), "hybrid full lift emits once");
+        assert_eq!(
+            hl.packet_with_slots(0, 2, []),
+            Some(vec![]),
+            "hybrid full lift emits once"
+        );
         // Hybrid odd count=3 across 2-slot reports (padding slot in report 2) does not bleed into next frame.
         assert_eq!(hl.packet_with_slots(3, 2, []), None);
         assert_eq!(hl.packet_with_slots(0, 2, []), Some(vec![]));
@@ -1567,7 +1679,10 @@ mod contact_frame_tests {
         );
 
         // (d) Recording mode (`all = true`) behaviour unchanged.
-        let mut rec = ContactFrame { all: true, ..ContactFrame::default() };
+        let mut rec = ContactFrame {
+            all: true,
+            ..ContactFrame::default()
+        };
         assert_eq!(rec.packet(1, [(1, (5.0, 5.0))]), Some(vec![(5.0, 5.0)]));
         assert_eq!(rec.packet(2, [(1, (5.0, 5.0))]), None);
         assert_eq!(rec.packet(0, [(2, (9.0, 5.0))]).unwrap().len(), 2);

@@ -6,15 +6,17 @@
 //! the exact QPC microsecond clock used by `planor`.
 
 use crate::{
-    capture::{self, DxgiOpener, Duplicator, MonitorInfo},
+    capture::{self, Duplicator, DxgiOpener, MonitorInfo},
     events::{self, EventWriter},
     pipe::{self, CommandHandler},
-    record::{default_trace_path, select_monitors, CaptureStats, Meta, ENCODER_QUEUE_FRAMES},
-    timeline::{self, FrameSink, FrameSource, Opener, Push, RealClock, Row, TimelineCfg, CSV_HEADER},
-    util::{self, qpc_frequency, qpc_us, unix_ms, Rect},
+    record::{CaptureStats, ENCODER_QUEUE_FRAMES, Meta, default_trace_path, select_monitors},
+    timeline::{
+        self, CSV_HEADER, FrameSink, FrameSource, Opener, Push, RealClock, Row, TimelineCfg,
+    },
+    util::{self, Rect, qpc_frequency, qpc_us, unix_ms},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     ffi::c_void,
@@ -23,9 +25,9 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -98,10 +100,16 @@ pub fn parse_synthetic_size(raw: &str) -> Result<(u32, u32), String> {
     let (w_s, h_s) = lower
         .split_once('x')
         .ok_or_else(|| format!("expected WxH (e.g. 1280x720), got {raw:?}"))?;
-    let w: u32 = w_s.parse().map_err(|_| format!("invalid width in {raw:?}"))?;
-    let h: u32 = h_s.parse().map_err(|_| format!("invalid height in {raw:?}"))?;
+    let w: u32 = w_s
+        .parse()
+        .map_err(|_| format!("invalid width in {raw:?}"))?;
+    let h: u32 = h_s
+        .parse()
+        .map_err(|_| format!("invalid height in {raw:?}"))?;
     if !(64..=7680).contains(&w) || !(64..=4320).contains(&h) {
-        return Err(format!("synthetic size {w}x{h} out of range (64..=7680 x 64..=4320)"));
+        return Err(format!(
+            "synthetic size {w}x{h} out of range (64..=7680 x 64..=4320)"
+        ));
     }
     Ok((w & !1, h & !1))
 }
@@ -169,8 +177,8 @@ impl FrameSource for SyntheticSource {
     fn acquire_into(&mut self, out: &mut Vec<u8>, timeout_ms: u32) -> Result<bool, String> {
         let now = qpc_us();
         if self.next_frame_us > now {
-            let wait_ms = ((self.next_frame_us - now) / 1000)
-                .clamp(1, timeout_ms.max(1) as i64) as u64;
+            let wait_ms =
+                ((self.next_frame_us - now) / 1000).clamp(1, timeout_ms.max(1) as i64) as u64;
             thread::sleep(Duration::from_millis(wait_ms));
             if qpc_us() < self.next_frame_us {
                 return Ok(false);
@@ -639,7 +647,9 @@ impl RingCoordinator {
             let pct = if sample.last_wall_us > 0 && now_us > sample.last_wall_us {
                 let wall = (now_us - sample.last_wall_us) as f64;
                 let cpu = total_cpu_us.saturating_sub(sample.last_cpu_us) as f64;
-                let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
+                let cpus = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(1) as f64;
                 ((cpu / wall) * 100.0 / cpus).clamp(0.0, 100.0)
             } else {
                 0.0
@@ -672,7 +682,10 @@ impl RingCoordinator {
     }
 
     fn dump(&self, out: &Path, reason: &str) -> Result<String, String> {
-        let _guard = self.dump_lock.lock().map_err(|_| "dump lock poisoned".to_string())?;
+        let _guard = self
+            .dump_lock
+            .lock()
+            .map_err(|_| "dump lock poisoned".to_string())?;
         util::ensure_dir(out).map_err(|e| e.to_string())?;
         let out = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
         let tmp = out.join(".ring-tmp");
@@ -766,7 +779,8 @@ impl RingCoordinator {
             });
         }
 
-        let clip_start_us = min_qpc.unwrap_or_else(|| dump_qpc.saturating_sub(self.seconds as i64 * 1_000_000));
+        let clip_start_us =
+            min_qpc.unwrap_or_else(|| dump_qpc.saturating_sub(self.seconds as i64 * 1_000_000));
         let clip_end_us = max_qpc.unwrap_or(dump_qpc);
 
         let mut events = self.writer.snapshot_since(clip_start_us);
@@ -793,7 +807,11 @@ impl RingCoordinator {
             }
         }
 
-        let topo = self.topology_log.lock().map(|l| l.clone()).unwrap_or_default();
+        let topo = self
+            .topology_log
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_default();
         let freq = self.qpc_frequency;
         let qpc_start_ticks = ((clip_start_us as i128 * freq as i128) / 1_000_000) as i64;
         let meta = Meta {
@@ -931,7 +949,10 @@ fn run_ring_monitor(
         .spawn()
         .map_err(|e| util::fmt_err(format!("starting FFmpeg ring: {e}")))?;
     handle.child_pid.store(child.id(), Ordering::Relaxed);
-    let stdin = child.stdin.take().ok_or_else(|| util::fmt_err("ffmpeg stdin"))?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| util::fmt_err("ffmpeg stdin"))?;
 
     let (capture, mut opener): (Box<dyn FrameSource>, Box<dyn Opener>) = match source_kind {
         RingSource::Dxgi => {
@@ -997,9 +1018,13 @@ fn run_ring_monitor(
     handle.ticks.store(stats.ticks, Ordering::Relaxed);
     handle.dropped.store(stats.dropped, Ordering::Relaxed);
     handle.lost_ticks.store(stats.lost_ticks, Ordering::Relaxed);
-    handle.lost_periods.store(stats.lost_periods, Ordering::Relaxed);
+    handle
+        .lost_periods
+        .store(stats.lost_periods, Ordering::Relaxed);
     handle.reopens.store(stats.reopens, Ordering::Relaxed);
-    handle.max_lost_ms.store(stats.max_lost_ms, Ordering::Relaxed);
+    handle
+        .max_lost_ms
+        .store(stats.max_lost_ms, Ordering::Relaxed);
     Ok(())
 }
 
@@ -1154,7 +1179,12 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
         },
         _ => None,
     });
-    let pipe_thread = pipe::spawn_server_with(writer.clone(), stop.clone(), pipe_name.clone(), Some(handler));
+    let pipe_thread = pipe::spawn_server_with(
+        writer.clone(),
+        stop.clone(),
+        pipe_name.clone(),
+        Some(handler),
+    );
     let input = events::spawn_input(writer.clone(), stop.clone());
     let os = events::spawn_os(writer.clone(), stop.clone());
     let epoch = Arc::new(AtomicU64::new(0));
@@ -1240,7 +1270,11 @@ pub fn run(args: RingArgs) -> util::anyhow_lite::Result<()> {
     Ok(())
 }
 
-pub fn send_dump(out: &Path, reason: Option<&str>, pipe_name: Option<&str>) -> util::anyhow_lite::Result<()> {
+pub fn send_dump(
+    out: &Path,
+    reason: Option<&str>,
+    pipe_name: Option<&str>,
+) -> util::anyhow_lite::Result<()> {
     let abs = std::path::absolute(out).unwrap_or_else(|_| out.to_path_buf());
     let payload = json!({
         "out": abs,
@@ -1288,7 +1322,8 @@ mod tests {
         assert!(w.ring_len() <= 40, "ring length exceeded max_events");
         let snap = w.snapshot_since(2_000_000);
         assert!(
-            snap.iter().any(|v| v.get("kind").and_then(|k| k.as_str()) == Some("os")),
+            snap.iter()
+                .any(|v| v.get("kind").and_then(|k| k.as_str()) == Some("os")),
             "expected preserved baseline OS snapshot even after oldest events evicted"
         );
         let input_seqs: Vec<i64> = snap
@@ -1349,7 +1384,17 @@ seg-0-005.ts,5.000000,5.400000
         assert!(txt.contains("file '"));
 
         let csv_path = dir.join("frames-0.csv");
-        write_frames_csv(&csv_path, &[row_at(100), Row { tick: 1, ..row_at(200) }]).unwrap();
+        write_frames_csv(
+            &csv_path,
+            &[
+                row_at(100),
+                Row {
+                    tick: 1,
+                    ..row_at(200)
+                },
+            ],
+        )
+        .unwrap();
         let csv_raw = fs::read_to_string(&csv_path).unwrap();
         assert!(csv_raw.starts_with("index,present_qpc_us,changed,state,rotate_stall_us\n"));
         assert!(csv_raw.contains("\n0,100,1,ok,0\n1,200,1,ok,0\n"));
@@ -1411,7 +1456,10 @@ seg-0-005.ts,5.000000,5.400000
             .arg(&seg_pat)
             .status()
             .expect("spawn ffmpeg testsrc");
-        assert!(status.success(), "ffmpeg segment generation failed: {status}");
+        assert!(
+            status.success(),
+            "ffmpeg segment generation failed: {status}"
+        );
 
         let raw_csv = fs::read_to_string(&seg_csv).expect("seg-0.csv readable");
         let entries = parse_segment_csv(&raw_csv);
@@ -1456,7 +1504,11 @@ seg-0-005.ts,5.000000,5.400000
         assert!(remux.success(), "ffmpeg concat remux failed: {remux}");
 
         let bytes = fs::read(&mp4).expect("video-0.mp4 readable");
-        assert!(bytes.len() > 2000, "unexpectedly small mp4 ({} bytes)", bytes.len());
+        assert!(
+            bytes.len() > 2000,
+            "unexpectedly small mp4 ({} bytes)",
+            bytes.len()
+        );
         assert!(
             bytes.windows(4).any(|w| w == b"ftyp"),
             "missing MP4 ftyp header box"
@@ -1476,6 +1528,9 @@ seg-0-005.ts,5.000000,5.400000
         src.next_frame_us = 0;
         assert_eq!(src.acquire_into(&mut buf2, 50), Ok(true));
         assert_eq!(buf1.len(), 320 * 180 * 4);
-        assert_ne!(buf1, buf2, "expected moving synthetic pattern between frames");
+        assert_ne!(
+            buf1, buf2,
+            "expected moving synthetic pattern between frames"
+        );
     }
 }

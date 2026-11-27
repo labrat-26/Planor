@@ -38,15 +38,39 @@ impl Rng {
         lo + (self.next() % (hi - lo).max(1) as u64) as i32
     }
     fn usize(&mut self, n: usize) -> usize {
-        if n == 0 { 0 } else { (self.next() % n as u64) as usize }
+        if n == 0 {
+            0
+        } else {
+            (self.next() % n as u64) as usize
+        }
     }
 }
 
 const MONITOR_GEOMS: [Rect; 4] = [
-    Rect { x: 0, y: 0, w: 1920, h: 1152 },
-    Rect { x: 0, y: -1440, w: 2560, h: 1392 },
-    Rect { x: -1440, y: -1440, w: 1440, h: 2512 },
-    Rect { x: 0, y: 0, w: 1280, h: 720 },
+    Rect {
+        x: 0,
+        y: 0,
+        w: 1920,
+        h: 1152,
+    },
+    Rect {
+        x: 0,
+        y: -1440,
+        w: 2560,
+        h: 1392,
+    },
+    Rect {
+        x: -1440,
+        y: -1440,
+        w: 1440,
+        h: 2512,
+    },
+    Rect {
+        x: 0,
+        y: 0,
+        w: 1280,
+        h: 720,
+    },
 ];
 
 fn gen_sequence(rng: &mut Rng, len: usize) -> Vec<Op> {
@@ -71,7 +95,11 @@ fn gen_sequence(rng: &mut Rng, len: usize) -> Vec<Op> {
         } else if pick < 54 {
             Op::Select(rng.usize(997))
         } else if pick < 62 {
-            Op::Resize(rng.usize(997), rng.range(250, 1400), rng.next().is_multiple_of(2))
+            Op::Resize(
+                rng.usize(997),
+                rng.range(250, 1400),
+                rng.next().is_multiple_of(2),
+            )
         } else if pick < 70 {
             Op::Scroll(rng.range(-900, 900))
         } else if pick < 78 {
@@ -104,7 +132,10 @@ fn collect_ids(s: &Strip) -> Vec<WindowId> {
         .collect()
 }
 
-fn run_sequence(ops: &[Op], break_fill_gaps_on_close: bool) -> Result<(), (usize, Op, Vec<InvariantViolation>)> {
+fn run_sequence(
+    ops: &[Op],
+    break_fill_gaps_on_close: bool,
+) -> Result<(), (usize, Op, Vec<InvariantViolation>)> {
     let mut s = Strip::new(MONITOR_GEOMS[0]);
     for (step, op) in ops.iter().enumerate() {
         let ids = collect_ids(&s);
@@ -321,10 +352,15 @@ fn adversarial_and_disallowed_resizes_preserve_all_invariants() {
                     min_here - 100,
                     len + 600,
                     len * 2,
-                    if fits && s.columns.len() == 2 { i32::MAX } else { len / 2 },
+                    if fits && s.columns.len() == 2 {
+                        i32::MAX
+                    } else {
+                        len / 2
+                    },
                 ];
                 let bad_len = choices[rng.usize(choices.len())];
-                let leading = col_idx == 0 && rng.next().is_multiple_of(2) || rng.next().is_multiple_of(2);
+                let leading =
+                    col_idx == 0 && rng.next().is_multiple_of(2) || rng.next().is_multiple_of(2);
                 s.resize(col_idx, bad_len, leading);
                 s.reveal(54);
             } else if pick < 80 {
