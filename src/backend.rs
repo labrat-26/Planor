@@ -479,6 +479,7 @@ pub(crate) mod sim {
         pub action: &'static str,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
+        pub zone_icons: Vec<render::ZoneIcon>,
         pub covered: Vec<isize>,
         pub tile_colors: Vec<(isize, Option<u32>)>,
         /// `(id, os_frame)` for fullscreen tiles: the backend-sampled frame the renderer preserves (#80).
@@ -617,6 +618,10 @@ pub(crate) mod sim {
                 action: scene.action,
                 holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
+                zone_icons: {
+                    let dark = crate::theme::system_is_dark();
+                    scene.zones.iter().map(|z| render::zone_icon_spec(z, dark)).collect()
+                },
                 covered: scene
                     .tiles
                     .iter()

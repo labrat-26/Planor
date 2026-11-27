@@ -65,12 +65,51 @@ pub struct Scene {
     /// snap-back, cancelled drag, or reload).
     pub force_place: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneKind {
+    Merge,
+    Leave {
+        trailing: bool,
+        horizontal: bool,
+    },
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoneIcon {
+    pub kind: ZoneKind,
+    pub rect: Rect,
+    pub color: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Zone {
     pub rect: Rect,
     pub monitor: String,
     pub color: u32,
     pub alpha: f32,
+    pub kind: ZoneKind,
+}
+
+/// Compute the centred, zone-scaled, theme-aware icon specification for a drop zone (#104).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn zone_icon_spec(z: &Zone, dark: bool) -> ZoneIcon {
+    let min_dim = z.rect.w.min(z.rect.h).max(1);
+    let side = ((min_dim as f32) * 0.32)
+        .clamp(20.0, 64.0)
+        .min(min_dim as f32)
+        .round()
+        .max(1.0) as i32;
+    ZoneIcon {
+        kind: z.kind,
+        rect: Rect {
+            x: z.rect.x + (z.rect.w - side) / 2,
+            y: z.rect.y + (z.rect.h - side) / 2,
+            w: side,
+            h: side,
+        },
+        color: crate::theme::zone_icon_color(dark),
+    }
 }
 pub enum Message {
     Scene(Scene),
@@ -259,7 +298,7 @@ fn record_visible_frame_state(
     last_draw: &mut DrawSig,
     want_visible: &mut bool,
     last_draw_valid: &mut bool,
-    fills: &[(Rect, u32, f32)],
+    fills: &[(Rect, u32, f32, ZoneKind)],
     cards: &[CardDraw],
     lines: &[BorderLine],
     holes: &[Rect],
@@ -456,7 +495,7 @@ pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> B
 }
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
-    fills: Vec<(Rect, u32, u32)>,
+    fills: Vec<(Rect, u32, u32, ZoneKind)>,
     cards: Vec<(Rect, u32, u32)>,
     lines: Vec<BorderLine>,
     holes: Vec<Rect>,
@@ -467,7 +506,7 @@ struct DrawSig {
 impl DrawSig {
     fn matches(
         &self,
-        fills: &[(Rect, u32, f32)],
+        fills: &[(Rect, u32, f32, ZoneKind)],
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -486,7 +525,9 @@ impl DrawSig {
                 .fills
                 .iter()
                 .zip(fills)
-                .all(|(&(r1, c1, a1), &(r2, c2, a2))| r1 == r2 && c1 == c2 && a1 == a2.to_bits())
+                .all(|(&(r1, c1, a1, k1), &(r2, c2, a2, k2))| {
+                    r1 == r2 && c1 == c2 && a1 == a2.to_bits() && k1 == k2
+                })
             && self.cards.iter().zip(cards).all(|(&(r1, a1, ang1), c2)| {
                 r1 == c2.rect
                     && a1 == c2.spinner_alpha.to_bits()
@@ -496,7 +537,7 @@ impl DrawSig {
     }
     fn set_from(
         &mut self,
-        fills: &[(Rect, u32, f32)],
+        fills: &[(Rect, u32, f32, ZoneKind)],
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -506,7 +547,7 @@ impl DrawSig {
     ) {
         self.fills.clear();
         self.fills
-            .extend(fills.iter().map(|&(r, c, a)| (r, c, a.to_bits())));
+            .extend(fills.iter().map(|&(r, c, a, k)| (r, c, a.to_bits(), k)));
         self.cards.clear();
         self.cards.extend(
             cards
@@ -536,7 +577,7 @@ impl DrawSig {
 }
 struct DrawFrame<'a> {
     pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
-    fills: &'a [(Rect, u32, f32)],
+    fills: &'a [(Rect, u32, f32, ZoneKind)],
     cards: &'a [CardDraw],
     lines: &'a [BorderLine],
     holes: &'a [Rect],
@@ -662,7 +703,15 @@ impl Surface {
                         }),
                     )
                 }
-                for &(r, c, alpha) in *fills {
+                let dark = crate::theme::system_is_dark();
+                let icon_color = crate::theme::zone_icon_color(dark);
+                let pt = |px: f32, py: f32| {
+                    let mut p = D2D1_ELLIPSE::default().point;
+                    p.X = px;
+                    p.Y = py;
+                    p
+                };
+                for &(r, c, alpha, kind) in *fills {
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -675,6 +724,81 @@ impl Surface {
                         },
                         brush,
                     );
+                    // #104: centred, scaled, theme-aware vector icon on merge and leave zones.
+                    let min_dim = r.w.min(r.h).max(1) as f32;
+                    let size = (min_dim * 0.32).clamp(20.0 * dpi, 64.0 * dpi).min(min_dim * 0.85);
+                    let cx = x + r.w as f32 * 0.5;
+                    let cy = y + r.h as f32 * 0.5;
+                    let stroke = (size * 0.085).clamp(2.0 * dpi, 4.0 * dpi);
+                    let glyph = Self::brush_for(&mut self.brushes, rt, icon_color)?;
+                    glyph.SetOpacity(if alpha > 0.5 { 0.95 } else { 0.80 });
+                    match kind {
+                        ZoneKind::Merge => {
+                            // Stacked-windows glyph: two overlapping rounded window frames.
+                            let cw = size * 0.64;
+                            let ch = size * 0.52;
+                            let shift = size * 0.16;
+                            let cr = (size * 0.08).max(2.0 * dpi);
+                            let back = D2D_RECT_F {
+                                left: cx - cw * 0.5 + shift,
+                                top: cy - ch * 0.5 - shift,
+                                right: cx + cw * 0.5 + shift,
+                                bottom: cy + ch * 0.5 - shift,
+                            };
+                            let front = D2D_RECT_F {
+                                left: cx - cw * 0.5 - shift,
+                                top: cy - ch * 0.5 + shift,
+                                right: cx + cw * 0.5 - shift,
+                                bottom: cy + ch * 0.5 + shift,
+                            };
+                            rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: back, radiusX: cr, radiusY: cr },
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: front, radiusX: cr, radiusY: cr },
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            let bar_y = front.top + ch * 0.28;
+                            rt.DrawLine(
+                                pt(front.left + stroke, bar_y),
+                                pt(front.right - stroke, bar_y),
+                                glyph,
+                                stroke * 0.75,
+                                None,
+                            );
+                        }
+                        ZoneKind::Leave { trailing, horizontal } => {
+                            // Arrow-out-of-group glyph: open bracket on inner side + outward arrow.
+                            let half = size * 0.42;
+                            let (dx, dy) = match (horizontal, trailing) {
+                                (true, false) => (-1.0f32, 0.0f32),
+                                (true, true) => (1.0, 0.0),
+                                (false, false) => (0.0, -1.0),
+                                (false, true) => (0.0, 1.0),
+                            };
+                            let (px_u, py_u) = (-dy, dx);
+                            let p_at = |along: f32, perp: f32| {
+                                pt(cx + dx * along + px_u * perp, cy + dy * along + py_u * perp)
+                            };
+                            let b_back = -half;
+                            let b_front = -half * 0.2;
+                            let b_half = half * 0.78;
+                            rt.DrawLine(p_at(b_front, -b_half), p_at(b_back, -b_half), glyph, stroke, None);
+                            rt.DrawLine(p_at(b_back, -b_half), p_at(b_back, b_half), glyph, stroke, None);
+                            rt.DrawLine(p_at(b_back, b_half), p_at(b_front, b_half), glyph, stroke, None);
+                            let a_start = -half * 0.35;
+                            let a_tip = half;
+                            let head = half * 0.48;
+                            rt.DrawLine(p_at(a_start, 0.0), p_at(a_tip, 0.0), glyph, stroke, None);
+                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, -head * 0.75), glyph, stroke, None);
+                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, head * 0.75), glyph, stroke, None);
+                        }
+                    }
                 }
                 for card in *cards {
                     let x = (card.rect.x + off.x) as f32;
@@ -1695,7 +1819,7 @@ struct FrameScratch {
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
     host_hits: Vec<(Rect, isize)>,
-    fills: Vec<(Rect, u32, f32)>,
+    fills: Vec<(Rect, u32, f32, ZoneKind)>,
     mine: Vec<Rect>,
     local_holes: Vec<Rect>,
     thumb_rects: Vec<Rect>,
@@ -1850,11 +1974,11 @@ impl RenderState {
                 Ok(mut s) => {
                     host.last_draw_valid = false;
                     if should_draw_on_recovery(host.want_visible, &host.last_draw) {
-                        let fills: Vec<(Rect, u32, f32)> = host
+                        let fills: Vec<(Rect, u32, f32, ZoneKind)> = host
                             .last_draw
                             .fills
                             .iter()
-                            .map(|&(r, c, a)| (r, c, f32::from_bits(a)))
+                            .map(|&(r, c, a, k)| (r, c, f32::from_bits(a), k))
                             .collect();
                         let cards: Vec<CardDraw> = host
                             .last_draw
@@ -2560,6 +2684,7 @@ impl RenderState {
                             },
                             z.color,
                             z.alpha,
+                            z.kind,
                         ));
                     }
                 }
@@ -4012,7 +4137,7 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5 }],
+            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5, kind: ZoneKind::Merge }],
             action: "open_close",
             live: true,
             force_place: true,

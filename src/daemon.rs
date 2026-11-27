@@ -1603,7 +1603,13 @@ impl<B: WindowBackend> Engine<B> {
             let side = hot.stack_zone_percent;
             for (id, _, z) in drop_zones(s, peek, side, d.id) {
                 let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
-                zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot_zone { 0.85 } else { 0.35 } });
+                zones.push(render::Zone {
+                    rect: z,
+                    monitor: k.1.clone(),
+                    color: c,
+                    alpha: if hot_zone { 0.85 } else { 0.35 },
+                    kind: render::ZoneKind::Merge,
+                });
             }
             if k == &d.key
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
@@ -1616,6 +1622,10 @@ impl<B: WindowBackend> Engine<B> {
                             monitor: k.1.clone(),
                             color: c,
                             alpha: if d.ungroup_edge == Some(edge) { 0.85 } else { 0.35 },
+                            kind: render::ZoneKind::Leave {
+                                trailing: edge,
+                                horizontal: s.area.horizontal(),
+                            },
                         });
                     }
                 }

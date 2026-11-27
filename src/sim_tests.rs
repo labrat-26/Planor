@@ -6123,3 +6123,73 @@ fn merge_and_leave_zones_span_full_cross_axis_both_orientations() {
         h.settle();
     }
 }
+
+#[test]
+fn merge_and_leave_zone_icons_emitted_centred_scaled_and_theme_aware() {
+    // (#104) Every merge (stack) zone emits a Merge icon and every leave (ungroup) zone emits a
+    // directional Leave icon into the scene summary, centred in the zone, scaled to zone size,
+    // and using theme.rs colours.
+    assert_ne!(
+        crate::theme::zone_icon_color(true),
+        crate::theme::zone_icon_color(false),
+        "dark and light themes must pick distinct zone icon colours"
+    );
+    for (mon, ids, horizontal) in [("MON0", [101, 102, 103], true), ("MON2", [301, 302, 303], false)] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        make_group(&mut h, mon, &[ids[0], ids[1]]);
+        let dragged = ids[0];
+        let neighbour = ids[2];
+        let orig = h.rect(dragged);
+        let nr = h.rect(neighbour);
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, dragged));
+        {
+            let mut sim = h.desktop.0.lock().unwrap();
+            sim.cursor = (nr.x + nr.w / 2, nr.y + nr.h / 2);
+            sim.windows.get_mut(&dragged).unwrap().rect = Rect { x: orig.x + 20, y: orig.y + 20, ..orig };
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert!(!scene.zones.is_empty(), "{mon}: drag must emit zones");
+        assert_eq!(
+            scene.zone_icons.len(),
+            scene.zones.len(),
+            "{mon}: every zone must emit one icon"
+        );
+        let mut saw_merge = false;
+        let mut saw_leave = false;
+        let expected_color = crate::theme::zone_icon_color(crate::theme::system_is_dark());
+        for (z, icon) in scene.zones.iter().zip(&scene.zone_icons) {
+            assert_eq!(icon.kind, z.kind, "{mon}: icon kind matches zone kind");
+            assert_eq!(icon.color, expected_color, "{mon}: icon uses theme colour");
+            assert_eq!(icon.rect.w, icon.rect.h, "{mon}: icon bounds are square");
+            assert!(
+                icon.rect.w >= 20 && icon.rect.w <= 64 && icon.rect.w <= z.rect.w.min(z.rect.h),
+                "{mon}: icon size {} scaled to zone {:?}",
+                icon.rect.w,
+                z.rect
+            );
+            let zcx = z.rect.x + z.rect.w / 2;
+            let zcy = z.rect.y + z.rect.h / 2;
+            let icx = icon.rect.x + icon.rect.w / 2;
+            let icy = icon.rect.y + icon.rect.h / 2;
+            assert!(
+                (icx - zcx).abs() <= 1 && (icy - zcy).abs() <= 1,
+                "{mon}: icon {:?} centred in zone {:?}",
+                icon.rect,
+                z.rect
+            );
+            match icon.kind {
+                render::ZoneKind::Merge => saw_merge = true,
+                render::ZoneKind::Leave { horizontal: h_flag, .. } => {
+                    assert_eq!(h_flag, horizontal, "{mon}: leave icon orientation matches strip");
+                    saw_leave = true;
+                }
+            }
+        }
+        assert!(saw_merge, "{mon}: merge zone icon emitted");
+        assert!(saw_leave, "{mon}: leave zone icon emitted");
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, dragged));
+        h.settle();
+    }
+}

@@ -90,6 +90,11 @@ pub fn accent_color() -> u32 {
     argb_to_colorref(argb)
 }
 
+/// High-contrast foreground colour (0xRRGGBB) for drag merge/leave zone icons (#104).
+pub fn zone_icon_color(dark: bool) -> u32 {
+    if dark { 0xF8FAFC } else { 0x0F172A }
+}
+
 /// The app icon embedded as resource 1 (see `planor.rc`) at `size` x `size` pixels. Shared (cached by the system), so
 /// it is never freed and repeated calls do not leak USER objects.
 #[allow(clippy::manual_dangling_ptr)] // MAKEINTRESOURCE: resource id 1, not a pointer
