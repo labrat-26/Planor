@@ -1203,7 +1203,12 @@ impl Host {
         slot.clear();
         slot.extend_from_slice(rgn_holes);
     }
-    fn thumbnail(&mut self, id: isize, r: Rect, clip: Rect) -> bool {
+    /// Register (once) and position the DWM thumbnail of window `id`; true when it can be shown. `show` false
+    /// positions it HIDDEN (#110): during motion the stand-in usually draws the captured picture instead and hides
+    /// the thumbnail again, and a thumbnail made visible in between was composed for a frame over everything,
+    /// before the overlay's region holes are applied, covering topmost windows such as a PiP player. A thumbnail
+    /// that is already visible stays visible (hiding it until the deferred show would blank the stand-in).
+    fn thumbnail(&mut self, id: isize, r: Rect, clip: Rect, show: bool) -> bool {
         unsafe {
             let state = self.thumbs.entry(id).or_insert_with(|| {
                 let mut t = 0;
@@ -1255,7 +1260,7 @@ impl Host {
                     bottom: src.y + src.h,
                 },
                 opacity: 255,
-                fVisible: 1,
+                fVisible: (show || state.visible).into(),
                 fSourceClientAreaOnly: 0,
             };
             let hr = DwmUpdateThumbnailProperties(t, &props);
@@ -1270,7 +1275,7 @@ impl Host {
             state.tile = r;
             state.clip = clip;
             state.source_size = (size.cx, size.cy);
-            state.visible = true;
+            state.visible |= show;
             true
         }
     }
@@ -1284,6 +1289,22 @@ impl Host {
             };
             unsafe {
                 DwmUpdateThumbnailProperties(state.handle, &p);
+            }
+        }
+    }
+    /// Show a thumbnail positioned hidden by `thumbnail(.., false)`, once the region holes are applied.
+    fn show_thumbnail(&mut self, id: isize) {
+        if let Some(state) = self.thumbs.get_mut(&id)
+            && !state.visible
+            && state.handle != 0
+        {
+            let p = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_VISIBLE,
+                fVisible: 1,
+                ..Default::default()
+            };
+            if unsafe { DwmUpdateThumbnailProperties(state.handle, &p) } >= 0 {
+                state.visible = true;
             }
         }
     }
@@ -1380,6 +1401,12 @@ pub(crate) fn should_draw_backing(
     thumb_ok: bool,
 ) -> bool {
     moving || live_proxy || open_handoff || !thumb_ok
+}
+/// Whether a stand-in's DWM thumbnail is positioned hidden and shown only after the overlay's region holes are
+/// applied (#110). True exactly when `should_draw_backing` would replace it by the captured picture even with a
+/// working thumbnail: making it visible first composed it for a frame over topmost windows (a PiP player).
+pub(crate) fn defer_thumbnail_show(moving: bool, live_proxy: bool, open_handoff: bool) -> bool {
+    should_draw_backing(moving, live_proxy, open_handoff, true)
 }
 
 /// WGC window captures normally start at the visible frame (`(0, 0)`), whereas DWM thumbnails
@@ -1959,6 +1986,8 @@ struct FrameScratch {
     local_holes: Vec<Rect>,
     thumb_rects: Vec<Rect>,
     rgn_holes: Vec<Rect>,
+    /// Thumbnails positioned hidden during motion that no picture replaced: shown after the region holes (#110).
+    deferred_thumbs: Vec<isize>,
 }
 
 struct RenderState {
@@ -2570,6 +2599,7 @@ impl RenderState {
                 scratch.keep.clear();
                 scratch.host_hits.clear();
                 scratch.thumb_rects.clear();
+                scratch.deferred_thumbs.clear();
                 let mut full = false;
                 let mut source_device_lost: Option<u64> = None;
                 for tile in s.tiles.iter().filter(|tile| &tile.monitor == name) {
@@ -2691,7 +2721,10 @@ impl RenderState {
                         tile.hidden,
                     );
                     if let Some(c) = clip {
-                        let thumb_ok = proxy && host.thumbnail(tile.id, rs, c);
+                        // In motion the captured picture normally replaces the thumbnail, so position it hidden
+                        // and show it only if no picture is drawn, after the region holes are applied (#110).
+                        let defer_show = defer_thumbnail_show(moving, live_proxy, open_handoff);
+                        let thumb_ok = proxy && host.thumbnail(tile.id, rs, c, !defer_show);
                         let mut drew_backing = false;
                         if proxy
                             && should_draw_backing(moving, live_proxy, open_handoff, thumb_ok)
@@ -2764,6 +2797,9 @@ impl RenderState {
                                 host.hide_thumbnail(tile.id);
                             } else {
                                 scratch.thumb_rects.push(c);
+                                if defer_show {
+                                    scratch.deferred_thumbs.push(tile.id);
+                                }
                             }
                             scratch.keep.insert(tile.id);
                         }
@@ -3087,6 +3123,9 @@ impl RenderState {
                     host.desired_rgn_holes.clear();
                     host.desired_rgn_holes.extend_from_slice(&scratch.rgn_holes);
                     host.apply_rgn_holes(&scratch.rgn_holes);
+                    for &id in &scratch.deferred_thumbs {
+                        host.show_thumbnail(id);
+                    }
                     // 3. Show the overlay window ONLY after content is drawn/committed and region
                     // is applied, so stale borders or holes are never composed for a frame.
                     let can_show = !scratch.keep.is_empty() || host.surface.is_some();
@@ -3752,6 +3791,27 @@ mod tests {
                 .expect("grown source must refresh thumbnail properties");
         assert_eq!(src, Rect { x: 8, y: 0, w: 2560, h: 28 });
         assert_eq!(dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+    }
+
+    /// #110: a stand-in whose captured picture replaces the DWM thumbnail (motion, live stand-in, open handoff) must
+    /// position the thumbnail hidden and show it only after the region holes, never visible-then-hidden in one pass;
+    /// a settled peek shows its thumbnail right away. Exhaustive over the inputs, tied to `should_draw_backing`.
+    #[test]
+    fn thumbnail_show_is_deferred_exactly_when_the_picture_replaces_it() {
+        for bits in 0..8u8 {
+            let (moving, live, handoff) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            assert_eq!(
+                defer_thumbnail_show(moving, live, handoff),
+                moving || live || handoff,
+                "moving={moving} live={live} handoff={handoff}"
+            );
+            assert_eq!(
+                defer_thumbnail_show(moving, live, handoff),
+                should_draw_backing(moving, live, handoff, true),
+                "deferred exactly when a working thumbnail is still replaced by the picture"
+            );
+        }
+        assert!(!defer_thumbnail_show(false, false, false), "a settled peek shows its thumbnail at once");
     }
 
     #[test]
