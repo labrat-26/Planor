@@ -1,4 +1,4 @@
-#![allow(dead_code)] // the gesture cue card was retired in favour of the mauve target border
+#![allow(dead_code, clippy::enum_variant_names)] // the cue card is retired (no producer); kept until the render-thread plumbing is removed
 //! Non-interactive, orientation-aware animated SVG cues for Milestone 4.8 (#112, #113, #115).
 //!
 //! One single source of truth (`SvgScene` + `SvgElem`) generates both valid SVG XML markup and

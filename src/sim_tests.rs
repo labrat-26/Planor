@@ -1735,6 +1735,12 @@ fn n012_mouse_drop_tiles_beside_past_three_quarters_and_stacks_only_with_the_mod
         h.desktop.0.lock().unwrap().keys_down.insert(0x10);
         mouse_drag(&mut h, mover, (rt.x + rt.w / 2, rt.y + rt.h / 2));
         h.engine.tick().unwrap();
+        // A key held since before the drag does not count (edge semantics): release, then press afresh.
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+        h.engine.tick().unwrap();
+        h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+        h.engine.tick().unwrap();
+        h.engine.tick().unwrap();
         assert!(
             matches!(
                 h.engine.drag.as_ref().map(|d| d.phase),
@@ -10034,9 +10040,9 @@ fn spawn_on_cursor_monitor_false_lands_on_default_monitor() {
 }
 
 #[test]
-fn drag_hover_suppresses_green_border() {
-    // (#105) While dragging a window over another window (swap or stack hover), the target window
-    // must not get the green drop_target_color highlight border, while drop zones and icons stay.
+fn drag_hover_never_draws_the_stack_border_before_group_mode() {
+    // (#105, reworked in 4.8) While dragging over another window the target must not get the mauve stacked
+    // border (nor any other drop colour) unless the drop would STACK: neither a swap-region nor a middle hover does.
     let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
         sim.add_window(SimWindow::new(
             101,
@@ -10085,10 +10091,10 @@ fn drag_hover_suppresses_green_border() {
     assert_ne!(
         tile_color(&h, 102),
         h.engine.hot.stacked_color,
-        "target window must not draw green border during Swap hover (#105)"
+        "target window must not show the stack border during a before-quarter hover"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-    assert!(scene.tiles_len > 0, "scene still drawn during Swap hover");
+    assert!(scene.cue.is_none(), "no cue card exists any more");
 
     // 2. Hover in Stack (merge) region (centre of target 102)
     h.desktop.0.lock().unwrap().cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
@@ -10102,10 +10108,10 @@ fn drag_hover_suppresses_green_border() {
     assert_ne!(
         tile_color(&h, 102),
         h.engine.hot.stacked_color,
-        "target window must not draw green border during Stack hover (#105)"
+        "target window must not show the stack border during a plain middle hover (no modifier)"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-    assert!(scene.tiles_len > 0, "scene still drawn during Stack hover");
+    assert!(scene.cue.is_none(), "no cue card exists any more");
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
 }
@@ -10726,8 +10732,8 @@ fn configured_group_modifier_ctrl_and_alt_activate_group_mode_and_shift_does_not
 }
 
 /// A modifier already held when the dwell completes still shows the preview first (review #21): group
-/// mode needs a press seen after the preview started.
-#[test]
+/// A modifier already held when the dwell completes shows the preview and does NOT group (review #13): group
+/// mode needs a fresh press after the preview started.
 fn modifier_held_before_the_dwell_still_previews_first() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
     focus(&mut h, 101);
@@ -10750,6 +10756,16 @@ fn modifier_held_before_the_dwell_still_previews_first() {
         "{:?}",
         phase(&h)
     );
+    // Edge semantics (review #13): a key held since before the preview never groups on its own ...
+    h.engine.tick().unwrap();
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { .. })
+    ));
+    // ... it must be released and pressed again.
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+    h.engine.tick().unwrap();
+    h.desktop.0.lock().unwrap().keys_down.insert(0x10);
     h.engine.tick().unwrap();
     assert!(matches!(
         phase(&h),
@@ -11083,6 +11099,157 @@ fn the_dragged_or_resized_window_gets_an_overlay_hole() {
     assert!(
         !h.engine.last_holes.iter().any(|hole| *hole == frame),
         "the hole goes away with the drag"
+    );
+    h.stop_clean();
+}
+
+/// #116: moving back toward the centre while still inside the edge zone stops the scroll promptly.
+#[test]
+fn edge_scroll_stops_when_the_pointer_reverses_inside_the_zone() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    mouse_hold(&mut h, 103, (60, 600)); // inside the leading 10 % zone
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    let moving = h.engine.strips[&key].offset;
+    h.desktop.0.lock().unwrap().cursor = (140, 600); // back toward the centre, still inside the zone
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, moving,
+        "reversal stops the scroll even inside the zone"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// Review #2: a brisk lift after a committed perpendicular group swipe stacks the window; it is not flung.
+#[test]
+fn fling_does_not_hijack_a_committed_group_entry() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let before = h.engine.drag.is_none();
+    assert!(before);
+    h.engine.hot.swipe_fling_speed = 1.0; // any lift qualifies as a fling
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=40 {
+        h.engine
+            .event(Event::Contacts(four(500. + 10. * i as f64, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    if let Some(d) = h.engine.drag.as_mut() {
+        d.phase = crate::daemon::DragPhase::MiddleGroup {
+            target: 102,
+            direction: 1,
+        };
+        d.target = Some(102);
+        d.mode = planor::Drag::Stack;
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert!(
+        h.engine.strips[&(1, "MON0".to_string())]
+            .locate(101)
+            .is_some(),
+        "the window stayed on its monitor (not flung away)"
+    );
+    h.stop_clean();
+}
+
+/// Review #1: after the vacancy delay the neighbours are drawn in the closed slot; a neighbour must be
+/// targetable where it is DRAWN, not where it used to be.
+#[test]
+fn after_the_vacancy_delay_neighbours_are_hit_where_they_are_drawn() {
+    let mut cfg = note_cfg();
+    cfg["layout"]["drag_vacancy_delay_ms"] = toml::Value::Integer(0);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    // Window 101 is first. With it removed, 102 slides left into x == area.x.
+    let mut closed = h.engine.strips[&key].clone();
+    closed.remove(101);
+    closed.fill();
+    let r102 = closed.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1;
+    let at = (r102.x + r102.w / 2, r102.y + r102.h / 2);
+    let old = h.engine.strips[&key]
+        .rects(96)
+        .into_iter()
+        .find(|x| x.0 == 102)
+        .unwrap()
+        .1;
+    assert_ne!((r102.x, r102.w), (old.x, old.w), "the slot really closes");
+    mouse_hold(&mut h, 101, at);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let d = h.engine.drag.as_ref().expect("drag in flight");
+    assert_eq!(d.vacancy, crate::daemon::VacancyState::Closed);
+    assert_eq!(
+        d.target,
+        Some(102),
+        "the drawn neighbour is targeted, phase {:?}",
+        d.phase
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// Port of the #44 regression to the 4.8 model (review #7): a qualifying four-finger fling released onto
+/// another monitor ends the pad and drag sessions at once, engages the placeholder cover, and transfers the
+/// window even though the asynchronous OS move has not landed yet.
+#[test]
+fn fling_release_onto_another_monitor_commits_immediately_even_before_async_move_lands() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_fling_speed"] = toml::Value::Integer(100);
+    cfg["animation"]["placeholder"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 301);
+    let orig = h.rect(301);
+    let mut steps = vec![(0., 5.); 4];
+    steps.extend(vec![(10., 0.); 6]);
+    feed_steps(&mut h, &mut steps);
+    assert!(h.engine.pad.is_some(), "carrying");
+    // A slow cross-DPI app: its OS frame has not left the original rect yet.
+    h.desktop
+        .0
+        .lock()
+        .unwrap()
+        .windows
+        .get_mut(&301)
+        .unwrap()
+        .rect = orig;
+    h.engine.event(Event::Contacts(vec![]));
+    assert!(h.engine.pad.is_none(), "tip-up releases the pad at once");
+    assert!(h.engine.drag.is_none(), "the drag session ends at once");
+    assert!(
+        h.engine.covering.contains_key(&301),
+        "the transfer engages the placeholder cover"
+    );
+    h.settle();
+    let on = h
+        .engine
+        .strips
+        .iter()
+        .find(|(_, s)| s.locate(301).is_some())
+        .map(|(k, _)| k.1.clone());
+    assert_eq!(
+        on,
+        Some("MON0".to_string()),
+        "transferred before the OS move landed"
     );
     h.stop_clean();
 }

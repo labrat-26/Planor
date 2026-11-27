@@ -97,7 +97,7 @@ steps of 15 ms (slow, < 300 px/s over the final 400 ms), `LEFTUP`. Always restor
 1. `reorder_before_after`: drag window 2 over the outer 25% left edge of window 0 and drop: order becomes 2,0,1.
 2. `drop_on_center_stacks`: hover the center 50% of another window >= 450 ms, drop: they are one stack
    (one of them `reachable`, the other a stack peek); border colour stacked.
-3. `shift_freezes_reflow`: hold Shift while dragging across tiles: no neighbour moves (>2px) until drop.
+3. `before_quarter_keeps_neighbours_fixed`: inside the first quarter of a neighbour (Shift held, which no longer changes anything there) no neighbour moves (>2px) until drop.
 4. `drag_out_of_stack`: drag a stack member out: auto-unwrap, both become normal tiles, focus follows dragged window.
 5. `drag_to_portrait_monitor`: needs a portrait monitor. Drag a sentinel onto it. Expected: the window ends on the
    portrait monitor, strip scrolls **vertically** (two windows there share the width, differ in y, each width ==

@@ -380,6 +380,8 @@ pub(crate) struct DragSession {
     /// overlay, so the preview never moves the thresholds under the pointer.
     pub target_rect: Option<(isize, Rect)>,
     pub dwell_anchor: (i32, i32),
+    /// The group key was already held when the preview began: it must be released and pressed again.
+    pub modifier_held_at_preview: bool,
     pub dwell_since: Option<Instant>,
     pub phase: DragPhase,
     pub mode: planor::Drag,
@@ -1887,7 +1889,8 @@ impl<B: WindowBackend> Engine<B> {
                             );
                         }
                         if cloned.locate(d.id).is_some() && cloned.locate(target).is_some() {
-                            cloned.group(d.id, target);
+                            let leading = matches!(d.phase, DragPhase::MiddleGroup { direction, .. } if direction < 0);
+                            cloned.group_at(d.id, target, leading);
                             preview_strips.insert(dest_key.clone(), cloned);
                         }
                     }
@@ -2439,6 +2442,7 @@ impl<B: WindowBackend> Engine<B> {
                 entry_edge: None,
                 target_rect: None,
                 dwell_anchor: point,
+                modifier_held_at_preview: false,
                 dwell_since: None,
                 phase: DragPhase::None,
                 mode: planor::Drag::None,
@@ -2880,12 +2884,13 @@ impl<B: WindowBackend> Engine<B> {
                     })
                     .map(|m| m.2)
             });
-        let b = own.unwrap_or(Rect {
-            x: 0,
-            y: 0,
-            w: 1,
-            h: 1,
-        });
+        let Some(b) = own else {
+            // No monitor to confine the drag to: do not pick the window up at all.
+            self.drag = None;
+            return;
+        };
+        // The grab point is confined to the home monitor (#111). The window may overhang an edge: a window as
+        // wide as the monitor must still move across the strip axis, so its rect is not clamped.
         let limits = (
             b.x as f64,
             b.y as f64,
@@ -3121,7 +3126,14 @@ impl<B: WindowBackend> Engine<B> {
             (p.cursor.1 - p.grab.1).round() as i32,
         );
         let threshold = self.hot.swipe_fling_speed;
-        if self.hot.swipe_fling_enabled && vx.hypot(vy) >= threshold {
+        // A committed group entry or stack exit is the gesture; a brisk lift must not turn it into a transfer.
+        let committed = self.drag.as_ref().is_some_and(|d| {
+            matches!(
+                d.phase,
+                DragPhase::MiddleGroup { .. } | DragPhase::StackExit { .. }
+            )
+        });
+        if self.hot.swipe_fling_enabled && !committed && vx.hypot(vy) >= threshold {
             let (dx, dy) = if vx.abs() >= vy.abs() {
                 (if vx > 0. { 1 } else { -1 }, 0)
             } else {
@@ -3363,7 +3375,17 @@ impl<B: WindowBackend> Engine<B> {
                 } else {
                     (p.1, s.area.y, s.area.y + s.area.h)
                 };
-                let dir = planor::edge_scroll_direction(pos, lo, hi, hot.drag_edge_scroll_percent);
+                let mut dir =
+                    planor::edge_scroll_direction(pos, lo, hi, hot.drag_edge_scroll_percent);
+                // Reversing (moving back toward the centre while still inside the zone) stops the scroll promptly.
+                let prev_pos = if horizontal {
+                    prev_point.0
+                } else {
+                    prev_point.1
+                };
+                if dir != 0 && point_moved && (pos - prev_pos) * dir < 0 {
+                    dir = 0;
+                }
                 if dir != 0 {
                     if dir != d.edge_scroll_dir {
                         d.edge_scroll_dir = dir;
@@ -3420,6 +3442,8 @@ impl<B: WindowBackend> Engine<B> {
         }
         if edge_scrolled {
             // Strip moved underneath the pointer: never spuriously complete dwell/grouping while scrolling.
+            d.target_rect = None;
+            d.entry_edge = None;
             d.dwell_anchor = p;
             d.dwell_since = Some(now);
         }
@@ -3501,7 +3525,22 @@ impl<B: WindowBackend> Engine<B> {
                     .get(&k)
                     .is_some_and(|s| s.locate(*tid).is_some())
         });
-        let hit = self.strips.get(&k).and_then(|s| {
+        // Hit-test what is drawn (review #1): once the vacated slot has closed, the home strip is shown with the
+        // held window removed and the neighbours filled in, so bands and hits must use that geometry too.
+        let closed_home: Option<Strip> = if d.vacancy == VacancyState::Closed
+            && k == d.key
+            && let Some(hs) = self.strips.get(&d.key)
+            && hs.locate(d.id).is_some()
+        {
+            let mut c = hs.clone();
+            c.remove(d.id);
+            c.fill();
+            Some(c)
+        } else {
+            None
+        };
+        let hit_strip: Option<&Strip> = closed_home.as_ref().or_else(|| self.strips.get(&k));
+        let hit = hit_strip.and_then(|s| {
             let horizontal = s.area.horizontal();
             let found = match frozen {
                 Some(fr) => Some(fr),
@@ -3598,7 +3637,13 @@ impl<B: WindowBackend> Engine<B> {
                                 // Group mode latches once the modifier activated it: releasing the key together with the
                                 // mouse button must not downgrade the drop to a plain tile.
                                 let latched = matches!(prev_phase, DragPhase::MiddleGroup { target, .. } if target == tid);
-                                if latched || self.backend.key_down(hot.drag_stack_modifier_vk) {
+                                let down = self.backend.key_down(hot.drag_stack_modifier_vk);
+                                // Edge semantics (review #13): a key already held when the preview began must be released and
+                                // pressed again; only a fresh press activates group mode.
+                                if !down {
+                                    d.modifier_held_at_preview = false;
+                                }
+                                if latched || (down && !d.modifier_held_at_preview) {
                                     (
                                         Some(tid),
                                         DragPhase::MiddleGroup {
@@ -3631,8 +3676,11 @@ impl<B: WindowBackend> Engine<B> {
                             }
                         } else {
                             // Stationary dwell detection inside middle range (1/4..3/4).
-                            let moved_far = (p.0 - d.dwell_anchor.0).abs() > 4
-                                || (p.1 - d.dwell_anchor.1).abs() > 4;
+                            // Stillness tolerance: looser than a bare 4 px (hi-DPI mice jitter) and much looser for a
+                            // trackpad, whose cursor carries the pad gain (one raw unit is several pixels).
+                            let tol = if d.pad_drag { 24 } else { 6 };
+                            let moved_far = (p.0 - d.dwell_anchor.0).abs() > tol
+                                || (p.1 - d.dwell_anchor.1).abs() > tol;
                             if d.dwell_since.is_none() || moved_far || edge_scrolled {
                                 d.dwell_anchor = p;
                                 d.dwell_since = Some(now);
@@ -3647,6 +3695,8 @@ impl<B: WindowBackend> Engine<B> {
                                 d.vacancy = VacancyState::Bypassed;
                                 // Always enter the preview first: the press-key cue shows, and only a press seen
                                 // afterwards activates group mode (review #21).
+                                d.modifier_held_at_preview =
+                                    self.backend.key_down(hot.drag_stack_modifier_vk);
                                 (
                                     Some(tid),
                                     DragPhase::MiddlePreview { target: tid, after },
@@ -4461,16 +4511,25 @@ pub(crate) fn group_column_rect(s: &Strip, id: isize, peek: i32) -> Rect {
 }
 impl DragSession {
     fn point_after_mid_fallback(&self, strip: Option<&Strip>, target: isize, peek: i32) -> bool {
-        let Some(s) = strip else {
-            return false;
+        // Prefer the frozen target rect (review #14): the strip may have shifted since the preview began.
+        let frozen = self
+            .target_rect
+            .filter(|(tid, _)| *tid == target)
+            .map(|(_, r)| r);
+        let (v, horizontal) = match (frozen, strip) {
+            (Some(v), Some(s)) => (v, s.area.horizontal()),
+            (None, Some(s)) => {
+                let Some((_, r)) = s.rects(peek).into_iter().find(|(w, _)| *w == target) else {
+                    return false;
+                };
+                let Some(v) = clip(r, s.area) else {
+                    return false;
+                };
+                (v, s.area.horizontal())
+            }
+            _ => return false,
         };
-        let Some((_, r)) = s.rects(peek).into_iter().find(|(w, _)| *w == target) else {
-            return false;
-        };
-        let Some(v) = clip(r, s.area) else {
-            return false;
-        };
-        if s.area.horizontal() {
+        if horizontal {
             (self.point.0 - v.x) as i64 * 2 >= v.w.max(1) as i64
         } else {
             (self.point.1 - v.y) as i64 * 2 >= v.h.max(1) as i64

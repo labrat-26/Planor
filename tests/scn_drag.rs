@@ -624,7 +624,7 @@ fn drop_on_center_stacks() {
 
 #[test]
 #[ignore]
-fn shift_freezes_reflow() {
+fn before_quarter_keeps_neighbours_fixed() {
     aware();
     let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("s4-shift");
@@ -663,7 +663,7 @@ fn shift_freezes_reflow() {
             let moved = (0..4).any(|c| (now[c] - before[k][c]).abs() > 2);
             assert!(
                 !moved,
-                "shift_freezes_reflow: Shift held while dragging window 1 over the left edge of window 0; neighbour window {i} moved before the drop (sample {sample}, ~{} ms into the hold): expected {:?} (+-2px), observed {:?}",
+                "before_quarter_keeps_neighbours_fixed: dragging window 1 over the left edge of window 0 (before the first quarter, Shift held); neighbour window {i} moved before the drop (sample {sample}, ~{} ms into the hold): expected {:?} (+-2px), observed {:?}",
                 (sample + 1) * 200,
                 before[k],
                 now
