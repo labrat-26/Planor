@@ -1587,6 +1587,9 @@ pub(crate) fn park_y_for_monitor(
     all_monitors: &[Rect],
 ) -> i32 {
     let y = park_y_unclamped(park_x, monitor, bound, all_monitors);
+    // Windows clamps top-level window y to the 16-bit range; a target beyond it is never reached, so the
+    // window looked misplaced every tick and was re-placed forever (flicker, 22:05 bundle).
+    let y = y.max(-32768);
     let lim = WIN32_COORD_LIMIT;
     if y.saturating_add(monitor.h.max(1)) > lim || y < -lim {
         return bound.y.clamp(-lim, (lim - monitor.h.max(1)).max(-lim));
@@ -5968,5 +5971,25 @@ mod tests {
         assert!(!super::should_register_peek_hit(
             false, false, false, false, true, false
         ));
+    }
+}
+
+#[cfg(test)]
+mod park_range_tests {
+    use super::*;
+
+    /// Windows clamps window y to -32768; a park target beyond it was re-placed every tick (flicker).
+    #[test]
+    fn park_y_never_beyond_the_16_bit_window_range() {
+        let m = |x, y, w, h| Rect { x, y, w, h };
+        let all = [
+            m(0, 0, 1920, 1200),
+            m(0, -1440, 2560, 1440),
+            m(-1440, -1859, 1440, 2560),
+        ];
+        for mon in all {
+            let y = park_y_for_monitor(3584, mon, mon, &all);
+            assert!(y >= -32768, "{mon:?} -> {y}");
+        }
     }
 }
