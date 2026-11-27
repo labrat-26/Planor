@@ -90,13 +90,13 @@ pub(crate) const REMOVED_KEYS: &[&str] = &[
     "swipe_drag_cross_monitors",
     "drop_target_color",
     "group_hover_color",
+    "drag_vacancy_delay_ms",
 ];
 
 /// Largest accepted integer for setting `k` (the single source for validation, stepping and range hints).
 pub(crate) fn int_max(k: &str) -> i64 {
     match k {
         "drag_dwell_ms" => 5000,
-        "drag_vacancy_delay_ms" => 10000,
         "drag_edge_scroll_percent" => 40,
         _ => 100000,
     }

@@ -10186,10 +10186,6 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
             "{mon}: middle range waits for the dwell: {:?}",
             phase(&h)
         );
-        assert!(
-            h.engine.drag.as_ref().unwrap().vacancy != crate::daemon::VacancyState::Bypassed,
-            "{mon}: vacancy timer untouched until a preview triggers"
-        );
         h.engine
             .advance_drag_timers_for_test(Duration::from_millis(300));
         h.engine.tick().unwrap();
@@ -10208,11 +10204,6 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
             "{mon}: a tile-beside preview never shows the stack border"
         );
         assert!(zones(&h).is_empty(), "{mon}: no cue card exists any more");
-        assert_eq!(
-            h.engine.drag.as_ref().unwrap().vacancy,
-            crate::daemon::VacancyState::Bypassed,
-            "{mon}: preview bypasses the vacancy delay"
-        );
         // Press the setting-selected modifier (Shift by default): group mode.
         h.desktop.0.lock().unwrap().keys_down.insert(0x10);
         h.engine.tick().unwrap();
@@ -10323,77 +10314,27 @@ fn zero_dwell_previews_on_the_first_middle_range_sample() {
     h.stop_clean();
 }
 
-/// The vacated slot stays reserved for `drag_vacancy_delay_ms`, then closes (#114).
+/// The vacated slot stays reserved for the whole drag: neighbours never slide into it, however long the
+/// held window is carried or scrolled (owner decision after the 2 s jump; #114 timer removed).
 #[test]
-fn vacancy_delay_reserves_the_slot_then_closes_and_a_new_drag_starts_fresh() {
+fn vacated_slot_stays_reserved_for_the_whole_drag() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
-    assert_eq!(
-        h.engine.hot.drag_vacancy_delay_ms, 2000,
-        "default is two seconds"
-    );
     focus(&mut h, 101);
     let r1 = h.rect(101);
-    let free = (r1.x + 20, 1190); // below every tile: no target
-    mouse_hold(&mut h, 101, free);
-    assert!(
-        matches!(
-            h.engine.drag.as_ref().unwrap().vacancy,
-            crate::daemon::VacancyState::Reserved { .. }
-        ),
-        "slot reserved while the move is in progress"
-    );
-    h.engine
-        .advance_drag_timers_for_test(Duration::from_millis(1900));
-    h.engine.tick().unwrap();
-    assert!(matches!(
-        h.engine.drag.as_ref().unwrap().vacancy,
-        crate::daemon::VacancyState::Reserved { .. }
-    ));
-    h.engine
-        .advance_drag_timers_for_test(Duration::from_millis(200));
-    h.engine.tick().unwrap();
-    assert_eq!(
-        h.engine.drag.as_ref().unwrap().vacancy,
-        crate::daemon::VacancyState::Closed,
-        "closed after the configured delay"
-    );
-    // Cancelled gesture: restoring the frame and dropping leaves the layout; the next drag is fresh.
-    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
-    h.desktop
-        .0
-        .lock()
-        .unwrap()
-        .windows
-        .get_mut(&101)
-        .unwrap()
-        .rect = r1;
-    drop_now(&mut h, 101);
-    assert!(h.engine.drag.is_none());
-    focus(&mut h, 101);
-    mouse_hold(&mut h, 101, free);
-    assert!(
-        matches!(
-            h.engine.drag.as_ref().unwrap().vacancy,
-            crate::daemon::VacancyState::Reserved { .. }
-        ),
-        "a stale Closed state never leaks into the next gesture"
-    );
-    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
-    h.stop_clean();
-}
-
-/// A zero delay closes the vacancy at once (#114 bounds/semantics).
-#[test]
-fn zero_vacancy_delay_closes_immediately() {
-    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
-    h.engine.hot.drag_vacancy_delay_ms = 0;
-    focus(&mut h, 101);
-    let r1 = h.rect(101);
-    mouse_hold(&mut h, 101, (r1.x + 20, 1190));
-    assert_eq!(
-        h.engine.drag.as_ref().unwrap().vacancy,
-        crate::daemon::VacancyState::Closed
-    );
+    let r102 = h.rect(102);
+    let r103 = h.rect(103);
+    mouse_hold(&mut h, 101, (r1.x + 20, 1190)); // below every tile: no target
+    for secs in [3u64, 6, 12] {
+        h.engine
+            .advance_drag_timers_for_test(Duration::from_secs(secs));
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(
+            (h.rect(102), h.rect(103)),
+            (r102, r103),
+            "after {secs} s more: neighbours stay where they were (no closing jump)"
+        );
+    }
     h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
     h.stop_clean();
 }
@@ -10731,9 +10672,9 @@ fn configured_group_modifier_ctrl_and_alt_activate_group_mode_and_shift_does_not
     }
 }
 
-/// A modifier already held when the dwell completes still shows the preview first (review #21): group
 /// A modifier already held when the dwell completes shows the preview and does NOT group (review #13): group
 /// mode needs a fresh press after the preview started.
+#[test]
 fn modifier_held_before_the_dwell_still_previews_first() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
     focus(&mut h, 101);
@@ -10830,7 +10771,6 @@ fn new_drag_settings_are_validated_with_documented_bounds() {
     let int = toml::Value::Integer;
     for (k, ok, bad) in [
         ("drag_dwell_ms", 5000, 5001),
-        ("drag_vacancy_delay_ms", 10000, 10001),
         ("drag_edge_scroll_percent", 40, 41),
     ] {
         assert!(crate::valid_value(k, &int(1), &int(0)), "{k}: 0 is valid");
@@ -10840,11 +10780,7 @@ fn new_drag_settings_are_validated_with_documented_bounds() {
     }
     let m = crate::settings_model::Model::from_text(std::path::Path::new("p.toml"), crate::EXAMPLE)
         .unwrap();
-    for k in [
-        "drag_dwell_ms",
-        "drag_vacancy_delay_ms",
-        "drag_edge_scroll_percent",
-    ] {
+    for k in ["drag_dwell_ms", "drag_edge_scroll_percent"] {
         assert!(
             m.entries.iter().any(|e| e.key == k),
             "{k} appears in the settings window"
@@ -11166,44 +11102,6 @@ fn fling_does_not_hijack_a_committed_group_entry() {
             .is_some(),
         "the window stayed on its monitor (not flung away)"
     );
-    h.stop_clean();
-}
-
-/// Review #1: after the vacancy delay the neighbours are drawn in the closed slot; a neighbour must be
-/// targetable where it is DRAWN, not where it used to be.
-#[test]
-fn after_the_vacancy_delay_neighbours_are_hit_where_they_are_drawn() {
-    let mut cfg = note_cfg();
-    cfg["layout"]["drag_vacancy_delay_ms"] = toml::Value::Integer(0);
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
-    h.engine.hot.drag_dwell_ms = 0;
-    let key = (1, "MON0".to_string());
-    focus(&mut h, 101);
-    // Window 101 is first. With it removed, 102 slides left into x == area.x.
-    let mut closed = h.engine.strips[&key].clone();
-    closed.remove(101);
-    closed.fill();
-    let r102 = closed.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1;
-    let at = (r102.x + r102.w / 2, r102.y + r102.h / 2);
-    let old = h.engine.strips[&key]
-        .rects(96)
-        .into_iter()
-        .find(|x| x.0 == 102)
-        .unwrap()
-        .1;
-    assert_ne!((r102.x, r102.w), (old.x, old.w), "the slot really closes");
-    mouse_hold(&mut h, 101, at);
-    h.engine.tick().unwrap();
-    h.settle_quiet();
-    let d = h.engine.drag.as_ref().expect("drag in flight");
-    assert_eq!(d.vacancy, crate::daemon::VacancyState::Closed);
-    assert_eq!(
-        d.target,
-        Some(102),
-        "the drawn neighbour is targeted, phase {:?}",
-        d.phase
-    );
-    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
     h.stop_clean();
 }
 

@@ -13,7 +13,7 @@ Milestone 4.8 (#111-#117).
 - **Edge scroll (#116)** eases in with hold time and depth into the zone, animates like a trackpad scroll and is no longer blocked by a preview; the dragged or resized window is cut out of the overlay so it stays above its neighbours.
 
 ### Added
-- Vacated-space delay `drag_vacancy_delay_ms` (#114), edge scroll for mouse and pad via `drag_edge_scroll_percent` (#116), `drag_dwell_ms`.
+- The space vacated by a dragged window stays reserved for the whole drag (#114; the delay setting `drag_vacancy_delay_ms` is gone and old configs still load), edge scroll for mouse and pad via `drag_edge_scroll_percent` (#116), `drag_dwell_ms`.
 
 ### Removed
 - `stack_zone_percent`, `swipe_drag_cross_monitors`, `drop_target_color` and `group_hover_color` (old configs still load; the keys are ignored silently).

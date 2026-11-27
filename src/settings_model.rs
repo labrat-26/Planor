@@ -220,7 +220,6 @@ impl Model {
 pub(crate) fn range_hint(e: &Entry) -> &'static str {
     match &e.default {
         toml::Value::Integer(_) if e.key == "drag_dwell_ms" => "0 to 5000 ms",
-        toml::Value::Integer(_) if e.key == "drag_vacancy_delay_ms" => "0 to 10000 ms",
         toml::Value::Integer(_) if e.key == "drag_edge_scroll_percent" => "0 to 40 %",
         toml::Value::Integer(_) => "0 to 100000",
         toml::Value::Float(_) if e.key == "default_tile_share" => "above 0, at most 1",

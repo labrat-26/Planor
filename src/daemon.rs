@@ -141,7 +141,6 @@ pub(crate) struct HotCfg {
     pub peek_width_px: i32,
     pub stack_peek_px: Option<i32>,
     pub drag_dwell_ms: u64,
-    pub drag_vacancy_delay_ms: u64,
     pub drag_edge_scroll_percent: i32,
     pub spawn_on_cursor_monitor: bool,
     pub focus_follows_mouse: bool,
@@ -214,10 +213,6 @@ impl HotCfg {
                 .as_integer()
                 .unwrap_or(250)
                 .clamp(0, 5000) as u64,
-            drag_vacancy_delay_ms: layout["drag_vacancy_delay_ms"]
-                .as_integer()
-                .unwrap_or(2000)
-                .clamp(0, 10000) as u64,
             drag_edge_scroll_percent: layout["drag_edge_scroll_percent"]
                 .as_integer()
                 .unwrap_or(10)
@@ -308,24 +303,6 @@ impl GestureRec {
         self.events.push(v);
     }
 }
-/// Lifecycle of the vacated-space closure timer during a drag (#114).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum VacancyState {
-    /// Window has not yet started moving (click / resize).
-    Unarmed,
-    /// Original slot remains reserved until `delay_ms` elapses or preview/group/drop bypasses it.
-    Reserved {
-        armed_at: Instant,
-        delay_ms: u64,
-        drag_gen: u64,
-        topology_gen: u64,
-    },
-    /// Delay elapsed with no preview/group/exit: vacated space closed in preview.
-    Closed,
-    /// Bypassed immediately by preview, group mode, stack exit, completion, or cancellation.
-    Bypassed,
-}
-
 /// Authoritative gesture-driven drag phase (#113, #115).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DragPhase {
@@ -365,10 +342,8 @@ pub(crate) enum DragPhase {
 }
 
 pub(crate) struct DragSession {
-    pub session_gen: u64,
     /// Minimum size of the held window, read once at pick-up (a `WM_GETMINMAXINFO` round trip can block).
     pub min_size: (i32, i32),
-    pub topology_gen: u64,
     pub id: isize,
     pub key: Key,
     pub original: Rect,
@@ -385,7 +360,6 @@ pub(crate) struct DragSession {
     pub dwell_since: Option<Instant>,
     pub phase: DragPhase,
     pub mode: planor::Drag,
-    pub vacancy: VacancyState,
     pub cue_started_at: Option<Instant>,
     pub cue_sig: Option<(crate::cue::CueInput, crate::cue::CueKind, String)>,
     pub pad_perp_accum: f64,
@@ -619,9 +593,6 @@ impl<B: WindowBackend> Engine<B> {
         if let Some(d) = self.drag.as_mut() {
             if let Some(since) = d.dwell_since.as_mut() {
                 *since = since.checked_sub(delta).unwrap_or(*since);
-            }
-            if let VacancyState::Reserved { armed_at, .. } = &mut d.vacancy {
-                *armed_at = armed_at.checked_sub(delta).unwrap_or(*armed_at);
             }
             if let Some(at) = d.edge_scroll_at.as_mut() {
                 *at = at.checked_sub(delta).unwrap_or(*at);
@@ -1844,8 +1815,7 @@ impl<B: WindowBackend> Engine<B> {
                 d.phase,
                 DragPhase::MiddlePreview { .. } | DragPhase::MiddleGroup { .. }
             );
-            let close_home =
-                d.vacancy == VacancyState::Closed || (dest_key != d.key && preview_active);
+            let close_home = dest_key != d.key && preview_active;
             if close_home
                 && !(dest_key == d.key && preview_active)
                 && let Some(home_s) = self.strips.get(&d.key)
@@ -2416,25 +2386,8 @@ impl<B: WindowBackend> Engine<B> {
             let pad_drag = self.pad.is_some();
             let saw_lbutton_down = !pad_drag && self.backend.primary_button_down();
             self.drag_gen = self.drag_gen.wrapping_add(1);
-            let now = Instant::now();
-            let vacancy = if pad_drag {
-                if self.hot.drag_vacancy_delay_ms == 0 {
-                    VacancyState::Closed
-                } else {
-                    VacancyState::Reserved {
-                        armed_at: now,
-                        delay_ms: self.hot.drag_vacancy_delay_ms,
-                        drag_gen: self.drag_gen,
-                        topology_gen: self.topology_gen,
-                    }
-                }
-            } else {
-                VacancyState::Unarmed
-            };
             self.drag = Some(DragSession {
-                session_gen: self.drag_gen,
                 min_size: self.backend.minimum_size(id),
-                topology_gen: self.topology_gen,
                 id,
                 key,
                 original,
@@ -2448,7 +2401,6 @@ impl<B: WindowBackend> Engine<B> {
                 dwell_since: None,
                 phase: DragPhase::None,
                 mode: planor::Drag::None,
-                vacancy,
                 cue_started_at: None,
                 cue_sig: None,
                 pad_perp_accum: 0.0,
@@ -2906,16 +2858,6 @@ impl<B: WindowBackend> Engine<B> {
             d.point = (cx, cy);
             d.dwell_anchor = (cx, cy);
             d.destination = home.clone();
-            d.vacancy = if self.hot.drag_vacancy_delay_ms == 0 {
-                VacancyState::Closed
-            } else {
-                VacancyState::Reserved {
-                    armed_at: now,
-                    delay_ms: self.hot.drag_vacancy_delay_ms,
-                    drag_gen: d.session_gen,
-                    topology_gen: d.topology_gen,
-                }
-            };
         }
         let home_lock = self.gesture.axis_lock.and(
             home.as_ref()
@@ -3020,7 +2962,6 @@ impl<B: WindowBackend> Engine<B> {
                         };
                         d.mode = planor::Drag::Stack;
                         d.pad_perp_accum = 0.0;
-                        d.vacancy = VacancyState::Bypassed;
                         d.edge_scroll_at = None;
                         d.edge_scroll_frac = 0.0;
                         d.edge_scroll_dir = 0;
@@ -3204,8 +3145,6 @@ impl<B: WindowBackend> Engine<B> {
             return;
         }
         let now = Instant::now();
-        let topology_gen = self.topology_gen;
-        let engine_gen = self.drag_gen;
         let hot = self.hot;
         let Some(d) = self.drag.as_mut() else { return };
         let release_sampled = d.lbutton_up_since.is_some();
@@ -3275,43 +3214,6 @@ impl<B: WindowBackend> Engine<B> {
                 self.dirty = true;
             }
             return;
-        }
-        // #114: arm vacancy timer as soon as movement starts, or expire it if still reserved.
-        let mut vacancy_reflow = false;
-        match d.vacancy {
-            VacancyState::Unarmed => {
-                if hot.drag_vacancy_delay_ms == 0 {
-                    d.vacancy = VacancyState::Closed;
-                    vacancy_reflow = true;
-                } else {
-                    d.vacancy = VacancyState::Reserved {
-                        armed_at: now,
-                        delay_ms: hot.drag_vacancy_delay_ms,
-                        drag_gen: d.session_gen,
-                        topology_gen: d.topology_gen,
-                    };
-                }
-            }
-            VacancyState::Reserved {
-                armed_at,
-                delay_ms,
-                drag_gen,
-                topology_gen: armed_topo,
-            } => {
-                if drag_gen != d.session_gen || drag_gen != engine_gen || armed_topo != topology_gen
-                {
-                    d.vacancy = VacancyState::Bypassed;
-                } else if now.duration_since(armed_at) >= Duration::from_millis(delay_ms) {
-                    d.vacancy = VacancyState::Closed;
-                    vacancy_reflow = true;
-                }
-            }
-            VacancyState::Closed | VacancyState::Bypassed => {}
-        }
-        if vacancy_reflow {
-            self.action = "drag_reflow";
-            self.instant = false;
-            self.dirty = true;
         }
 
         let release = self.backend.last_release();
@@ -3553,21 +3455,7 @@ impl<B: WindowBackend> Engine<B> {
                     .get(&k)
                     .is_some_and(|s| s.locate(*tid).is_some())
         });
-        // Hit-test what is drawn (review #1): once the vacated slot has closed, the home strip is shown with the
-        // held window removed and the neighbours filled in, so bands and hits must use that geometry too.
-        let closed_home: Option<Strip> = if d.vacancy == VacancyState::Closed
-            && k == d.key
-            && let Some(hs) = self.strips.get(&d.key)
-            && hs.locate(d.id).is_some()
-        {
-            let mut c = hs.clone();
-            c.remove(d.id);
-            c.fill();
-            Some(c)
-        } else {
-            None
-        };
-        let hit_strip: Option<&Strip> = closed_home.as_ref().or_else(|| self.strips.get(&k));
+        let hit_strip: Option<&Strip> = self.strips.get(&k);
         let hit = hit_strip.and_then(|s| {
             let horizontal = s.area.horizontal();
             let found = match frozen {
@@ -3636,7 +3524,6 @@ impl<B: WindowBackend> Engine<B> {
                         d.dwell_since = None;
                         d.pad_perp_accum = 0.0;
                         if let Some(trailing) = stack_exit_dir {
-                            d.vacancy = VacancyState::Bypassed;
                             (None, DragPhase::StackExit { trailing }, planor::Drag::None)
                         } else {
                             (
@@ -3660,7 +3547,6 @@ impl<B: WindowBackend> Engine<B> {
                         };
                         if already_preview_or_group {
                             d.dwell_since = None; // nothing left to time: stop the fast tick (review #5)
-                            d.vacancy = VacancyState::Bypassed;
                             if !d.pad_drag {
                                 // Group mode latches once the modifier activated it: releasing the key together with the
                                 // mouse button must not downgrade the drop to a plain tile.
@@ -3720,7 +3606,6 @@ impl<B: WindowBackend> Engine<B> {
                                 });
                             if dwell_done {
                                 d.dwell_since = None;
-                                d.vacancy = VacancyState::Bypassed;
                                 // Always enter the preview first: the press-key cue shows, and only a press seen
                                 // afterwards activates group mode (review #21).
                                 d.modifier_held_at_preview =
@@ -3761,7 +3646,6 @@ impl<B: WindowBackend> Engine<B> {
                 d.dwell_since = None;
                 d.pad_perp_accum = 0.0;
                 if let Some(trailing) = stack_exit_dir {
-                    d.vacancy = VacancyState::Bypassed;
                     (None, DragPhase::StackExit { trailing }, planor::Drag::None)
                 } else {
                     (None, DragPhase::None, planor::Drag::None)

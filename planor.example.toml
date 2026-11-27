@@ -9,9 +9,6 @@ stack_peek_px = 96
 # Stationary dwell time in milliseconds inside a neighbour's middle range (1/4..3/4) before
 # previewing neighbour shift and showing the group-entry cue (0..=5000 ms; 0 = immediate).
 drag_dwell_ms = 250
-# Delay in milliseconds before closing the space vacated by a picked-up window (0..=10000 ms;
-# 0 = close immediately). Bypassed immediately when preview, group mode, or a drop commits.
-drag_vacancy_delay_ms = 2000
 # Drag edge-scroll activation distance as a percentage of the active monitor's usable strip-axis
 # span (0..=40 %; 0 = disabled). Applies to both mouse and four-finger touchpad drags.
 drag_edge_scroll_percent = 10
