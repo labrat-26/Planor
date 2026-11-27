@@ -1465,3 +1465,34 @@ fn monitor_rays_on_owner_layout_reach_each_neighbour() {
         "non-adjacent monitors get no ray"
     );
 }
+
+#[test]
+fn locked_drag_start_strip_axis_wins_ties_against_a_diagonal_monitor_ray() {
+    // (#102 review) With the strip axis locked horizontal and a diagonal up-left monitor ray offered, a start that
+    // qualifies for the strip axis (along >= 1.5 * cross) must stay on the strip even when its projection onto the
+    // ray is slightly larger than its travel along the strip: the old `proj > along` tie-break sent a clearly
+    // sideways swipe up the diagonal. The ray needs RAY_LEAD_MARGIN times the along travel to win.
+    let ray = (-0.8, -0.6);
+    let start = |dx: f64, dy: f64| {
+        let mut g = Gesture::default();
+        g.axis_lock = Some(true);
+        g.monitor_rays = vec![ray];
+        g.sample(&[(500., 500.); 4], 12., 100.);
+        // The caller (pad handler) sets the lock and rays before every sample.
+        g.axis_lock = Some(true);
+        g.monitor_rays = vec![ray];
+        let s = g.sample(&[(500. + dx, 500. + dy); 4], 12., 100.);
+        (s, g.started_cross, g.started_ray)
+    };
+    // Sideways with some upward drift: along 30, cross 12, proj onto the ray 31.2 > 30 but < 1.2 * 30.
+    let (dx, dy) = (-30., -12.);
+    let proj = dx * ray.0 + dy * ray.1;
+    assert!(proj > dx.abs() && proj < RAY_LEAD_MARGIN * dx.abs(), "the case is a near tie: proj {proj}");
+    assert_eq!(start(dx, dy), (Swipe::DragStart, false, None), "a strip-qualifying start keeps the strip axis");
+    // Clearly diagonal (strip axis does not qualify): the monitor ray wins.
+    assert_eq!(start(-30., -22.), (Swipe::DragStart, true, Some(ray)), "a diagonal start takes the monitor ray");
+    // Along the ray exactly: the ray wins.
+    assert_eq!(start(-24., -18.), (Swipe::DragStart, true, Some(ray)), "a start along the ray takes it");
+    // Pure strip-axis start: no ray.
+    assert_eq!(start(-30., 0.), (Swipe::DragStart, false, None), "a straight start keeps the strip axis");
+}
