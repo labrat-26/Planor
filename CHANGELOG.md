@@ -8,13 +8,15 @@ Milestone 4.8 (#111-#117).
 ### Changed
 - **Gesture-driven grouping (#113)**: the group/ungroup drop zones are gone. Thresholds at 1/4 and 3/4 of the neighbour (from the entry edge), a stationary dwell preview, the group modifier (mouse; latches once pressed) or a perpendicular swipe (four fingers). `drag_stack_modifier` now *activates* grouping instead of cancelling a drop.
 - **Monitor-bound four-finger drags (#111)**: only a fling crosses monitors, and only over a connected boundary.
-- **Stack exit (#115)**: pull a member a quarter of the neighbour span along the strip.
+- **Stack exit (#115)**: pull a member a quarter of the neighbour span along the strip, or (mouse) a quarter of the column depth across it, which also frees a window from a vertical group.
+- **Drop highlight**: the green centre and the cue card are gone. The target gets the mauve (stacked) border only while a drop would create a stack.
+- **Edge scroll (#116)** eases in with hold time and depth into the zone, animates like a trackpad scroll and is no longer blocked by a preview; the dragged or resized window is cut out of the overlay so it stays above its neighbours.
 
 ### Added
-- Animated, orientation-aware SVG cues (#112), vacated-space delay `drag_vacancy_delay_ms` (#114), edge scroll for mouse and pad via `drag_edge_scroll_percent` (#116), `drag_dwell_ms`.
+- Vacated-space delay `drag_vacancy_delay_ms` (#114), edge scroll for mouse and pad via `drag_edge_scroll_percent` (#116), `drag_dwell_ms`.
 
 ### Removed
-- `stack_zone_percent` and `swipe_drag_cross_monitors` (old configs still load; the keys are ignored silently).
+- `stack_zone_percent`, `swipe_drag_cross_monitors`, `drop_target_color` and `group_hover_color` (old configs still load; the keys are ignored silently).
 
 
 ## [0.11.0] - 2026-11-27

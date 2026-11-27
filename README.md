@@ -316,7 +316,7 @@ gap_px = 6                  # space between windows, in pixels
 enabled = true
 width_px = 2                # line thickness
 corner_radius_px = 8        # 0 = square corners
-focused_color = "#3B82F6"   # also: stacked_color, pinned_color, drop_target_color
+focused_color = "#3B82F6"   # also: stacked_color (also lights the drop target when a drop would stack), pinned_color
 ```
 
 Prefer no outlines at all? Set `enabled = false`.

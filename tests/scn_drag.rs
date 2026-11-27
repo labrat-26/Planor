@@ -1004,3 +1004,131 @@ fn resize_by_edge_drag() {
     }
     d.stop();
 }
+
+/// #116 (landscape): holding a dragged window in the trailing edge zone scrolls the strip.
+#[test]
+#[ignore]
+fn drag_to_edge_scrolls_landscape() {
+    aware();
+    let ws: Vec<Sentinel> = (0..6).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-edge");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..6 {
+        press(&[ALT], LEFT);
+    }
+    let sum = |ws: &[Sentinel]| ws[1..].iter().map(|w| vis(w)[0] as i64).sum::<i64>();
+    let before = sum(&ws);
+    let from = grab_raised(&ws[0]).expect("window 0 caption");
+    let (_, work) = mons()[0];
+    let to = (work.right - 4, from.1);
+    m.down(from);
+    m.glide(from, to);
+    thread::sleep(Duration::from_millis(1200));
+    let during = sum(&ws);
+    m.escape();
+    m.up();
+    assert!(
+        during != before,
+        "drag_to_edge_scrolls_landscape: strip did not scroll while the cursor rested in the edge zone; before={before} during={during}; {}",
+        describe(&ws)
+    );
+}
+
+/// Owner item 4: a mouse pull ACROSS the strip (down, in landscape) of a quarter of the column depth takes a
+/// window out of its vertical group.
+#[test]
+#[ignore]
+fn drag_out_of_vertical_group_by_pulling_down() {
+    aware();
+    let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-vexit");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..3 {
+        press(&[ALT], LEFT);
+    }
+    // Group windows 0 and 1 with the modifier, as in drag_out_of_stack.
+    let from = grab_raised(&ws[1]).expect("window 1 caption");
+    let to_centre = centre(vis(&ws[0]));
+    m.down(from);
+    m.glide(from, to_centre);
+    thread::sleep(HOVER);
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
+    m.up();
+    m.shift(false);
+    thread::sleep(SETTLE);
+    let reach = |w: &Sentinel| reachable(w);
+    let grouped = reach(&ws[0]) ^ reach(&ws[1]);
+    assert!(
+        grouped,
+        "setup: windows 0 and 1 must form a stack; {}",
+        describe(&ws)
+    );
+    let active = if reach(&ws[0]) { 0 } else { 1 };
+    let from = grab_raised(&ws[active]).expect("stack member caption");
+    let (_, work) = mons()[0];
+    let pull = (work.bottom - work.top) * 2 / 5;
+    let to = (from.0, from.1 + pull);
+    assert!(
+        on_any_monitor(to),
+        "pull target {to:?} off-screen; {}",
+        describe(&ws)
+    );
+    m.drag(from, to);
+    thread::sleep(SETTLE);
+    let wh = work.bottom - work.top;
+    for i in 0..3 {
+        let h = height(vis(&ws[i]));
+        assert!(
+            (h - wh).abs() <= 3,
+            "drag_out_of_vertical_group: after the exit window {i} should be a full-height tile: expected {wh} (+-3), observed {h}; {}",
+            describe(&ws)
+        );
+    }
+}
+
+/// Owner item 3: while a window is resized by its edge it stays above its neighbours: the pixel at the middle
+/// of the grown window shows its own colour, not a neighbour's stand-in.
+#[test]
+#[ignore]
+fn resized_window_stays_above_neighbours() {
+    aware();
+    let ws: Vec<Sentinel> = (0..2).map(|i| Sentinel::new(i, 0)).collect();
+    let cap = Capture::open(0).expect("desktop duplication");
+    let mut d = Daemon::new("s4-resize-top");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..2 {
+        press(&[ALT], LEFT);
+    }
+    let r = ws[0].rect();
+    let edge = (r[2] - 4, (r[1] + r[3]) / 2);
+    m.down(edge);
+    m.glide(edge, (edge.0 + 250, edge.1));
+    thread::sleep(Duration::from_millis(300));
+    // Mid-resize (button still down): window 0's own colour must still dominate its grown area.
+    let own = count_rgb(&cap, SENTINEL_RGB[0]);
+    let other = count_rgb(&cap, SENTINEL_RGB[1]);
+    m.up();
+    assert!(
+        own > other,
+        "resized_window_stays_above_neighbours: during the resize window 0's colour ({own} px) must exceed window 1's ({other} px)"
+    );
+}

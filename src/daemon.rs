@@ -147,6 +147,7 @@ pub(crate) struct HotCfg {
     pub focus_follows_mouse: bool,
     pub warp_cursor_to_focused: bool,
     pub drag_stack_modifier_vk: i32,
+    #[allow(dead_code)] // legacy: the cue card that showed the key name was retired
     pub drag_stack_modifier_name: &'static str,
     pub border_width_px: f32,
     pub border_radius_px: f32,
@@ -155,8 +156,6 @@ pub(crate) struct HotCfg {
     pub pinned_color: Option<u32>,
     /// Legacy drop-target highlight colour: no longer drawn (#112); kept so tests can assert it never appears.
     #[allow(dead_code)]
-    pub drop_target_color: Option<u32>,
-    pub group_hover_color: Option<u32>,
     pub anim_enabled: bool,
     pub anim_duration_ms: u64,
     pub anim_spring: bool,
@@ -241,8 +240,6 @@ impl HotCfg {
             focused_color: color("focused_color"),
             stacked_color: color("stacked_color"),
             pinned_color: color("pinned_color"),
-            drop_target_color: color("drop_target_color"),
-            group_hover_color: color("group_hover_color"),
             anim_enabled: animation["enabled"].as_bool() == Some(true),
             anim_duration_ms: animation["duration_ms"].as_integer().unwrap_or(180) as u64,
             anim_spring: animation["curve"].as_str() == Some("spring"),
@@ -395,6 +392,7 @@ pub(crate) struct DragSession {
     pub moved: bool,
     pub pad_drag: bool,
     pub edge_scroll_at: Option<Instant>,
+    pub edge_scroll_since: Option<Instant>,
     pub edge_scroll_frac: f64,
     pub edge_scroll_dir: i32,
     pub saw_lbutton_down: bool,
@@ -1310,6 +1308,15 @@ impl<B: WindowBackend> Engine<B> {
             + 1024;
         let mut managed_above: Vec<Rect> = Vec::new();
         let mut out: Vec<Rect> = Vec::new();
+        // The window being dragged or resized is a real window, and the overlay (topmost) paints stand-ins of
+        // its neighbours and of its own old tile over it. Cut a hole over its live frame so it stays on top.
+        if let Some(d) = self.drag.as_ref()
+            && (d.moved || d.resizing)
+            && !d.visuals_cleared
+            && let Some(r) = self.backend.frame(d.id)
+        {
+            out.push(r);
+        }
         // `windows()` yields top-to-bottom Z-order. Only the portion of an unmanaged window / system
         // flyout NOT occluded by managed tiles above it should punch a hole in the overlay; an
         // unmanaged app sitting behind managed tiles must not erase their focus borders.
@@ -1815,71 +1822,18 @@ impl<B: WindowBackend> Engine<B> {
         // and compute non-mutating preview strips for vacancy closure / preview shift / immediate stack.
         let stack_peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let mut preview_strips: HashMap<Key, Strip> = HashMap::new();
-        let mut cue: Option<crate::cue::GestureCue> = None;
+        let cue: Option<crate::cue::GestureCue> = None;
         if let Some(d) = self.drag.as_mut()
             && d.moved
             && !d.resizing
             && !d.visuals_cleared
         {
             let dest_key = d.destination.clone().unwrap_or_else(|| d.key.clone());
-            let held_rect = self.backend.frame(d.id).unwrap_or(d.original);
+            let _held_rect = self.backend.frame(d.id).unwrap_or(d.original);
 
-            let cue_kind = match d.phase {
-                DragPhase::MiddlePreview { after, .. } => {
-                    Some(crate::cue::CueKind::StackEntryPreview { after })
-                }
-                DragPhase::MiddleGroup { direction, .. } => {
-                    Some(crate::cue::CueKind::StackEntryCommitted { direction })
-                }
-                DragPhase::StackExit { trailing } => {
-                    Some(crate::cue::CueKind::StackExit { trailing })
-                }
-                _ => None,
-            };
-
-            if let Some(kind) = cue_kind
-                && Some(dest_key.0) == self.desktop
-                && let Some(dest_strip) = self.strips.get(&dest_key)
-            {
-                let input = if d.pad_drag {
-                    crate::cue::CueInput::Trackpad
-                } else {
-                    crate::cue::CueInput::Mouse {
-                        modifier: hot.drag_stack_modifier_name,
-                    }
-                };
-                let sig_kind = match kind {
-                    crate::cue::CueKind::StackEntryPreview { .. } => {
-                        crate::cue::CueKind::StackEntryPreview { after: false }
-                    }
-                    k => k,
-                };
-                let sig = (input, sig_kind, dest_key.1.clone());
-                if d.cue_sig.as_ref() != Some(&sig) {
-                    d.cue_sig = Some(sig);
-                    d.cue_started_at = Some(Instant::now());
-                }
-                let target_rect = d.target.and_then(|tid| {
-                    dest_strip
-                        .rects(stack_peek)
-                        .into_iter()
-                        .find(|(w, _)| *w == tid)
-                        .and_then(|(_, r)| clip(r, dest_strip.area))
-                });
-                cue = Some(crate::cue::GestureCue {
-                    monitor: dest_key.1.clone(),
-                    monitor_area: dest_strip.area,
-                    held_rect,
-                    target_rect,
-                    horizontal: dest_strip.area.horizontal(),
-                    input,
-                    kind,
-                    started_at: d.cue_started_at.unwrap_or_else(Instant::now),
-                });
-            } else {
-                d.cue_sig = None;
-                d.cue_started_at = None;
-            }
+            // 4.8 follow-up: no cue card. Only the target's mauve border marks a drop that would stack.
+            d.cue_sig = None;
+            d.cue_started_at = None;
 
             // Compute non-mutating preview strips without touching authoritative `self.strips`.
             let preview_active = matches!(
@@ -1968,7 +1922,8 @@ impl<B: WindowBackend> Engine<B> {
                     let c = if fullscreen {
                         None
                     } else if self.drag.as_ref().is_some_and(|d| {
-                        // A dragged window arriving over a group lights the whole group.
+                        // Only a drop that would STACK lights the target in the stacked (mauve) border; a plain
+                        // tile-beside preview never does. The green centre highlight is gone.
                         d.moved
                             && !d.resizing
                             && !d.visuals_cleared
@@ -1977,14 +1932,10 @@ impl<B: WindowBackend> Engine<B> {
                                 .is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
                             && d.target
                                 .is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
-                            && matches!(
-                                d.phase,
-                                DragPhase::MiddlePreview { .. } | DragPhase::MiddleGroup { .. }
-                            )
-                            && strip.columns[i].members.len() > 1
-                            && strip.columns[i].members[strip.columns[i].active] == id
+                            && matches!(d.phase, DragPhase::MiddleGroup { .. })
+                            && d.target == Some(id)
                     }) {
-                        hot.group_hover_color
+                        hot.stacked_color
                     } else if strip.columns[i].members.len() > 1
                         && strip.columns[i].members[strip.columns[i].active] == id
                         && focused_id.is_some_and(|f| strip.columns[i].members.contains(&f))
@@ -2498,6 +2449,7 @@ impl<B: WindowBackend> Engine<B> {
                 destination: None,
                 resizing: false,
                 edge_scroll_at: None,
+                edge_scroll_since: None,
                 edge_scroll_frac: 0.0,
                 edge_scroll_dir: 0,
                 moved: pad_drag,
@@ -3064,6 +3016,7 @@ impl<B: WindowBackend> Engine<B> {
                         d.edge_scroll_at = None;
                         d.edge_scroll_frac = 0.0;
                         d.edge_scroll_dir = 0;
+                        d.edge_scroll_since = None;
                         perp_triggered = true;
                         // Keep the cursor anchored while committing the perpendicular push.
                         dx = 0.;
@@ -3240,6 +3193,10 @@ impl<B: WindowBackend> Engine<B> {
         let hot = self.hot;
         let Some(d) = self.drag.as_mut() else { return };
         let release_sampled = d.lbutton_up_since.is_some();
+        if d.moved || d.resizing {
+            // The overlay hole over the dragged window's live frame must follow it every update.
+            self.holes_stale = true;
+        }
         if !d.pad_drag && poll_release {
             if !release_sampled && self.backend.primary_button_down() {
                 d.saw_lbutton_down = true;
@@ -3297,6 +3254,7 @@ impl<B: WindowBackend> Engine<B> {
                 d.edge_scroll_at = None;
                 d.edge_scroll_frac = 0.0;
                 d.edge_scroll_dir = 0;
+                d.edge_scroll_since = None;
                 self.dirty = true;
             }
             return;
@@ -3368,6 +3326,7 @@ impl<B: WindowBackend> Engine<B> {
                     d.edge_scroll_at = None;
                     d.edge_scroll_frac = 0.0;
                     d.edge_scroll_dir = 0;
+                    d.edge_scroll_since = None;
                     self.dirty = true;
                     return;
                 };
@@ -3380,6 +3339,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_at = None;
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
+            d.edge_scroll_since = None;
             d.target = None;
             d.entry_edge = None;
             d.target_rect = None;
@@ -3392,12 +3352,9 @@ impl<B: WindowBackend> Engine<B> {
 
         // #116: configurable percentage drag edge-scroll on the active monitor (both mouse and pad).
         let mut edge_scrolled = false;
-        let block_edge_scroll = matches!(
-            d.phase,
-            DragPhase::MiddlePreview { .. }
-                | DragPhase::MiddleGroup { .. }
-                | DragPhase::StackExit { .. }
-        );
+        // The edge zone wins over a preview or stack-exit phase (dragging toward an edge usually pauses over a
+        // neighbour first); only a committed group (modifier latched) holds the strip still.
+        let block_edge_scroll = matches!(d.phase, DragPhase::MiddleGroup { .. });
         if allow_edge_scroll && !block_edge_scroll && hot.drag_edge_scroll_percent > 0 {
             if let Some(s) = self.strips.get_mut(&k) {
                 let horizontal = s.area.horizontal();
@@ -3412,14 +3369,28 @@ impl<B: WindowBackend> Engine<B> {
                         d.edge_scroll_dir = dir;
                         d.edge_scroll_frac = 0.0;
                         d.edge_scroll_at = None;
+                        d.edge_scroll_since = Some(now);
                     }
+                    let held_s = d
+                        .edge_scroll_since
+                        .get_or_insert(now)
+                        .elapsed()
+                        .as_secs_f64();
+                    let zone = planor::edge_scroll_zone_px(hi - lo, hot.drag_edge_scroll_percent)
+                        .max(1) as f64;
+                    let depth = if dir < 0 {
+                        (lo as f64 + zone - pos as f64) / zone
+                    } else {
+                        (pos as f64 - (hi as f64 - zone)) / zone
+                    };
+                    let speed = edge_scroll_speed(depth, held_s);
                     let hz = self.max_refresh_hz.clamp(30.0, 240.0);
                     let elapsed_s = d
                         .edge_scroll_at
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(1.0 / hz);
                     if let Some((px, rem)) =
-                        edge_scroll_step(elapsed_s, hz, dir, d.edge_scroll_frac)
+                        edge_scroll_step_at(elapsed_s, hz, dir, d.edge_scroll_frac, speed)
                     {
                         d.edge_scroll_at = Some(now);
                         d.edge_scroll_frac = rem;
@@ -3428,7 +3399,8 @@ impl<B: WindowBackend> Engine<B> {
                             s.scroll(px);
                             if s.offset != before {
                                 edge_scrolled = true;
-                                self.instant = true;
+                                self.action = "scroll";
+                                self.quick = true;
                                 self.dirty = true;
                             }
                         }
@@ -3437,12 +3409,14 @@ impl<B: WindowBackend> Engine<B> {
                     d.edge_scroll_at = None;
                     d.edge_scroll_frac = 0.0;
                     d.edge_scroll_dir = 0;
+                    d.edge_scroll_since = None;
                 }
             }
         } else {
             d.edge_scroll_at = None;
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
+            d.edge_scroll_since = None;
         }
         if edge_scrolled {
             // Strip moved underneath the pointer: never spuriously complete dwell/grouping while scrolling.
@@ -3494,7 +3468,25 @@ impl<B: WindowBackend> Engine<B> {
                 .unwrap_or_else(|| visible_span(ci).max(1))
                 .max(1);
             let in_own_col = contains(group_column_rect(s, d.id, peek), p);
+            // Along the stack's own axis (down/up in a landscape strip, right/left in a portrait one): pulling
+            // the held window a quarter of the column depth out of its deck also leaves the group.
+            let depth = if horizontal { s.area.h } else { s.area.w };
+            let over_sibling = s.columns[ci].members.iter().any(|m| {
+                *m != d.id
+                    && s.rects(peek)
+                        .iter()
+                        .find(|(id, _)| id == m)
+                        .and_then(|(_, r)| clip(*r, s.area))
+                        .is_some_and(|v| contains(v, p))
+            });
             planor::classify_stack_exit(delta_along, delta_cross, relevant_span, in_own_col)
+                .or_else(|| {
+                    if over_sibling {
+                        None
+                    } else {
+                        planor::classify_stack_exit(delta_cross, delta_along, depth.max(1), true)
+                    }
+                })
         } else {
             None
         };
@@ -3710,6 +3702,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_at = None;
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
+            d.edge_scroll_since = None;
         }
 
         let is_preview_or_group = |ph: DragPhase| {
@@ -4318,13 +4311,33 @@ pub(crate) fn fling_advance_direction(
 
 /// Smooth time-based edge-scroll step during a drag: at most one step per display refresh,
 /// advancing at a steady pixel/second velocity with fractional carry and per-tick clamping.
+#[cfg(test)]
 pub(crate) fn edge_scroll_step(
     elapsed_s: f64,
     refresh_hz: f64,
     dir: i32,
     carry: f64,
 ) -> Option<(i32, f64)> {
-    const EDGE_SCROLL_PX_PER_SEC: f64 = 900.0;
+    edge_scroll_step_at(elapsed_s, refresh_hz, dir, carry, 900.0)
+}
+
+/// Edge-scroll speed in px/s: eases in over the first 400 ms of holding the pointer in the zone and
+/// grows with how deep into the zone it is (`depth` 0..=1), so scrolling accelerates like a trackpad
+/// instead of jumping to full speed.
+pub(crate) fn edge_scroll_speed(depth: f64, held_s: f64) -> f64 {
+    let ramp = (held_s / 0.4).clamp(0.0, 1.0);
+    let ramp = ramp * ramp * (3.0 - 2.0 * ramp);
+    let depth = depth.clamp(0.0, 1.0);
+    1400.0 * (0.25 + 0.75 * depth) * (0.2 + 0.8 * ramp)
+}
+
+pub(crate) fn edge_scroll_step_at(
+    elapsed_s: f64,
+    refresh_hz: f64,
+    dir: i32,
+    carry: f64,
+    px_per_sec: f64,
+) -> Option<(i32, f64)> {
     if dir == 0 {
         return None;
     }
@@ -4334,7 +4347,7 @@ pub(crate) fn edge_scroll_step(
         return None;
     }
     let dt = elapsed_s.min(0.05);
-    let raw = carry + dir as f64 * EDGE_SCROLL_PX_PER_SEC * dt;
+    let raw = carry + dir as f64 * px_per_sec * dt;
     let px = raw.trunc() as i32;
     Some((px, raw - px as f64))
 }

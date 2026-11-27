@@ -3910,8 +3910,8 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
             "edge-scroll should scroll left toward left windows"
         );
         assert!(
-            h.engine.instant,
-            "edge-scroll must mark scene instant so drop boxes never lag behind animating windows"
+            h.engine.quick && h.engine.action == "scroll",
+            "edge-scroll animates with the short trackpad-style ease (drop zones no longer exist)"
         );
         // Calling tick() again immediately (<30ms) must be rate-limited so left windows aren't flung away.
         h.engine.tick().unwrap();
@@ -4280,8 +4280,8 @@ fn fast_tick_drives_smooth_refresh_paced_edge_scroll() {
     let speed = total_px / elapsed_s;
     assert_eq!(steps, 4);
     assert!(
-        (500.0..=1300.0).contains(&speed),
-        "fast_tick edge-scroll speed should be ~900 px/s (got {speed:.1} px/s over {elapsed_s:.3}s)"
+        (150.0..=1300.0).contains(&speed),
+        "edge-scroll eases in: slower than the 1400 px/s cap over the first ~80 ms (got {speed:.1} px/s over {elapsed_s:.3}s)"
     );
 
     // Moving cursor away from the edge disarms wants_fast_tick().
@@ -6237,7 +6237,7 @@ fn issue_17_edge_resize_does_not_show_green_drop_target_border_or_zones() {
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
+        h.engine.hot.stacked_color,
         "edge resize must not draw green drop-target border on neighbor"
     );
     assert_eq!(h.engine.drag.as_ref().map(|d| d.resizing), Some(true));
@@ -7034,7 +7034,7 @@ fn issue_17_tab_tearoff_and_unended_drag_clear_drag_session() {
             zones(&h).is_empty(),
             "green drop zones must clear after mismatched MOVESIZEEND"
         );
-        assert_ne!(tile_color(&h, 102), h.engine.hot.drop_target_color);
+        assert_ne!(tile_color(&h, 102), h.engine.hot.stacked_color);
         h.stop_clean();
     }
 
@@ -10084,7 +10084,7 @@ fn drag_hover_suppresses_green_border() {
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
+        h.engine.hot.stacked_color,
         "target window must not draw green border during Swap hover (#105)"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
@@ -10101,7 +10101,7 @@ fn drag_hover_suppresses_green_border() {
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
+        h.engine.hot.stacked_color,
         "target window must not draw green border during Stack hover (#105)"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
@@ -10196,19 +10196,12 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
             "{mon}: dwell elapsed: preview on the pointer's side of the midpoint: {:?}",
             phase(&h)
         );
-        let cue = zones(&h).pop().expect("preview cue drawn");
-        assert_eq!(
-            cue.horizontal, horizontal,
-            "{mon}: cue follows the strip orientation"
+        assert_ne!(
+            tile_color(&h, b),
+            h.engine.hot.stacked_color,
+            "{mon}: a tile-beside preview never shows the stack border"
         );
-        assert!(
-            matches!(
-                cue.kind,
-                crate::cue::CueKind::StackEntryPreview { after: false }
-            ),
-            "{mon}: {:?}",
-            cue.kind
-        );
+        assert!(zones(&h).is_empty(), "{mon}: no cue card exists any more");
         assert_eq!(
             h.engine.drag.as_ref().unwrap().vacancy,
             crate::daemon::VacancyState::Bypassed,
@@ -10226,11 +10219,11 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
             "{mon}: modifier -> group mode: {:?}",
             phase(&h)
         );
-        let cue = zones(&h).pop().unwrap();
-        assert!(matches!(
-            cue.kind,
-            crate::cue::CueKind::StackEntryCommitted { .. }
-        ));
+        assert_eq!(
+            tile_color(&h, b),
+            h.engine.hot.stacked_color,
+            "{mon}: group mode lights the target in the mauve stacked border"
+        );
         // Group mode latches once activated: releasing Shift with the button still groups on the drop.
         h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
         h.engine.tick().unwrap();
@@ -10704,11 +10697,10 @@ fn configured_group_modifier_ctrl_and_alt_activate_group_mode_and_shift_does_not
             Some(crate::daemon::DragPhase::MiddlePreview { .. })
         ));
         h.settle_quiet();
-        let cue = zones(&h).pop().expect("preview cue");
-        assert!(
-            matches!(cue.input, crate::cue::CueInput::Mouse { modifier } if modifier == name),
-            "{name}: cue shows the configured key: {:?}",
-            cue.input
+        assert_ne!(
+            tile_color(&h, 102),
+            h.engine.hot.stacked_color,
+            "{name}: a plain preview never shows the stack border"
         );
         h.desktop.0.lock().unwrap().keys_down.insert(other);
         h.engine.tick().unwrap();
@@ -10980,5 +10972,117 @@ fn edge_scroll_percent_changes_apply_to_the_running_drag() {
         "the larger zone applies at once"
     );
     h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// A mouse pull ACROSS the strip (down in a landscape strip, sideways in a portrait one) of a quarter of
+/// the column depth also leaves a vertical group; a short pull keeps it.
+#[test]
+fn mouse_pull_along_the_stack_axis_exits_a_vertical_group() {
+    for (mon, id) in [("MON0", 102), ("MON2", 302)] {
+        for (frac, exits) in [(0.10_f64, false), (0.40, true)] {
+            let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+            let key = (1, mon.to_string());
+            focus(&mut h, id);
+            h.cmd(Command::Key {
+                name: "stack_toggle".into(),
+            });
+            h.settle();
+            let s = &h.engine.strips[&key];
+            let active = s.active().unwrap();
+            assert_eq!(s.columns[s.locate(active).unwrap().0].members.len(), 2);
+            let horizontal = s.area.horizontal();
+            let depth = if horizontal { s.area.h } else { s.area.w };
+            let pull = (depth as f64 * frac) as i32;
+            let r = h.rect(active);
+            let start = (r.x + r.w / 2, r.y + 10);
+            let to = if horizontal {
+                (start.0, start.1 + pull)
+            } else {
+                (start.0 + pull, start.1)
+            };
+            mouse_hold(&mut h, active, to);
+            h.engine.tick().unwrap();
+            h.settle_quiet();
+            h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+            drop_now(&mut h, active);
+            let s = &h.engine.strips[&key];
+            let grouped = s.columns[s.locate(active).unwrap().0].members.len() == 2;
+            assert_eq!(
+                !grouped,
+                exits,
+                "{mon}: pull {frac} of depth {depth} = {pull}px, phase {:?}",
+                h.engine.drag.as_ref().map(|d| d.phase)
+            );
+            h.stop_clean();
+        }
+    }
+}
+
+/// Edge scroll accelerates smoothly: slow at first, faster with time held and with depth into the zone,
+/// never above the cap (owner item: fluid like the trackpad).
+#[test]
+fn edge_scroll_speed_eases_in_with_hold_time_and_depth() {
+    use crate::daemon::edge_scroll_speed;
+    let start = edge_scroll_speed(1.0, 0.0);
+    let mid = edge_scroll_speed(1.0, 0.2);
+    let full = edge_scroll_speed(1.0, 0.4);
+    assert!(
+        start > 0.0 && start < mid && mid < full,
+        "{start} {mid} {full}"
+    );
+    assert!(edge_scroll_speed(1.0, 5.0) <= 1400.0 + 1e-9, "capped");
+    assert!(
+        edge_scroll_speed(0.1, 0.4) < edge_scroll_speed(1.0, 0.4),
+        "deeper is faster"
+    );
+    assert!(
+        edge_scroll_speed(0.0, 0.4) > 0.0,
+        "the zone's inner edge still moves"
+    );
+    assert_eq!(
+        edge_scroll_speed(-3.0, 9.0),
+        edge_scroll_speed(0.0, 9.0),
+        "depth clamps"
+    );
+}
+
+/// While a window is dragged or edge-resized it is a real window above the overlay's stand-ins: its live
+/// frame is cut out of the overlay (a hole) so it is never painted over by neighbours (owner item 3).
+#[test]
+fn the_dragged_or_resized_window_gets_an_overlay_hole() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let r = h.rect(102);
+    h.desktop.0.lock().unwrap().cursor = (r.x + r.w / 2, r.y + 10);
+    h.desktop.0.lock().unwrap().keys_down.insert(0x01);
+    h.engine
+        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 102));
+    h.settle_quiet();
+    // Resize by the right edge: the frame grows, so the session latches `resizing`.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&102).unwrap().rect.w += 120;
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(h.engine.drag.as_ref().is_some_and(|d| d.resizing));
+    h.engine.holes_stale = true;
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let frame = h.desktop.0.lock().unwrap().windows[&102].rect;
+    assert!(
+        h.engine.last_holes.iter().any(|hole| *hole == frame),
+        "dragged window frame {frame:?} is a hole in {:?}",
+        h.engine.last_holes
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
+    h.settle_quiet();
+    assert!(h.engine.drag.is_none());
+    assert!(
+        !h.engine.last_holes.iter().any(|hole| *hole == frame),
+        "the hole goes away with the drag"
+    );
     h.stop_clean();
 }

@@ -1,3 +1,4 @@
+#![allow(dead_code)] // the gesture cue card was retired in favour of the mauve target border
 //! Non-interactive, orientation-aware animated SVG cues for Milestone 4.8 (#112, #113, #115).
 //!
 //! One single source of truth (`SvgScene` + `SvgElem`) generates both valid SVG XML markup and

@@ -85,7 +85,12 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
     }
 }
 /// Keys removed in Milestone 4.8 (#111, #112): an old config that still sets them loads without a warning.
-pub(crate) const REMOVED_KEYS: &[&str] = &["stack_zone_percent", "swipe_drag_cross_monitors"];
+pub(crate) const REMOVED_KEYS: &[&str] = &[
+    "stack_zone_percent",
+    "swipe_drag_cross_monitors",
+    "drop_target_color",
+    "group_hover_color",
+];
 
 /// Largest accepted integer for setting `k` (the single source for validation, stepping and range hints).
 pub(crate) fn int_max(k: &str) -> i64 {
