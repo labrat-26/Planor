@@ -3916,8 +3916,8 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
             "edge-scroll should scroll left toward left windows"
         );
         assert!(
-            h.engine.quick && h.engine.action == "scroll",
-            "edge-scroll animates with the short trackpad-style ease (drop zones no longer exist)"
+            h.engine.instant,
+            "edge-scroll is placed at once: a 70 ms ease restarted every step lagged and pulsed (owner notes)"
         );
         // Calling tick() again immediately (<30ms) must be rate-limited so left windows aren't flung away.
         h.engine.tick().unwrap();

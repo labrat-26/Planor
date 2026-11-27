@@ -3421,8 +3421,16 @@ impl<B: WindowBackend> Engine<B> {
                             s.scroll(px);
                             if s.offset != before {
                                 edge_scrolled = true;
-                                self.action = "scroll";
-                                self.quick = true;
+                                if self.diag.enabled {
+                                    diag::trace(format!(
+                                        "EDGE step px={px} dt_ms={:.1} speed={speed:.0} offset={}",
+                                        elapsed_s * 1000.0,
+                                        s.offset
+                                    ));
+                                }
+                                // Placed at once: restarting a 70 ms ease on every ~11 ms step lagged the strip behind the
+                                // pointer and pulsed (owner notes 21:01, 21:28).
+                                self.instant = true;
                                 self.dirty = true;
                             }
                         }
