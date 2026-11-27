@@ -5843,3 +5843,63 @@ fn axis_lock_cross_start_re_engages_on_return_home() {
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
 }
+
+#[test]
+fn spawn_on_cursor_monitor_true_lands_on_cursor_monitor() {
+    // (#97) When spawn_on_cursor_monitor = true, a window shown with a frame on MON0
+    // lands on the monitor under the cursor (MON2).
+    let mut cfg = test_cfg();
+    cfg["layout"]["spawn_on_cursor_monitor"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, |sim| {
+        sim.cursor = (-700, 500); // inside MON2 (-1440..0, 0..2560)
+    });
+    let id = h.desktop.0.lock().unwrap().add_window(SimWindow::new(
+        501,
+        Rect {
+            x: 100,
+            y: 100,
+            w: 800,
+            h: 600,
+        },
+    ));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, id));
+    h.settle();
+    assert_eq!(
+        h.engine
+            .strips
+            .iter()
+            .find_map(|((_, m), s)| s.locate(id).map(|_| m.as_str())),
+        Some("MON2"),
+        "window shown on MON0 must land on cursor monitor MON2 when spawn_on_cursor_monitor = true"
+    );
+}
+
+#[test]
+fn spawn_on_cursor_monitor_false_lands_on_default_monitor() {
+    // (#97) When spawn_on_cursor_monitor = false, a window shown with a frame on MON0
+    // ignores the cursor on MON2 and lands on its overlapping monitor (MON0).
+    let mut cfg = test_cfg();
+    cfg["layout"]["spawn_on_cursor_monitor"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, |sim| {
+        sim.cursor = (-700, 500); // inside MON2 (-1440..0, 0..2560)
+    });
+    let id = h.desktop.0.lock().unwrap().add_window(SimWindow::new(
+        502,
+        Rect {
+            x: 100,
+            y: 100,
+            w: 800,
+            h: 600,
+        },
+    ));
+    h.engine.event(Event::Window(EVENT_OBJECT_SHOW, id));
+    h.settle();
+    assert_eq!(
+        h.engine
+            .strips
+            .iter()
+            .find_map(|((_, m), s)| s.locate(id).map(|_| m.as_str())),
+        Some("MON0"),
+        "window shown on MON0 must stay on MON0 when spawn_on_cursor_monitor = false"
+    );
+}

@@ -245,8 +245,12 @@ fn bounded_rejection_backoff() {
     let w = Sentinel::new(0, 0);
     let mut d = Daemon::new("backoff");
     let p = d.dir.join("planor/planor.toml");
-    let config = fs::read_to_string(&p)
-        .unwrap()
+    let raw = fs::read_to_string(&p).unwrap();
+    assert!(
+        raw.contains("spawn_on_cursor_monitor = true"),
+        "planor.toml template must contain `spawn_on_cursor_monitor = true` (#97)"
+    );
+    let config = raw
         .replace(
             "[animation]\nenabled = true",
             "[animation]\nenabled = false",
