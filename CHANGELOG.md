@@ -2,6 +2,28 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.11.0] - 2026-11-27
+
+Milestone 4.7 (#108) plus formatting (#118).
+
+### Added
+- **Monitor-directed drag (#102)**: a carried window travels in a straight line toward each monitor that lies in a direction, diagonals included.
+- **Full-depth merge and leave-group zones with icons (#103, #104)**: the zones span the window's whole height on landscape and its whole width on portrait, and each zone carries an icon.
+- **Live stand-ins**: every window's stand-in keeps updating while the strip scrolls, a group rolls or the fingers rest mid-swipe, so videos and browsers keep playing in motion.
+
+### Fixed
+- **Topmost windows covered during scroll (#110)**: a PiP or other topmost window was sometimes partly painted over during live scroll, mostly on a single monitor. Stand-in thumbnails are now shown only after the overlay's region holes are cut. On one monitor the PiP test went from 4 failures in 10 to 10 passes in 10.
+- **Borders (#105, #107)**: the green border is removed from a window while a dragged window hovers over it, and a group's border is visible even when the group's window is not focused.
+- Review fixes: WGC resize guard, live-gesture end, slow-lift settle, and overlay patches that keep a live scene live.
+
+### Tests
+- Real-window D3D11 video, fullscreen and picture-in-picture scenarios (#106), and a sim test for `spawn_on_cursor_monitor` (#97).
+- `resize_by_edge_drag` grabs a verified on-screen border on any topology. Drag tests refuse to drop and cancel the move when outside input moved the cursor.
+- Full `-Tier all -Perf` on three monitors: 69/0/0 with no multi-monitor skips (startup 151/600 ms, render p99 0.125/16 ms, 0 stalls).
+
+### Tooling
+- `cargo fmt --all` applied to every Rust file, with no code changes (#118). The pre-commit hook now fails unless `cargo fmt --all -- --check` is clean.
+
 ## [0.10.0] - 2026-11-26
 
 ### Fixed
