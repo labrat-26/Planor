@@ -485,8 +485,7 @@ pub(crate) mod sim {
         /// The scene was live (fingers on the pad or momentum): the renderer keeps polling live stand-ins.
         pub live: bool,
         pub holes: Vec<Rect>,
-        pub zones: Vec<render::Zone>,
-        pub zone_icons: Vec<render::ZoneIcon>,
+        pub cue: Option<crate::cue::GestureCue>,
         pub covered: Vec<isize>,
         pub tile_colors: Vec<(isize, Option<u32>)>,
         /// `(id, os_frame)` for fullscreen tiles: the backend-sampled frame the renderer preserves (#80).
@@ -625,15 +624,7 @@ pub(crate) mod sim {
                 action: scene.action,
                 live: scene.live,
                 holes: scene.holes.to_vec(),
-                zones: scene.zones.clone(),
-                zone_icons: {
-                    let dark = crate::theme::system_is_dark();
-                    scene
-                        .zones
-                        .iter()
-                        .map(|z| render::zone_icon_spec(z, dark, 1.0))
-                        .collect()
-                },
+                cue: scene.cue.clone(),
                 covered: scene
                     .tiles
                     .iter()

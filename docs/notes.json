@@ -95,7 +95,7 @@
                       "text":  "if I drop the window not in a group and on top of the window , switch them aroud. make the drop zone way smaller and keep it permanently highlited  filled iin while moving window on the screen. if the app crosses the screen , remove the highlights from the fist and apply it to the other screen.",
                       "status":  "fixed",
                       "note":  "drop on a window swaps; small centre stack zone (stack_zone_px) drawn filled on the monitor under the cursor; across monitors goes beside",
-                      "test":  "src/sim_tests.rs::n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientations"
+                      "test":  "src/sim_tests.rs::n012_mouse_drop_tiles_beside_past_three_quarters_and_stacks_only_with_the_modifier"
                   },
                   {
                       "id":  "N-013",
@@ -118,7 +118,7 @@
                       "text":  "there is a bug with the windows trying to doge",
                       "status":  "fixed",
                       "note":  "no dodge reflow any more; drop modes are positional only",
-                      "test":  "src/sim_tests.rs::n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientations"
+                      "test":  "src/sim_tests.rs::n012_mouse_drop_tiles_beside_past_three_quarters_and_stacks_only_with_the_modifier"
                   },
                   {
                       "id":  "N-016",
@@ -126,7 +126,7 @@
                       "text":  "windows are sometime a bit to eager to get out of the way or nearly non at all",
                       "status":  "fixed",
                       "note":  "no dodge reflow any more; drop modes are positional only",
-                      "test":  "src/sim_tests.rs::n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientations"
+                      "test":  "src/sim_tests.rs::n012_mouse_drop_tiles_beside_past_three_quarters_and_stacks_only_with_the_modifier"
                   },
                   {
                       "id":  "N-017",

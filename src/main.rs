@@ -1,5 +1,6 @@
 mod backend;
 mod config_watch;
+mod cue;
 mod daemon;
 mod diag;
 mod gpu;
@@ -86,8 +87,14 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
 /// Whether `v` may replace the default `old` for setting `k`: same type, sane range, a known word, a
 /// `#RRGGBB` colour. Shared by the daemon config merge and the settings window.
 pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
+    let int_ok = |n: i64| match k {
+        "drag_dwell_ms" => (0..=5000).contains(&n),
+        "drag_vacancy_delay_ms" => (0..=10000).contains(&n),
+        "drag_edge_scroll_percent" => (0..=40).contains(&n),
+        _ => (0..=100000).contains(&n),
+    };
     let typed = old.type_str() == v.type_str()
-        && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
+        && v.as_integer().is_none_or(int_ok)
         && v.as_float()
             .is_none_or(|n| n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.));
     let known = match (choices(k), k) {

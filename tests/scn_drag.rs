@@ -598,7 +598,12 @@ fn drop_on_center_stacks() {
         HOVER.as_millis(),
         vis(&ws[0])
     );
+    // #113: after the dwell, pressing the configured group modifier (Shift) activates group mode; a plain
+    // release would tile beside the neighbour instead of stacking.
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
     m.up();
+    m.shift(false);
     thread::sleep(SETTLE);
     println!("drop_on_center_stacks: after drop {}", describe(&ws));
     let (r0, r1) = (reachable(&ws[0]), reachable(&ws[1]));
@@ -694,7 +699,15 @@ fn drag_out_of_stack() {
             describe(&ws)
         )
     });
-    m.drag(from, centre(vis(&ws[0])));
+    // Setup (#113): drag window 1 onto the middle of window 0, dwell, then press the group modifier (Shift).
+    let to_centre = centre(vis(&ws[0]));
+    m.down(from);
+    m.glide(from, to_centre);
+    thread::sleep(HOVER);
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
+    m.up();
+    m.shift(false);
     thread::sleep(SETTLE);
     let r = [reachable(&ws[0]), reachable(&ws[1])];
     assert!(
@@ -713,10 +726,13 @@ fn drag_out_of_stack() {
             describe(&ws)
         )
     });
-    let to = left_point(&ws[2], 0.10);
+    // #115: pull the active member sideways by more than 1/4 of the neighbour span: it leaves the stack.
+    let r = vis(&ws[active]);
+    let pull = ((r[2] - r[0]) * 2 / 5).max(1);
+    let to = (from.0 + pull, from.1);
     assert!(
         on_any_monitor(to),
-        "precondition: left 10% of window 2 at {to:?} is off-screen; {}",
+        "precondition: pull target {to:?} is off-screen; {}",
         describe(&ws)
     );
     m.drag(from, to);
