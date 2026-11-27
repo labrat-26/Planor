@@ -41,9 +41,23 @@ fn inside(p: (i32, i32), r: &RECT) -> bool {
     p.0 >= r.left && p.0 < r.right && p.1 >= r.top && p.1 < r.bottom
 }
 /// What `w` answers to WM_NCHITTEST at screen point `p` (HTLEFT, HTCLIENT, ...): which part of it a press grabs.
-fn nc_hit(w: &Sentinel, p: (i32, i32)) -> isize {
+/// `None` when its thread does not answer within 500 ms: the sentinel lives on another thread, and an unbounded
+/// cross-thread SendMessage to a hung window would block the test forever.
+fn nc_hit(w: &Sentinel, p: (i32, i32)) -> Option<isize> {
     let l = (((p.1 as u16 as u32) << 16) | p.0 as u16 as u32) as isize;
-    unsafe { SendMessageW(w.hwnd as _, WM_NCHITTEST, 0, l) }
+    let mut out = 0usize;
+    let ok = unsafe { SendMessageTimeoutW(w.hwnd as _, WM_NCHITTEST, 0, l, SMTO_ABORTIFHUNG, 500, &mut out) };
+    (ok != 0).then_some(out as isize)
+}
+/// The top-level window a real mouse press at `p` lands on. `WindowFromPoint` skips click-through windows
+/// (`WS_EX_LAYERED | WS_EX_TRANSPARENT`, as Planor's overlay is), the way real mouse input does.
+fn root_at(p: (i32, i32)) -> isize {
+    unsafe { GetAncestor(WindowFromPoint(POINT { x: p.0, y: p.1 }), GA_ROOT) as isize }
+}
+/// A real press at `p` grabs the leading (left) resize border of `w`: `p` is on a monitor, `w` is the top-level window
+/// the press lands on (no other window covers the point), and `w` answers HTLEFT there.
+fn grabs_leading_border(w: &Sentinel, p: (i32, i32)) -> bool {
+    on_any_monitor(p) && root_at(p) == w.hwnd && nc_hit(w, p) == Some(HTLEFT as isize)
 }
 fn on_any_monitor(p: (i32, i32)) -> bool {
     mons().iter().any(|(m, _)| inside(p, m))
@@ -851,27 +865,35 @@ fn resize_by_edge_drag() {
 
     // Part 2: the leading (left) edge drag on the first column must be ignored. Window 0 is the first column, so its
     // leading border is the grab point. That border is invisible and starts at the window rect's left (8 px left of
-    // the visible edge at 100 %), so `rect left + 3` lies on whatever is left of the window: another monitor on the
-    // three-monitor rig, nothing at all on a single monitor. Take the first column from there that is on a monitor
-    // AND that the window itself answers HTLEFT for (on a single monitor the visible edge column, x = 0), so the
-    // drag provably starts on the leading resize border and "ignored" cannot pass on a plain client-area drag.
+    // the visible edge at 100 %, 16 px at 200 %), so `rect left + 3` lies on whatever is left of the window: another
+    // monitor on the three-monitor rig, nothing at all on a single monitor. Take the first column from there through
+    // two columns past the visible edge (the range follows the real border width, whatever the DPI) where a real
+    // press lands on window 0 itself and grabs its HTLEFT border: on a single monitor the visible edge column, x = 0.
+    // "Ignored" then cannot pass on a client-area drag, nor on a press another window intercepts.
     let lead_of = |i: usize| {
         let r = ws[i].rect();
+        let v = vis(&ws[i]);
         let y = (r[1] + r[3]) / 2;
-        (r[0] + 3..=r[0] + 12)
+        ((r[0] + 3).min(v[0])..=v[0] + 2)
             .map(|x| (x, y))
-            .find(|&p| on_any_monitor(p) && nc_hit(&ws[i], p) == HTLEFT as isize)
+            .find(|&p| grabs_leading_border(&ws[i], p))
     };
     let l_idx = r_idx;
     let edge = lead_of(l_idx).unwrap_or_else(|| {
         panic!(
-            "precondition: no on-screen point hits the leading (HTLEFT) resize border of window {l_idx}; rect {:?}; {}",
+            "precondition: no on-screen point where a press lands on window {l_idx} and grabs its leading (HTLEFT) resize border; rect {:?}; {}",
             ws[l_idx].rect(),
             describe(&ws)
         )
     });
     eprintln!("resize_by_edge_drag: leading-edge grab at {edge:?} (window rect {:?})", ws[l_idx].rect());
     let mid: Vec<[i32; 4]> = (0..2).map(|i| vis(&ws[i])).collect();
+    assert!(
+        grabs_leading_border(&ws[l_idx], edge),
+        "precondition: right before the press, {edge:?} no longer lands on window {l_idx}'s leading (HTLEFT) border (window under it: {:#x}); {}",
+        root_at(edge),
+        describe(&ws)
+    );
     m.drag(edge, (edge.0 + 100, edge.1));
     thread::sleep(SETTLE);
     for i in 0..2 {
