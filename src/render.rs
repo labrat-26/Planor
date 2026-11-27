@@ -172,6 +172,8 @@ struct Source {
     winrt: IDirect3DDevice,
     size: windows::Graphics::SizeInt32,
     bitmap: Option<ID2D1Bitmap1>,
+    /// The GPU texture `bitmap` wraps; live frames are copied into it in place.
+    copy: Option<ID3D11Texture2D>,
 }
 impl Drop for Source {
     fn drop(&mut self) {
@@ -204,6 +206,7 @@ impl Source {
                 winrt,
                 size,
                 bitmap: None,
+                copy: None,
             })
         }
     }
@@ -235,10 +238,57 @@ impl Source {
                 }
                 return Ok(());
             }
+            self.store(surface, frame)
+        }
+    }
+    /// Refresh the picture of a window that is moving (scroll, drag, open/close) so its stand-in keeps
+    /// playing instead of freezing on the frame captured when the motion started. Only a frame of the
+    /// same size as the current picture is taken (copied in place, no allocation); a resize is left to
+    /// the settled path, which keeps the origin-size picture for the length of the motion.
+    fn update_live(&mut self, surface: &Surface) -> windows::core::Result<bool> {
+        unsafe {
+            let (Some(copy), Some(_)) = (&self.copy, &self.bitmap) else {
+                return Ok(false);
+            };
+            let mut newest = None;
+            for _ in 0..2 {
+                match self.pool.TryGetNextFrame() {
+                    Ok(f) => newest = Some(f),
+                    Err(_) => break,
+                }
+            }
+            let Some(frame) = newest else { return Ok(false) };
+            let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
+            let tex: ID3D11Texture2D = access.GetInterface()?;
+            let (mut got, mut have) = (D3D11_TEXTURE2D_DESC::default(), D3D11_TEXTURE2D_DESC::default());
+            tex.GetDesc(&mut got);
+            copy.GetDesc(&mut have);
+            let same = got.Width == have.Width && got.Height == have.Height && got.Format == have.Format;
+            if same {
+                surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
+            }
+            frame.Close()?;
+            Ok(same)
+        }
+    }
+    unsafe fn store(&mut self, surface: &Surface, frame: Direct3D11CaptureFrame) -> windows::core::Result<()> {
+        unsafe {
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             tex.GetDesc(&mut desc);
+            // Live updates (every drawn frame while windows move): copy into the texture the bitmap
+            // already wraps when the size still matches, so a frame costs one GPU copy and no
+            // allocation. The bitmap shows the new pixels without being recreated.
+            if let (Some(copy), Some(_)) = (&self.copy, &self.bitmap) {
+                let mut have = D3D11_TEXTURE2D_DESC::default();
+                copy.GetDesc(&mut have);
+                if have.Width == desc.Width && have.Height == desc.Height && have.Format == desc.Format {
+                    surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
+                    frame.Close()?;
+                    return Ok(());
+                }
+            }
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags = 0;
             desc.MiscFlags = 0;
@@ -251,6 +301,7 @@ impl Source {
             frame.Close()?;
             let dx: IDXGISurface = copy.cast()?;
             self.bitmap = Some(surface.context.CreateBitmapFromDxgiSurface(&dx, None)?);
+            self.copy = Some(copy);
             Ok(())
         }
     }
@@ -338,6 +389,15 @@ pub(crate) fn idle_scene_from_settled(mut settled: Scene) -> Scene {
     settled.live = false;
     settled.force_place = false;
     settled.zones.clear();
+    settled
+}
+/// A redraw of the last live scene (the fingers rest mid-swipe, so no new scene arrives) after a parked
+/// window's picture got a new frame: same epoch and layout, no animation and no OS placement (its targets
+/// already match), but still live so the stand-ins keep being drawn instead of the windows being unparked.
+pub(crate) fn live_redraw_scene(mut settled: Scene) -> Scene {
+    settled.action = "idle";
+    settled.duration = 0;
+    settled.force_place = false;
     settled
 }
 /// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
@@ -1954,6 +2014,36 @@ impl RenderState {
             .values()
             .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty() || !h.thumbs.is_empty())
     }
+    /// Copy the newest captured frame into the picture of every window drawn as a live stand-in
+    /// (`live_ids`). True when at least one picture changed, so the overlay needs a redraw; windows
+    /// that did not change deliver no frame and cost one `TryGetNextFrame` call.
+    fn refresh_live_pictures(&mut self) -> bool {
+        let mut changed = false;
+        let mut dead_gen = None;
+        for host in self.hosts.values_mut() {
+            let Some(surface) = &host.surface else {
+                continue;
+            };
+            for (&(id, _), source) in &mut host.pictures {
+                if !self.live_ids.contains(&id) {
+                    continue;
+                }
+                match source.update_live(surface) {
+                    Ok(c) => changed |= c,
+                    Err(e) => {
+                        if is_device_lost_hr(e.code().0) || unsafe { surface.gpu.GetDeviceRemovedReason() }.is_err() {
+                            dead_gen = Some(surface.device_gen);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(dg) = dead_gen {
+            self.invalidate_device_generation(dg);
+            return false;
+        }
+        changed
+    }
 
     fn needs_surface_recovery(&self) -> bool {
         self.hosts.values().any(|h| h.surface.is_none())
@@ -2575,9 +2665,20 @@ impl RenderState {
                                     source.bitmap = None;
                                 }
                             }
-                            if source.bitmap.is_none()
-                                && let Err(e) = source.update(surface, 0)
-                            {
+                            // Every drawn stand-in is live: the window's newest captured frame is copied into
+                            // its picture (one GPU copy, no allocation), so any window (video, browser,
+                            // terminal, a fullscreen app scrolled half off) keeps updating while the strip
+                            // scrolls, a group rolls or the fingers rest mid-swipe. WGC only delivers a frame
+                            // when the window changed, so a static window costs nothing. The first picture
+                            // and any size change still go through `update`.
+                            let live_result = if source.bitmap.is_some() {
+                                source.update_live(surface).map(|_| ())
+                            } else if source.bitmap.is_none() {
+                                source.update(surface, 0)
+                            } else {
+                                Ok(())
+                            };
+                            if let Err(e) = live_result {
                                 if is_device_lost_hr(e.code().0)
                                     || surface.gpu.GetDeviceRemovedReason().is_err()
                                 {
@@ -3300,6 +3401,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             }
             let timeout = if state.scene.is_some() {
                 Duration::ZERO
+            } else if state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
+                // Live stand-ins at the display refresh rate while the fingers rest.
+                Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64)
             } else if state.has_active_sources() || state.verify.is_some() {
                 Duration::from_millis(33)
             } else if state.needs_surface_recovery() {
@@ -3377,6 +3481,12 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             let Some(s) = state.scene.take() else {
                 state.check_device_health();
                 state.try_recover_surfaces();
+                // Fingers resting mid-swipe: the parked windows' stand-ins must keep playing. Redraw
+                // only when one of them actually delivered a new frame (a static window costs nothing).
+                if state.last_settled_scene.as_ref().is_some_and(|s| s.live) && state.refresh_live_pictures() {
+                    state.scene = state.last_settled_scene.take().map(live_redraw_scene);
+                    continue;
+                }
                 state.update_idle_sources();
                 continue;
             };

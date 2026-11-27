@@ -620,6 +620,51 @@ fn replay_scroll(d: &Daemon, dx: f64) -> Duration {
     Duration::from_micros(t as u64) + Duration::from_millis(2 * 500)
 }
 
+/// Replay one three-finger swipe of `dx` that then rests (fingers down, not moving) for `rest_ms` before
+/// lifting. Returns when the rest starts (from now) and the total length.
+fn replay_scroll_and_rest(d: &Daemon, dx: f64, rest_ms: i64) -> (Duration, Duration) {
+    let path = d.dir.join("scroll-rest.jsonl");
+    let mut lines = vec![r#"{"kind":"meta","schema":1,"name":"scn_video-scroll-rest","synthetic":true}"#.to_string()];
+    let (steps, mut t) = (45, 0i64);
+    let pts = |x: f64| format!("[[{:.1},300],[{:.1},312],[{:.1},300]]", x, x + 40., x + 80.);
+    for i in 0..=steps {
+        let x = 600.0 + dx * (i as f64 / steps as f64);
+        lines.push(format!(r#"{{"t":{t},"kind":"contacts","pts":{}}}"#, pts(x)));
+        t += 8000;
+    }
+    let rest_at = t;
+    while t < rest_at + rest_ms * 1000 {
+        lines.push(format!(r#"{{"t":{t},"kind":"contacts","pts":{}}}"#, pts(600.0 + dx)));
+        t += 8000;
+    }
+    lines.push(format!(r#"{{"t":{t},"kind":"contacts","pts":[]}}"#));
+    fs::write(&path, lines.join("\n") + "\n").unwrap();
+    let out = d.call_output(&["gestures", "replay", path.to_str().unwrap(), "--gap-ms", "0"]);
+    let said = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success() && said.contains("replaying 1 gesture"), "gesture replay refused: {said:?}");
+    (Duration::from_micros(rest_at as u64), Duration::from_micros(t as u64))
+}
+
+/// Distinct red levels (the video's drifting red channel) seen inside `r` over `window`; a frozen picture
+/// shows one level, a live one walks through many.
+fn video_reds_over(cap: &Capture, r: RECT, window: Duration) -> std::collections::BTreeSet<u32> {
+    let mut reds = std::collections::BTreeSet::new();
+    let until = Instant::now() + window;
+    while Instant::now() < until {
+        let level = std::cell::Cell::new(None);
+        let _ = count_in(cap, r, |px| {
+            if is_video_px(px) && level.get().is_none() {
+                level.set(Some((px >> 16) & 0xff));
+            }
+            false
+        });
+        if let Some(l) = level.get() {
+            reds.insert(l);
+        }
+    }
+    reds
+}
+
 // ---- Tests --------------------------------------------------------------------------------------------------
 
 #[test]
@@ -711,6 +756,61 @@ fn d3d11_flip_video_window_scroll_no_resize_or_cover() {
     assert_eq!(video.resize_buffers_count(), base_rb, "scrolling must never make the video resize its swapchain");
     assert_eq!(video.present_errors(), 0, "the video must present without errors");
     d.stop();
+}
+
+#[test]
+#[ignore]
+fn video_stand_in_keeps_playing_while_fingers_rest_mid_scroll() {
+    // (owner request) While the strip is held mid-scroll (three fingers down, not moving), every window the
+    // overlay draws as a stand-in keeps updating: the video's on-screen picture keeps walking through its red
+    // levels instead of freezing on the frame captured when the scroll started.
+    aware();
+    let s0 = Sentinel::at(0, 0, 40, 40);
+    let video = VideoWindow::new(120, 80, 640, 480);
+    let _s2 = Sentinel::at(2, 0, 200, 120);
+    let mut d = Daemon::new_animated("video-rest");
+    tile_video_class(&d);
+    d.start();
+    assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
+    claim_fg(s0.hwnd);
+    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after focusing the first window");
+    thread::sleep(Duration::from_millis(300));
+    let mon = primary_monitor_bounds();
+    let cap = Capture::open(0).expect("DXGI primary output duplication");
+    assert_eq!(cap.origin, (mon.left, mon.top), "DXGI output 0 is not the primary monitor");
+
+    // Swipe left by a third of the monitor and hold. The scroll direction does not matter: the video column
+    // moves, so it is drawn as a stand-in while the fingers rest.
+    let started = Instant::now();
+    let (rest_at, total) = replay_scroll_and_rest(&d, -((mon.right - mon.left) as f64) / 3.0, 2500);
+    thread::sleep((rest_at + Duration::from_millis(400)).saturating_sub(started.elapsed()));
+    let st = daemon_state(&d);
+    let tile = tile_of(&st, video.hwnd).expect("video tile in state");
+    let er = &tile["expected_rect"];
+    let (x, y, w, h) = (er["x"].as_i64().unwrap() as i32, er["y"].as_i64().unwrap() as i32, er["w"].as_i64().unwrap() as i32, er["h"].as_i64().unwrap() as i32);
+    let r = shrink(
+        RECT { left: x.max(mon.left), top: y.max(mon.top), right: (x + w).min(mon.right), bottom: (y + h).min(mon.bottom) },
+        30,
+        60,
+    );
+    assert!(r.right - r.left >= 40 && r.bottom - r.top >= 40, "the held scroll left too little of the video on screen: {:?}", (x, y, w, h));
+    let presents = video.presents();
+    let reds = video_reds_over(&cap, r, Duration::from_millis(1200));
+    let held = presents_while(&video, presents);
+    assert!(held >= 30, "the video must keep presenting while the fingers rest (presents={held})");
+    assert!(
+        reds.len() >= 5,
+        "the video's stand-in froze while the fingers rested mid-scroll: only red levels {reds:?} showed in {:?} over 1.2 s",
+        (r.left, r.top, r.right, r.bottom)
+    );
+    thread::sleep(total.saturating_sub(started.elapsed()) + Duration::from_millis(300));
+    assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after the held scroll");
+    assert_eq!(video.present_errors(), 0, "the video must present without errors");
+    d.stop();
+}
+
+fn presents_while(video: &VideoWindow, since: usize) -> usize {
+    video.presents() - since
 }
 
 #[test]
