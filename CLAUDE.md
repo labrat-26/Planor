@@ -61,7 +61,8 @@ and expect other windows to interfere. Failures re-run with `PLANOR_RECORD=1` by
   verified via `scripts/notes.ps1 -Check`). Win+W saves a diagnostic bundle under `%LOCALAPPDATA%\planor\bundles\<stamp>-<slug>\`
   (note, screenshot PNG, `state.json`, `perf.json`, `perf.trace.json`, trace tail, plus optional ring video dump).
 - Known flaky: `drag_to_portrait_monitor` (passes alone). Check `build\verify\latest.md` for the current table.
-- Pre-commit hook (`scripts/install-hooks.ps1`): checks no `println!` in `src/{backend,daemon,render,win32,perf,watchdog}.rs`,
+- Pre-commit hook (`scripts/install-hooks.ps1`): fails unless `cargo fmt --all -- --check` is clean (run `cargo fmt --all`),
+  checks no `println!` in `src/{backend,daemon,render,win32,perf,watchdog}.rs`,
   runs `core`, `prop_core`, and simulated daemon tests (`sim_tests`), and checks `notes.ps1 -Check`.
 
 ## Profiling, state & ring capture
