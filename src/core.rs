@@ -522,14 +522,19 @@ pub enum Drag {
     /// Exchange places with the target.
     Swap,
 }
-/// The stack zone: a box in the middle of a window covering `percent` of its width and of its height (owner's
-/// choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger drops). Shown filled
-/// while a window is being dragged.
-pub fn stack_zone(r: Rect, percent: i32) -> Rect {
+/// The stack (merge) zone: spans the full cross-axis extent of the window (full height on
+/// landscape, full width on portrait, #103) and the middle `percent` along the strip axis
+/// (owner's choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger
+/// drops). Shown filled while a window is being dragged.
+pub fn stack_zone(r: Rect, percent: i32, horizontal: bool) -> Rect {
     let p = percent.clamp(5, 95);
-    let w = (r.w * p / 100).max(1);
-    let h = (r.h * p / 100).max(1);
-    Rect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h }
+    if horizontal {
+        let w = (r.w * p / 100).max(1);
+        Rect { x: r.x + (r.w - w) / 2, y: r.y, w, h: r.h }
+    } else {
+        let h = (r.h * p / 100).max(1);
+        Rect { x: r.x, y: r.y + (r.h - h) / 2, w: r.w, h }
+    }
 }
 /// What a drop does. Purely positional (no speed or dwell), so it never flickers:
 /// in the stack zone it groups; elsewhere over a window on the same monitor a lone window swaps places
@@ -573,6 +578,10 @@ pub struct Gesture {
     pub cross_ok: (bool, bool),
     /// The running drag started across the lock axis towards a monitor: the caller starts it unlocked.
     pub started_cross: bool,
+    /// Unit rays toward neighbouring monitors (including diagonal ones) that lie off the strip axis (#102).
+    pub monitor_rays: Vec<(f64, f64)>,
+    /// The neighbouring-monitor ray that won when a four-finger drag started off the strip axis (#102).
+    pub started_ray: Option<(f64, f64)>,
     /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
     rejected: bool,
 }
@@ -664,14 +673,23 @@ impl Gesture {
                     return Swipe::None;
                 }
                 if let Some(h) = lock {
-                    // Only a start along the strip axis picks the window up (same 1.5x lead rule as the
-                    // three-finger scroll). A cross-axis start is ignored until the fingers lift.
+                    // Pick the nearest offered ray (strip axis or a neighbouring monitor ray, #102)
+                    // using the same 1.5x lead rule as the three-finger scroll.
                     let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
-                    if along < 1.5 * cross {
+                    let strip_ok = along >= 1.5 * cross;
+                    let mon_ray = best_ray(dx, dy, &self.monitor_rays);
+                    let mon_proj = mon_ray.map(|(rx, ry)| dx * rx + dy * ry);
+                    if let (Some(ray), Some(proj)) = (mon_ray, mon_proj)
+                        && (!strip_ok || proj >= RAY_LEAD_MARGIN * along)
+                    {
+                        self.started_cross = true;
+                        self.started_ray = Some(ray);
+                    } else if !strip_ok {
                         let across = if h { dy } else { dx };
                         let allowed = if across > 0. { self.cross_ok.1 } else { self.cross_ok.0 };
                         if cross >= 1.5 * along && allowed {
                             self.started_cross = true;
+                            self.started_ray = None;
                         } else {
                             if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
                                 self.rejected = true;
@@ -769,6 +787,116 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
         })
         .min()
         .map(|(_, i)| i)
+}
+/// The projection lead a neighbouring-monitor ray needs over the strip axis to win when the
+/// gesture already qualifies for the strip axis (`along >= 1.5 * cross`): a swipe that is clearly
+/// along the strip must not drift onto a diagonal ray (#102 review).
+pub const RAY_LEAD_MARGIN: f64 = 1.2;
+
+/// Whether the ray `origin + t * dir` (t in 0..=`len`, `dir` a unit vector) passes more than 2 px
+/// into the interior of any monitor in `others` except `target` and `home` (#102 review): a carry
+/// along such a ray would enter that monitor first and the drop would land there, not on `target`.
+fn ray_blocked(dir: (f64, f64), len: f64, origin: (f64, f64), target: Rect, home: Rect, others: &[Rect]) -> bool {
+    const PAD: f64 = 2.0;
+    others.iter().any(|&m| {
+        if m == target || m == home {
+            return false;
+        }
+        let (x0, y0) = (m.x as f64 + PAD, m.y as f64 + PAD);
+        let (x1, y1) = ((m.x + m.w) as f64 - PAD, (m.y + m.h) as f64 - PAD);
+        if x0 >= x1 || y0 >= y1 {
+            return false;
+        }
+        let (mut tmin, mut tmax) = (0.0f64, len);
+        for (o, d, a, b) in [(origin.0, dir.0, x0, x1), (origin.1, dir.1, y0, y1)] {
+            if d.abs() < 1e-9 {
+                if o < a || o > b {
+                    return false;
+                }
+            } else {
+                let (mut t1, mut t2) = ((a - o) / d, (b - o) / d);
+                if t1 > t2 {
+                    std::mem::swap(&mut t1, &mut t2);
+                }
+                tmin = tmin.max(t1);
+                tmax = tmax.min(t2);
+                if tmin >= tmax {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
+/// Unit direction vectors from `origin` (the drag's actual start point, usually the cursor over
+/// the picked-up window) toward every neighbouring monitor (monitors whose bounds touch `home`
+/// along an edge or corner, within 2 px), excluding rays nearly collinear with `home`'s strip axis
+/// (`|cross| < 0.25`) since the strip axis already reaches those monitors (#102). The target point
+/// is the foot of the perpendicular when the neighbour lies straight across an edge from `origin`,
+/// else the neighbour's centre; when that ray would cross a third monitor on the way (the carry
+/// would enter it first and the drop would land there, #102 review) or run along the strip axis,
+/// the nearest point of the neighbour's rect is tried before giving up on that neighbour.
+pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool, origin: (f64, f64)) -> Vec<(f64, f64)> {
+    let (ox, oy) = origin;
+    let mut rays = Vec::new();
+    for &b in others {
+        if b == home {
+            continue;
+        }
+        let gap_x = (b.x - (home.x + home.w)).max(home.x - (b.x + b.w)).max(0);
+        let gap_y = (b.y - (home.y + home.h)).max(home.y - (b.y + b.h)).max(0);
+        if gap_x > 2 || gap_y > 2 {
+            continue;
+        }
+        let covers_strip_edge = if horizontal {
+            b.y <= home.y && b.y + b.h >= home.y + home.h
+        } else {
+            b.x <= home.x && b.x + b.w >= home.x + home.w
+        };
+        if covers_strip_edge {
+            continue;
+        }
+        let centre = (b.x as f64 + b.w as f64 * 0.5, b.y as f64 + b.h as f64 * 0.5);
+        let nearest = (
+            ox.clamp(b.x as f64, (b.x + b.w) as f64),
+            oy.clamp(b.y as f64, (b.y + b.h) as f64),
+        );
+        // When the neighbour lies straight across an edge from the origin (the nearest point differs
+        // in one coordinate only), the perpendicular ray reaches it by the shortest path: straight up
+        // from under a monitor above carries straight up instead of slanting toward its centre.
+        let straight = (nearest.0 == ox || nearest.1 == oy).then_some(nearest);
+        let dir = straight.into_iter().chain([centre, nearest]).find_map(|(tx, ty)| {
+            let (dx, dy) = (tx - ox, ty - oy);
+            let len = dx.hypot(dy);
+            let unit = (dx / len.max(1e-9), dy / len.max(1e-9));
+            let cross = if horizontal { unit.1.abs() } else { unit.0.abs() };
+            // A ray nearly along the strip axis is not offered: the strip axis already gets there.
+            if len < 1.0 || cross < 0.25 || ray_blocked(unit, len, (ox, oy), b, home, others) {
+                return None;
+            }
+            Some(unit)
+        });
+        let Some((rx, ry)) = dir else {
+            continue;
+        };
+        rays.push((rx, ry));
+    }
+    rays
+}
+
+/// Nearest unit ray in `rays` that `(dx, dy)` leads toward with the 1.5x lead rule (`proj > 0` and
+/// `proj >= 1.5 * perp`), or `None` if no ray lies within that cone (#102).
+pub fn best_ray(dx: f64, dy: f64, rays: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, (f64, f64))> = None;
+    for &(rx, ry) in rays {
+        let proj = dx * rx + dy * ry;
+        let perp = (dx * ry - dy * rx).abs();
+        if proj > 0. && proj >= 1.5 * perp && best.is_none_or(|(bp, _)| proj > bp) {
+            best = Some((proj, (rx, ry)));
+        }
+    }
+    best.map(|(_, r)| r)
 }
 #[derive(Default)]
 pub struct ContactFrame {

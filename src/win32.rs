@@ -544,7 +544,25 @@ pub fn is_overlay_occluder_class(class: &str) -> bool {
             | "Planor.Note"
             | "PlanorSettings"
             | "Planor.Guide"
+            | "Planor.GestureGuide"
     )
+}
+/// An always-on-top floating window the overlay must not paint over: a browser or player
+/// Picture-in-Picture window, a PowerToys "Always On Top" app (#106). Only affects overlay holes;
+/// tiling already skips every `WS_EX_TOPMOST` window (`eligible`). Excluded: the taskbars and the
+/// desktop (topmost or full-screen shell surfaces that would hole whole monitors), every Planor
+/// window (its own `Planor.Composition` overlay hosts are topmost and monitor-sized; its floating UI
+/// is listed by class above), and click-through (`WS_EX_TRANSPARENT`) visual overlays such as game
+/// or recording HUDs, which the user cannot interact with.
+pub fn topmost_overlay_occluder(class: &str, ex_style: u32, fills_monitor: bool) -> bool {
+    ex_style & WS_EX_TOPMOST != 0
+        && ex_style & WS_EX_TRANSPARENT == 0
+        // Tooltips and monitor-filling topmost windows (borderless fullscreen games, the Snipping
+        // Tool full-screen frame) would hole the whole screen or flicker on hover (#102 review).
+        && !fills_monitor
+        && !class.eq_ignore_ascii_case("tooltips_class32")
+        && !class.starts_with("Planor")
+        && !matches!(class, "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Progman" | "WorkerW")
 }
 /// True if `id` is an unmanaged window, system flyout, or Planor floating UI window that the
 /// overlay must stay clear of when it sits above managed tiles in Z-order.
@@ -570,7 +588,22 @@ pub fn overlay_occluder(id: isize) -> bool {
             return false;
         }
         let class = class_of(id);
-        is_overlay_occluder_class(&class)
+        if is_overlay_occluder_class(&class) {
+            return true;
+        }
+        // A topmost window covering (nearly) all of its monitor is a fullscreen game/screenshot
+        // frame, not a floating app window: holing it would blank the overlay for that monitor.
+        let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let fills_monitor = GetMonitorInfoW(mon, &mut info) != 0
+            && size.left <= info.rcMonitor.left + 2
+            && size.top <= info.rcMonitor.top + 2
+            && size.right >= info.rcMonitor.right - 2
+            && size.bottom >= info.rcMonitor.bottom - 2;
+        topmost_overlay_occluder(&class, GetWindowLongW(h, GWL_EXSTYLE) as u32, fills_monitor)
     }
 }
 /// A normal top-level app window Planor does not manage (an elevated Task Manager, a rule-ignored app).
@@ -1130,5 +1163,39 @@ mod class_tests {
         assert!(!is_overlay_occluder_class("Progman"));
         assert!(!is_overlay_occluder_class("WorkerW"));
         assert!(!is_overlay_occluder_class("Notepad"));
+        assert!(is_overlay_occluder_class("Planor.GestureGuide"), "the real gesture guide class");
+    }
+
+    #[test]
+    fn topmost_occluders_are_floating_apps_not_shell_or_planor_or_click_through() {
+        use super::topmost_overlay_occluder as occ;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
+        // Browser Picture-in-Picture and an ordinary always-on-top app (not filling a monitor).
+        assert!(occ("Chrome_WidgetWin_1", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
+        assert!(occ("MozillaDialogClass", WS_EX_TOPMOST, false));
+        assert!(occ("Notepad", WS_EX_TOPMOST, false));
+        // Not topmost: not this rule's business.
+        assert!(!occ("Chrome_WidgetWin_1", WS_EX_TOOLWINDOW, false));
+        // Shell surfaces (Shell_SecondaryTrayWnd really is WS_EX_TOPMOST | WS_EX_TOOLWINDOW).
+        for shell in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"] {
+            assert!(!occ(shell, WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false), "{shell}");
+        }
+        // Planor's own overlay host: topmost, monitor-sized, layered, click-through. Holing it would
+        // hide every border on the monitor.
+        let host = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        assert!(!occ("Planor.Composition", host, false));
+        assert!(!occ("Planor.Composition", WS_EX_TOPMOST, false));
+        assert!(!occ("PlanorOverlay", WS_EX_TOPMOST, false));
+        // A click-through HUD (game/recording overlay) from another app.
+        assert!(!occ("CEF-OSC-WIDGET", host, false));
+        // (#102 review) Tooltips: transient hover popups, holing them flickers the overlay.
+        assert!(!occ("tooltips_class32", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
+        assert!(!occ("TOOLTIPS_CLASS32", WS_EX_TOPMOST, false), "class match is case-insensitive");
+        // (#102 review) Monitor-filling topmost windows (borderless fullscreen games, the Snipping
+        // Tool full-screen frame): holing them would blank the overlay for the whole monitor.
+        assert!(!occ("Chrome_WidgetWin_1", WS_EX_TOPMOST, true), "fullscreen borderless game");
+        assert!(!occ("Screen Sketch", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, true), "Snipping Tool fullscreen");
+        // A floating PiP that happens to be large but does not fill the monitor still holes.
+        assert!(occ("Chrome_WidgetWin_1", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
     }
 }

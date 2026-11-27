@@ -40,18 +40,53 @@ fn centre(r: [i32; 4]) -> (i32, i32) {
 fn inside(p: (i32, i32), r: &RECT) -> bool {
     p.0 >= r.left && p.0 < r.right && p.1 >= r.top && p.1 < r.bottom
 }
+/// What `w` answers to WM_NCHITTEST at screen point `p` (HTLEFT, HTCLIENT, ...): which part of it a press grabs.
+/// `None` when its thread does not answer within 500 ms: the sentinel lives on another thread, and an unbounded
+/// cross-thread SendMessage to a hung window would block the test forever.
+fn nc_hit(w: &Sentinel, p: (i32, i32)) -> Option<isize> {
+    let l = (((p.1 as u16 as u32) << 16) | p.0 as u16 as u32) as isize;
+    let mut out = 0usize;
+    let ok = unsafe {
+        SendMessageTimeoutW(
+            w.hwnd as _,
+            WM_NCHITTEST,
+            0,
+            l,
+            SMTO_ABORTIFHUNG,
+            500,
+            &mut out,
+        )
+    };
+    (ok != 0).then_some(out as isize)
+}
+/// The top-level window a real mouse press at `p` lands on. `WindowFromPoint` skips click-through windows
+/// (`WS_EX_LAYERED | WS_EX_TRANSPARENT`, as Planor's overlay is), the way real mouse input does.
+fn root_at(p: (i32, i32)) -> isize {
+    unsafe { GetAncestor(WindowFromPoint(POINT { x: p.0, y: p.1 }), GA_ROOT) as isize }
+}
+/// A real press at `p` grabs the leading (left) resize border of `w`: `p` is on a monitor, `w` is the top-level window
+/// the press lands on (no other window covers the point), and `w` answers HTLEFT there.
+fn grabs_leading_border(w: &Sentinel, p: (i32, i32)) -> bool {
+    on_any_monitor(p) && root_at(p) == w.hwnd && nc_hit(w, p) == Some(HTLEFT as isize)
+}
 fn on_any_monitor(p: (i32, i32)) -> bool {
     mons().iter().any(|(m, _)| inside(p, m))
 }
 /// Point at `frac` of the window's visible width measured from its left edge (inside the window, vertical centre).
 fn left_point(w: &Sentinel, frac: f64) -> (i32, i32) {
     let v = vis(w);
-    ((v[0] as f64 + width(v) as f64 * frac) as i32, (v[1] + v[3]) / 2)
+    (
+        (v[0] as f64 + width(v) as f64 * frac) as i32,
+        (v[1] + v[3]) / 2,
+    )
 }
 /// Point at `frac` of the window's visible width measured from its right edge (inside the window).
 fn right_point(w: &Sentinel, frac: f64) -> (i32, i32) {
     let v = vis(w);
-    ((v[2] as f64 - width(v) as f64 * frac) as i32, (v[1] + v[3]) / 2)
+    (
+        (v[2] as f64 - width(v) as f64 * frac) as i32,
+        (v[1] + v[3]) / 2,
+    )
 }
 fn describe(ws: &[Sentinel]) -> String {
     ws.iter()
@@ -146,22 +181,32 @@ impl Mouse {
             self.left = false;
         }
     }
-    /// Press at `from`, glide to `to`, rest there (HOLD), release.
+    /// Press at `from`, glide to `to`, rest there (HOLD), release. Fails as a precondition when the cursor is no
+    /// longer at `to`: outside input (a real mouse, another process) moved it, so the drop would land somewhere the
+    /// test never asked for and any assertion about the result would blame Planor for it. That failure path first
+    /// cancels the move (Escape snaps the window back, so Planor applies no drop) and only then lets the button
+    /// go, so neither this test nor `Drop` releases the window at the moved cursor and changes the next test's layout.
     fn drag(&mut self, from: (i32, i32), to: (i32, i32)) {
         self.down(from);
         self.glide(from, to);
         thread::sleep(HOLD);
+        let mut at = POINT::default();
+        unsafe { GetCursorPos(&mut at) };
+        if (at.x, at.y) != to {
+            self.escape();
+            self.up();
+        }
+        assert!(
+            (at.x, at.y) == to,
+            "precondition: outside input moved the cursor during the drag (expected it at {to:?} before release, \
+             observed ({}, {})); do not use the mouse while live tests run",
+            at.x,
+            at.y
+        );
         self.up();
     }
     fn shift(&mut self, on: bool) {
-        unsafe {
-            keybd_event(
-                VK_SHIFT as u8,
-                0,
-                if on { 0 } else { KEYEVENTF_KEYUP },
-                0,
-            )
-        };
+        unsafe { keybd_event(VK_SHIFT as u8, 0, if on { 0 } else { KEYEVENTF_KEYUP }, 0) };
         self.shift = on;
         thread::sleep(Duration::from_millis(60));
     }
@@ -208,7 +253,8 @@ fn count_rgb(cap: &Capture, rgb: u32) -> usize {
             let copy = copy.unwrap();
             cap.ctx.CopyResource(&copy, &tex);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            cap.ctx.Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            cap.ctx
+                .Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             let mut n = 0usize;
             for y in 0..desc.Height as usize {
                 let row = std::slice::from_raw_parts(
@@ -276,7 +322,17 @@ fn check_layout(ws: &[(usize, &Sentinel)], wr: RECT, vertical: bool, ctx: &str) 
     let on_screen: Vec<(usize, [i32; 4])> = ws
         .iter()
         .map(|&(i, w)| (i, vis(w)))
-        .filter(|&(_, v)| overlap(&RECT { left: v[0], top: v[1], right: v[2], bottom: v[3] }, &wr) > 0)
+        .filter(|&(_, v)| {
+            overlap(
+                &RECT {
+                    left: v[0],
+                    top: v[1],
+                    right: v[2],
+                    bottom: v[3],
+                },
+                &wr,
+            ) > 0
+        })
         .collect();
     let min_on_screen = ws.len().min(2);
     assert!(
@@ -325,7 +381,12 @@ fn monitor_roundtrip(mon: usize, vertical: bool, label: &str) {
     thread::sleep(Duration::from_millis(120));
 
     let res: [(usize, &Sentinel); 2] = [(0, &res_a), (1, &res_b)];
-    check_layout(&res, wr, vertical, &format!("{kind} pre-drag residents on monitor {mon}"));
+    check_layout(
+        &res,
+        wr,
+        vertical,
+        &format!("{kind} pre-drag residents on monitor {mon}"),
+    );
     assert_all_reachable(&res, &format!("{kind} pre-drag residents on monitor {mon}"));
     check_layout(
         &[(2, &mover), (3, &other)],
@@ -360,7 +421,12 @@ fn monitor_roundtrip(mon: usize, vertical: bool, label: &str) {
         vis(&mover)
     );
     let all: [(usize, &Sentinel); 3] = [(0, &res_a), (1, &res_b), (2, &mover)];
-    check_layout(&all, wr, vertical, &format!("after drop of window 2 onto {kind} monitor {mon}"));
+    check_layout(
+        &all,
+        wr,
+        vertical,
+        &format!("after drop of window 2 onto {kind} monitor {mon}"),
+    );
     assert!(
         reachable(&mover),
         "after drop onto {kind} monitor {mon}: window 2 expected reachable (revealed), observed {:.2} on screen (visible rect {:?})",
@@ -435,7 +501,10 @@ fn reorder_before_after() {
 
     // Phase A (Before): window 1 dropped on the outer 25% left edge of window 0 => [1, 0].
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("phase A precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "phase A precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     let to = left_point(&ws[0], 0.10);
     assert!(
@@ -456,7 +525,10 @@ fn reorder_before_after() {
     // Phase B (After): window 1 (now the left tile) dropped on the outer 25% right edge of window 0 => [0, 1].
     assert_all_reachable(&both, "precondition (reorder, phase B)");
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("phase B precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "phase B precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     let to = right_point(&ws[0], 0.10);
     assert!(
@@ -491,7 +563,10 @@ fn drop_on_center_stacks() {
     );
     thread::sleep(Duration::from_millis(120));
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     // Centre of window 0 is the middle 50% of its width: hover there for HOVER, then drop.
     let to = centre(vis(&ws[0]));
@@ -559,7 +634,10 @@ fn shift_freezes_reflow() {
         press(&[ALT], LEFT);
     }
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     let to = left_point(&ws[0], 0.10);
     assert!(
@@ -611,7 +689,10 @@ fn drag_out_of_stack() {
     }
     // Setup: window 1 dropped on the centre of window 0 to form a stack.
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("setup precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "setup precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     m.drag(from, centre(vis(&ws[0])));
     thread::sleep(SETTLE);
@@ -627,7 +708,10 @@ fn drag_out_of_stack() {
 
     // Drag the stack's active member out, dropping it on the outer 25% left edge of window 2 (Before).
     let from = grab_raised(&ws[active]).unwrap_or_else(|| {
-        panic!("precondition: stack member {active} has no on-screen caption; {}", describe(&ws))
+        panic!(
+            "precondition: stack member {active} has no on-screen caption; {}",
+            describe(&ws)
+        )
     });
     let to = left_point(&ws[2], 0.10);
     assert!(
@@ -706,7 +790,10 @@ fn drag_cancel_escape() {
     let before: Vec<[i32; 4]> = (0..3).map(|i| vis(&ws[i])).collect();
     let before_order = order(&ws);
     let from = grab_raised(&ws[1]).unwrap_or_else(|| {
-        panic!("precondition: window 1 has no on-screen caption to grab; {}", describe(&ws))
+        panic!(
+            "precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
     });
     let to = left_point(&ws[0], 0.10);
     assert!(
@@ -845,19 +932,39 @@ fn resize_by_edge_drag() {
     );
 
     // Part 2: the leading (left) edge drag on the first column must be ignored. Window 0 is the first column, so its
-    // leading border is the grab point (rect left + 3).
+    // leading border is the grab point. That border is invisible and starts at the window rect's left (8 px left of
+    // the visible edge at 100 %, 16 px at 200 %), so `rect left + 3` lies on whatever is left of the window: another
+    // monitor on the three-monitor rig, nothing at all on a single monitor. Take the first column from there through
+    // two columns past the visible edge (the range follows the real border width, whatever the DPI) where a real
+    // press lands on window 0 itself and grabs its HTLEFT border: on a single monitor the visible edge column, x = 0.
+    // "Ignored" then cannot pass on a client-area drag, nor on a press another window intercepts.
     let lead_of = |i: usize| {
         let r = ws[i].rect();
-        (r[0] + 3, (r[1] + r[3]) / 2)
+        let v = vis(&ws[i]);
+        let y = (r[1] + r[3]) / 2;
+        ((r[0] + 3).min(v[0])..=v[0] + 2)
+            .map(|x| (x, y))
+            .find(|&p| grabs_leading_border(&ws[i], p))
     };
     let l_idx = r_idx;
-    let edge = lead_of(l_idx);
-    assert!(
-        on_any_monitor(edge),
-        "precondition: leading resize edge of window {l_idx} at {edge:?} is off-screen; {}",
-        describe(&ws)
+    let edge = lead_of(l_idx).unwrap_or_else(|| {
+        panic!(
+            "precondition: no on-screen point where a press lands on window {l_idx} and grabs its leading (HTLEFT) resize border; rect {:?}; {}",
+            ws[l_idx].rect(),
+            describe(&ws)
+        )
+    });
+    eprintln!(
+        "resize_by_edge_drag: leading-edge grab at {edge:?} (window rect {:?})",
+        ws[l_idx].rect()
     );
     let mid: Vec<[i32; 4]> = (0..2).map(|i| vis(&ws[i])).collect();
+    assert!(
+        grabs_leading_border(&ws[l_idx], edge),
+        "precondition: right before the press, {edge:?} no longer lands on window {l_idx}'s leading (HTLEFT) border (window under it: {:#x}); {}",
+        root_at(edge),
+        describe(&ws)
+    );
     m.drag(edge, (edge.0 + 100, edge.1));
     thread::sleep(SETTLE);
     for i in 0..2 {

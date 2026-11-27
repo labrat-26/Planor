@@ -352,11 +352,19 @@ pub(crate) struct PadDrag {
     pub home_lock: Option<bool>,
     /// The cursor has been on another monitor since the lock was released or pick-up.
     pub left_home: bool,
+    /// Unit ray toward a neighbouring monitor when carrying off the strip axis (#102).
+    pub ray: Option<(f64, f64)>,
+    /// Exponentially smoothed recent finger vector used to pick the target ray on lock release/switch (#102).
+    pub off: (f64, f64),
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
     pub pad: Option<PadDrag>,
     pub pad_scrolling: bool,
+    /// The last scene sent to the renderer was live (fingers on the pad or momentum). Once neither holds, a
+    /// final non-live scene must follow, or the renderer keeps polling live stand-ins every refresh period
+    /// (#108 review L1: a swipe that hopped monitors ends without any layout change).
+    pub last_scene_live: bool,
     /// When set, a finished touchpad scroll settles (reveal + focus) at this time unless scrolling resumes.
     pub settle: Option<Instant>,
     pub scroll_frac: f64,
@@ -444,6 +452,7 @@ impl<B: WindowBackend> Engine<B> {
             backend,
             pad: None,
             pad_scrolling: false,
+            last_scene_live: false,
             settle: None,
             scroll_frac: 0.,
             renderer,
@@ -914,6 +923,9 @@ impl<B: WindowBackend> Engine<B> {
         let mut tiles_json = Vec::new();
         let mut parked_json = Vec::new();
 
+        // The same debounced foreground id the render path uses (#107 parity): a raw
+        // backend.foreground() read can see the transient NULL during a window activation.
+        let focused_id = self.managed_foreground_id(self.last_foreground);
         for ((desk, name), strip) in &self.strips {
             if Some(*desk) != self.desktop {
                 continue;
@@ -976,11 +988,12 @@ impl<B: WindowBackend> Engine<B> {
                     || rect.y + rect.h > bound.y + bound.h;
                 let parked = hidden || preview || clipped;
                 let os_rect = self.backend.frame(id);
-                let foreground = self.backend.foreground();
-                let focused_id = self.managed_foreground_id(foreground);
                 let color = if fullscreen {
                     None
-                } else if strip.columns[ci].members.len() > 1 && !preview {
+                } else if strip.columns[ci].members.len() > 1
+                    && !preview
+                    && focused_id.is_some_and(|f| strip.columns[ci].members.contains(&f))
+                {
                     self.cfg["borders"]["stacked_color"].as_str()
                 } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                     self.cfg["borders"]["focused_color"].as_str()
@@ -1523,6 +1536,14 @@ impl<B: WindowBackend> Engine<B> {
         }
     }
     pub(crate) fn layout(&mut self) -> Result<()> {
+        // Safety net for #108 L1 (the daemon loop calls `layout` every pass): any other way out of a live gesture
+        // that sends no scene (momentum cancelled by a focus change, a settle that returned early, a blocked
+        // desktop) still ends it. Not while a settle is queued: that settle sends the final scene itself, and a
+        // non-live scene before it would put the real windows at the mid-scroll position only to move them
+        // again at the snap (#108 re-review N1).
+        if self.last_scene_live && !self.pad_scrolling && self.inertia.is_none() && self.settle.is_none() {
+            self.dirty = true;
+        }
         if self.blocked() || !self.dirty {
             return Ok(());
         }
@@ -1586,7 +1607,8 @@ impl<B: WindowBackend> Engine<B> {
         let hot = self.hot;
         // While a window is carried nothing dodges out of its way (that reflow was erratic: too eager or not
         // at all). Instead every window on the monitor under the cursor shows its stack zone, filled; the
-        // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
+        // one under the cursor is stronger. The swap target gets no green drop border while it is
+        // hovered (#105); the drop itself is what swaps the windows.
         let mut zones = vec![];
         if let Some(d) = &self.drag
             && d.moved
@@ -1599,7 +1621,13 @@ impl<B: WindowBackend> Engine<B> {
             let side = hot.stack_zone_percent;
             for (id, _, z) in drop_zones(s, peek, side, d.id) {
                 let hot_zone = d.target == Some(id) && d.mode == planor::Drag::Stack;
-                zones.push(render::Zone { rect: z, monitor: k.1.clone(), color: c, alpha: if hot_zone { 0.85 } else { 0.35 } });
+                zones.push(render::Zone {
+                    rect: z,
+                    monitor: k.1.clone(),
+                    color: c,
+                    alpha: if hot_zone { 0.85 } else { 0.35 },
+                    kind: render::ZoneKind::Merge,
+                });
             }
             if k == &d.key
                 && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
@@ -1612,6 +1640,10 @@ impl<B: WindowBackend> Engine<B> {
                             monitor: k.1.clone(),
                             color: c,
                             alpha: if d.ungroup_edge == Some(edge) { 0.85 } else { 0.35 },
+                            kind: render::ZoneKind::Leave {
+                                trailing: edge,
+                                horizontal: s.area.horizontal(),
+                            },
                         });
                     }
                 }
@@ -1643,15 +1675,6 @@ impl<B: WindowBackend> Engine<B> {
                     let c = if fullscreen {
                         None
                     } else if self.drag.as_ref().is_some_and(|d| {
-                        d.moved
-                            && !d.resizing
-                            && !d.visuals_cleared
-                            && d.target == Some(id)
-                            && matches!(d.mode, planor::Drag::Swap | planor::Drag::Before | planor::Drag::After)
-                    }) {
-                        // The window a drop would swap with (or pull out beside).
-                        hot.drop_target_color
-                    } else if self.drag.as_ref().is_some_and(|d| {
                         // A dragged window arriving over a group lights the whole group.
                         d.moved
                             && !d.resizing
@@ -1664,7 +1687,10 @@ impl<B: WindowBackend> Engine<B> {
                         hot.group_hover_color
                     } else if strip.columns[i].members.len() > 1
                         && strip.columns[i].members[strip.columns[i].active] == id
+                        && focused_id.is_some_and(|f| strip.columns[i].members.contains(&f))
                     {
+                        // #107: a group's border shows only while the group holds the focus. Any member
+                        // counts, so a roll that moves `active` before the foreground follows keeps it.
                         hot.stacked_color
                     } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                         hot.focused_color
@@ -1744,9 +1770,15 @@ impl<B: WindowBackend> Engine<B> {
         // A holes/colour-only refresh with unchanged tile geometry must NEVER supersede an active
         // animation or open/close handoff with a new scene epoch; patch holes and tile colours
         // directly on the renderer instead.
+        // Never right after a live scene with nothing pending: the renderer re-arms an `OverlayUpdate` from its
+        // settled scene and keeps that scene's `live` flag (`render::overlay_patched_settled_scene`, #108
+        // re-review F1), so a live gesture whose last word is an overlay patch would poll live stand-ins forever
+        // (#108 review L1). While a settle is queued it is fine (and avoids a mid-scroll placement pass, N1):
+        // the settle sends the final non-live scene.
         let overlay_only = action == "idle"
             && !force_place
             && !live
+            && !(self.last_scene_live && self.settle.is_none())
             && zones.is_empty()
             && !had_zones
             && !self.instant
@@ -1839,6 +1871,7 @@ impl<B: WindowBackend> Engine<B> {
             live,
             force_place,
         }))?;
+        self.last_scene_live = live;
         if self.diag.enabled {
             diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, self.last_holes.len()));
         }
@@ -1902,6 +1935,23 @@ impl<B: WindowBackend> Engine<B> {
                     (side(-1), side(1))
                 }
                 _ => (false, false),
+            };
+            self.gesture.monitor_rays = match (self.gesture.axis_lock, home_bounds) {
+                (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
+                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                    // Rays start where the drag starts: pad_begin grabs the strip's active window at its
+                    // centre (#102 review), so a ray from the monitor centre can point across a
+                    // third monitor the carry would enter first.
+                    let origin = self
+                        .key()
+                        .and_then(|k| self.strips.get(&k))
+                        .and_then(|s| s.active())
+                        .and_then(|id| self.backend.frame(id))
+                        .map(|r| (r.x as f64 + r.w as f64 * 0.5, r.y as f64 + r.h as f64 * 0.5))
+                        .unwrap_or((b.x as f64 + b.w as f64 * 0.5, b.y as f64 + b.h as f64 * 0.5));
+                    planor::monitor_rays(b, &bounds, h, origin)
+                }
+                _ => Vec::new(),
             };
         }
         let swipe = self.gesture.sample(
@@ -2316,6 +2366,12 @@ impl<B: WindowBackend> Engine<B> {
         self.scroll_frac = 0.;
         let scroll_dpi = self.scroll_dpi.take();
         if self.hopped {
+            // A swipe that hopped monitors ignores the rest of the gesture and queues no settle or momentum, so
+            // the lift itself must reach the renderer as a non-live scene even though it changes no layout, or
+            // live stand-ins poll forever (#108 L1). Every other lift ends with its settle or momentum scene.
+            if self.last_scene_live {
+                self.dirty = true;
+            }
             self.scroll_samples.clear();
             self.clear_scroll_state();
             return;
@@ -2502,6 +2558,7 @@ impl<B: WindowBackend> Engine<B> {
         let home = self.owning(id);
         let home_lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         let lock = home_lock.filter(|_| !self.gesture.started_cross);
+        let ray = if self.gesture.started_cross { self.gesture.started_ray } else { None };
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2520,6 +2577,8 @@ impl<B: WindowBackend> Engine<B> {
             cross: 0.,
             home_lock,
             left_home: false,
+            ray,
+            off: (0., 0.),
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
@@ -2565,6 +2624,12 @@ impl<B: WindowBackend> Engine<B> {
         // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
         let (raw_dx, raw_dy) = (dx, dy);
         let (mut dx, mut dy) = (dx, dy);
+        p.off = (p.off.0 * 0.85 + raw_dx, p.off.1 * 0.85 + raw_dy);
+        let at_info = monitor_axes
+            .iter()
+            .find(|(r, _)| inside(*r, p.cursor))
+            .copied()
+            .or_else(|| home_bounds.map(|b| (b, p.home_lock.unwrap_or(true))));
         if let Some(h) = p.lock {
             // Travel over the window's own group column is a regroup/reorder across the axis, not an
             // intent to leave for another monitor: it does not count towards the lock release (#84).
@@ -2573,12 +2638,68 @@ impl<B: WindowBackend> Engine<B> {
             }
             let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
             // Whether another monitor lies that way is judged from the monitor the cursor is on now.
-            let at = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, _)| *r).or(home_bounds);
+            let at = at_info.map(|(r, _)| r);
+            let at_h = at_info.map(|(_, ah)| ah).unwrap_or(h);
+            let rays = at.map(|b| planor::monitor_rays(b, &bounds, at_h, p.cursor)).unwrap_or_default();
+            let picked_ray = planor::best_ray(p.off.0, p.off.1, &rays)
+                .filter(|&(rx, ry)| (if h { ry } else { rx }) * p.cross > 0.);
             let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
-            if cross_ok && monitor_that_way && p.cross.abs() >= relax {
+            if cross_ok && p.cross.abs() >= relax && (picked_ray.is_some() || monitor_that_way) {
                 p.lock = None;
+                p.ray = picked_ray;
+                p.cross = 0.;
+                p.off = (0., 0.);
+                if let Some((rx, ry)) = p.ray {
+                    let proj = raw_dx * rx + raw_dy * ry;
+                    dx = proj * rx;
+                    dy = proj * ry;
+                }
             } else if !in_column {
                 if h { dy = 0. } else { dx = 0. }
+            }
+        } else if let Some((rx, ry)) = p.ray {
+            // Constrained to a linear ray toward a neighbouring monitor (#102); switching to another
+            // offered ray (or back to the strip axis) follows the same relax threshold.
+            if !in_column {
+                p.cross += raw_dx * (-ry) + raw_dy * rx;
+            }
+            if !in_column && !p.left_home && p.cross.abs() >= relax
+                && let Some((at_r, at_h)) = at_info
+            {
+                let (along, cross) = if at_h { (p.off.0.abs(), p.off.1.abs()) } else { (p.off.1.abs(), p.off.0.abs()) };
+                let strip_ok = along >= 1.5 * cross;
+                let rays: Vec<(f64, f64)> = if cross_ok {
+                    planor::monitor_rays(at_r, &bounds, at_h, p.cursor)
+                        .into_iter()
+                        .filter(|&(nrx, nry)| nrx * rx + nry * ry < 0.99)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let alt_ray = planor::best_ray(p.off.0, p.off.1, &rays);
+                let alt_proj = alt_ray.map(|(nrx, nry)| p.off.0 * nrx + p.off.1 * nry);
+                if let (Some(nr), Some(ap)) = (alt_ray, alt_proj)
+                    && (!strip_ok || ap >= planor::RAY_LEAD_MARGIN * along)
+                {
+                    p.ray = Some(nr);
+                    p.cross = 0.;
+                    p.off = (0., 0.);
+                } else if strip_ok {
+                    p.lock = Some(at_h);
+                    p.ray = None;
+                    p.line = if at_h { p.cursor.1 } else { p.cursor.0 };
+                    p.cross = 0.;
+                    p.off = (0., 0.);
+                }
+            }
+            if !in_column {
+                if let Some((crx, cry)) = p.ray {
+                    let proj = raw_dx * crx + raw_dy * cry;
+                    dx = proj * crx;
+                    dy = proj * cry;
+                } else if let Some(h) = p.lock {
+                    if h { dy = 0. } else { dx = 0. }
+                }
             }
         }
         let now = Instant::now();
@@ -2620,13 +2741,25 @@ impl<B: WindowBackend> Engine<B> {
                         p.lock = Some(hl);
                         p.line = line_for(hl);
                         p.cross = 0.;
+                        p.ray = None;
+                        p.off = (0., 0.);
                     }
                 } else {
-                    p.left_home = true;
+                    if !p.left_home {
+                        p.left_home = true;
+                        // (#102 review) The ray carried the window onto the destination monitor;
+                        // keeping it would project sideways finger travel back onto the ray and
+                        // stick the window there. From here the carry is free (a released lock
+                        // stays released) or locked to the destination strip axis below.
+                        p.ray = None;
+                        p.cross = 0.;
+                        p.off = (0., 0.);
+                    }
                     if p.lock.is_some() && p.lock != Some(dest_h) {
                         p.lock = Some(dest_h);
                         p.line = line_for(dest_h);
                         p.cross = 0.;
+                        p.off = (0., 0.);
                     }
                 }
             }
@@ -3595,7 +3728,9 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
             *id != dragged
                 && s.locate(*id).is_some_and(|(i, j)| Some(i) != own && s.columns[i].active == j)
         })
-        .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
+        .filter_map(|(id, r)| {
+            clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side, s.area.horizontal())))
+        })
         .collect()
 }
 /// #80: true when another monitor lies beyond this strip edge (`trailing` = right/bottom): a drag there is
@@ -3719,6 +3854,7 @@ pub fn run() -> Result<()> {
         backend,
         pad: None,
         pad_scrolling: false,
+        last_scene_live: false,
         settle: None,
         scroll_frac: 0.,
         renderer: render::start(),

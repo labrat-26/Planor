@@ -65,12 +65,57 @@ pub struct Scene {
     /// snap-back, cancelled drag, or reload).
     pub force_place: bool,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ZoneKind {
+    Merge,
+    Leave {
+        trailing: bool,
+        horizontal: bool,
+    },
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZoneIcon {
+    pub kind: ZoneKind,
+    pub rect: Rect,
+    pub color: u32,
+}
+
 #[derive(Clone, Debug)]
 pub struct Zone {
     pub rect: Rect,
     pub monitor: String,
     pub color: u32,
     pub alpha: f32,
+    pub kind: ZoneKind,
+}
+
+/// Compute the centred, zone-scaled, theme-aware icon specification for a drop-zone rect (#104).
+/// The renderer's glyph draw uses this same maths (with its DPI scale), so the tests that check
+/// the spec cover what is actually drawn (#102 review).
+pub(crate) fn zone_icon_rect(rect: &Rect, kind: ZoneKind, dark: bool, dpi: f32) -> ZoneIcon {
+    let min_dim = rect.w.min(rect.h).max(1) as f32;
+    let side = (min_dim * 0.32)
+        .clamp(20.0 * dpi, 64.0 * dpi)
+        .min(min_dim * 0.85)
+        .round()
+        .max(1.0) as i32;
+    ZoneIcon {
+        kind,
+        rect: Rect {
+            x: rect.x + (rect.w - side) / 2,
+            y: rect.y + (rect.h - side) / 2,
+            w: side,
+            h: side,
+        },
+        color: crate::theme::zone_icon_color(dark),
+    }
+}
+/// Compute the centred, zone-scaled, theme-aware icon specification for a drop zone (#104).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn zone_icon_spec(z: &Zone, dark: bool, dpi: f32) -> ZoneIcon {
+    zone_icon_rect(&z.rect, z.kind, dark, dpi)
 }
 pub enum Message {
     Scene(Scene),
@@ -127,6 +172,8 @@ struct Source {
     winrt: IDirect3DDevice,
     size: windows::Graphics::SizeInt32,
     bitmap: Option<ID2D1Bitmap1>,
+    /// The GPU texture `bitmap` wraps; live frames are copied into it in place.
+    copy: Option<ID3D11Texture2D>,
 }
 impl Drop for Source {
     fn drop(&mut self) {
@@ -159,6 +206,7 @@ impl Source {
                 winrt,
                 size,
                 bitmap: None,
+                copy: None,
             })
         }
     }
@@ -190,10 +238,73 @@ impl Source {
                 }
                 return Ok(());
             }
+            self.store(surface, frame)
+        }
+    }
+    /// Refresh the picture of a window that is moving (scroll, drag, open/close) so its stand-in keeps
+    /// playing instead of freezing on the frame captured when the motion started. Only a frame of the
+    /// same size as the current picture is taken (copied in place, no allocation); a resize is left to
+    /// the settled path, which keeps the origin-size picture for the length of the motion.
+    fn update_live(&mut self, surface: &Surface) -> windows::core::Result<bool> {
+        unsafe {
+            let (Some(copy), Some(_)) = (&self.copy, &self.bitmap) else {
+                return Ok(false);
+            };
+            let mut newest = None;
+            for _ in 0..2 {
+                match self.pool.TryGetNextFrame() {
+                    Ok(f) => newest = Some(f),
+                    Err(_) => break,
+                }
+            }
+            let Some(frame) = newest else { return Ok(false) };
+            // The pool's buffers keep the size the pool was created with: after the window resizes, the
+            // frame texture still matches the picture while only `ContentSize` tells the content changed,
+            // so comparing textures alone would copy a cropped picture or one with a blank band (#108
+            // review M1). Resize the pool like `update` and keep the current picture until the settled
+            // path stores a frame of the new size.
+            let content = frame.ContentSize()?;
+            let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
+            let tex: ID3D11Texture2D = access.GetInterface()?;
+            let (mut got, mut have) = (D3D11_TEXTURE2D_DESC::default(), D3D11_TEXTURE2D_DESC::default());
+            tex.GetDesc(&mut got);
+            copy.GetDesc(&mut have);
+            let action = live_frame_action(
+                (content.Width, content.Height),
+                (self.size.Width, self.size.Height),
+                (got.Width, got.Height),
+                (have.Width, have.Height),
+                got.Format == have.Format,
+            );
+            if action == LiveFrame::Copy {
+                surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
+            }
+            frame.Close()?;
+            if action == LiveFrame::Resize {
+                self.pool.Recreate(&self.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content)?;
+                self.size = content;
+            }
+            Ok(action == LiveFrame::Copy)
+        }
+    }
+    unsafe fn store(&mut self, surface: &Surface, frame: Direct3D11CaptureFrame) -> windows::core::Result<()> {
+        unsafe {
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             tex.GetDesc(&mut desc);
+            // Live updates (every drawn frame while windows move): copy into the texture the bitmap
+            // already wraps when the size still matches, so a frame costs one GPU copy and no
+            // allocation. The bitmap shows the new pixels without being recreated.
+            if let (Some(copy), Some(_)) = (&self.copy, &self.bitmap) {
+                let mut have = D3D11_TEXTURE2D_DESC::default();
+                copy.GetDesc(&mut have);
+                if have.Width == desc.Width && have.Height == desc.Height && have.Format == desc.Format {
+                    surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
+                    frame.Close()?;
+                    return Ok(());
+                }
+            }
             desc.Usage = D3D11_USAGE_DEFAULT;
             desc.CPUAccessFlags = 0;
             desc.MiscFlags = 0;
@@ -206,6 +317,7 @@ impl Source {
             frame.Close()?;
             let dx: IDXGISurface = copy.cast()?;
             self.bitmap = Some(surface.context.CreateBitmapFromDxgiSurface(&dx, None)?);
+            self.copy = Some(copy);
             Ok(())
         }
     }
@@ -259,7 +371,7 @@ fn record_visible_frame_state(
     last_draw: &mut DrawSig,
     want_visible: &mut bool,
     last_draw_valid: &mut bool,
-    fills: &[(Rect, u32, f32)],
+    fills: &[(Rect, u32, f32, ZoneKind)],
     cards: &[CardDraw],
     lines: &[BorderLine],
     holes: &[Rect],
@@ -294,6 +406,22 @@ pub(crate) fn idle_scene_from_settled(mut settled: Scene) -> Scene {
     settled.force_place = false;
     settled.zones.clear();
     settled
+}
+/// A redraw of the last live scene (the fingers rest mid-swipe, so no new scene arrives) after a parked
+/// window's picture got a new frame: same epoch and layout, no animation and no OS placement (its targets
+/// already match), but still live so the stand-ins keep being drawn instead of the windows being unparked.
+pub(crate) fn live_redraw_scene(mut settled: Scene) -> Scene {
+    settled.action = "idle";
+    settled.duration = 0;
+    settled.force_place = false;
+    settled
+}
+/// The frame an `OverlayUpdate` (holes or border colours) re-arms from the settled scene. A live scene stays
+/// live: between a slow lift and its queued settle the stand-ins are still what is drawn and the real windows
+/// are still parked, and clearing `live` here would unpark them at the mid-scroll position only for the settle
+/// to move them again (#108 re-review F1). The settle's own scene ends the live state.
+pub(crate) fn overlay_patched_settled_scene(settled: Scene) -> Scene {
+    if settled.live { live_redraw_scene(settled) } else { idle_scene_from_settled(settled) }
 }
 /// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
 /// device, a scene already queued, or no settled scene means there is nothing to do.
@@ -456,7 +584,7 @@ pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> B
 }
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
-    fills: Vec<(Rect, u32, u32)>,
+    fills: Vec<(Rect, u32, u32, ZoneKind)>,
     cards: Vec<(Rect, u32, u32)>,
     lines: Vec<BorderLine>,
     holes: Vec<Rect>,
@@ -467,7 +595,7 @@ struct DrawSig {
 impl DrawSig {
     fn matches(
         &self,
-        fills: &[(Rect, u32, f32)],
+        fills: &[(Rect, u32, f32, ZoneKind)],
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -486,7 +614,9 @@ impl DrawSig {
                 .fills
                 .iter()
                 .zip(fills)
-                .all(|(&(r1, c1, a1), &(r2, c2, a2))| r1 == r2 && c1 == c2 && a1 == a2.to_bits())
+                .all(|(&(r1, c1, a1, k1), &(r2, c2, a2, k2))| {
+                    r1 == r2 && c1 == c2 && a1 == a2.to_bits() && k1 == k2
+                })
             && self.cards.iter().zip(cards).all(|(&(r1, a1, ang1), c2)| {
                 r1 == c2.rect
                     && a1 == c2.spinner_alpha.to_bits()
@@ -496,7 +626,7 @@ impl DrawSig {
     }
     fn set_from(
         &mut self,
-        fills: &[(Rect, u32, f32)],
+        fills: &[(Rect, u32, f32, ZoneKind)],
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -506,7 +636,7 @@ impl DrawSig {
     ) {
         self.fills.clear();
         self.fills
-            .extend(fills.iter().map(|&(r, c, a)| (r, c, a.to_bits())));
+            .extend(fills.iter().map(|&(r, c, a, k)| (r, c, a.to_bits(), k)));
         self.cards.clear();
         self.cards.extend(
             cards
@@ -536,7 +666,7 @@ impl DrawSig {
 }
 struct DrawFrame<'a> {
     pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
-    fills: &'a [(Rect, u32, f32)],
+    fills: &'a [(Rect, u32, f32, ZoneKind)],
     cards: &'a [CardDraw],
     lines: &'a [BorderLine],
     holes: &'a [Rect],
@@ -554,6 +684,10 @@ struct Surface {
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
     clear_brush: Option<ID2D1SolidColorBrush>,
     timer: crate::gpu::GpuTimer,
+    /// Cached `theme::system_is_dark()` (a registry read): refreshed at most once a second and
+    /// only while drop zones are drawn (#102 review).
+    dark: bool,
+    dark_at: Instant,
 }
 impl Surface {
     unsafe fn brush_for<'a>(
@@ -604,6 +738,8 @@ impl Surface {
                 brushes: HashMap::new(),
                 clear_brush: None,
                 timer: Default::default(),
+                dark: crate::theme::system_is_dark(),
+                dark_at: Instant::now(),
             })
         }
     }
@@ -662,7 +798,29 @@ impl Surface {
                         }),
                     )
                 }
-                for &(r, c, alpha) in *fills {
+                // The theme is a registry read: cached on the surface, refreshed at most once a
+                // second, and only while drop zones are drawn (#102 review).
+                let dark = if fills.is_empty() {
+                    false
+                } else {
+                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
+                        self.dark = crate::theme::system_is_dark();
+                        self.dark_at = Instant::now();
+                    }
+                    self.dark
+                };
+                let icon_color = if fills.is_empty() {
+                    0
+                } else {
+                    crate::theme::zone_icon_color(dark)
+                };
+                let pt = |px: f32, py: f32| {
+                    let mut p = D2D1_ELLIPSE::default().point;
+                    p.X = px;
+                    p.Y = py;
+                    p
+                };
+                for &(r, c, alpha, kind) in *fills {
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -675,6 +833,82 @@ impl Surface {
                         },
                         brush,
                     );
+                    // #104: centred, scaled, theme-aware vector icon on merge and leave zones.
+                    // Sized through zone_icon_rect, the same maths the spec tests check (#102 review).
+                    let icon = zone_icon_rect(&r, kind, dark, dpi);
+                    let size = icon.rect.w as f32;
+                    let cx = (icon.rect.x + off.x) as f32 + size * 0.5;
+                    let cy = (icon.rect.y + off.y) as f32 + size * 0.5;
+                    let stroke = (size * 0.085).clamp(2.0 * dpi, 4.0 * dpi);
+                    let glyph = Self::brush_for(&mut self.brushes, rt, icon_color)?;
+                    glyph.SetOpacity(if alpha > 0.5 { 0.95 } else { 0.80 });
+                    match kind {
+                        ZoneKind::Merge => {
+                            // Stacked-windows glyph: two overlapping rounded window frames.
+                            let cw = size * 0.64;
+                            let ch = size * 0.52;
+                            let shift = size * 0.16;
+                            let cr = (size * 0.08).max(2.0 * dpi);
+                            let back = D2D_RECT_F {
+                                left: cx - cw * 0.5 + shift,
+                                top: cy - ch * 0.5 - shift,
+                                right: cx + cw * 0.5 + shift,
+                                bottom: cy + ch * 0.5 - shift,
+                            };
+                            let front = D2D_RECT_F {
+                                left: cx - cw * 0.5 - shift,
+                                top: cy - ch * 0.5 + shift,
+                                right: cx + cw * 0.5 - shift,
+                                bottom: cy + ch * 0.5 + shift,
+                            };
+                            rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: back, radiusX: cr, radiusY: cr },
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            rt.DrawRoundedRectangle(
+                                &D2D1_ROUNDED_RECT { rect: front, radiusX: cr, radiusY: cr },
+                                glyph,
+                                stroke,
+                                None,
+                            );
+                            let bar_y = front.top + ch * 0.28;
+                            rt.DrawLine(
+                                pt(front.left + stroke, bar_y),
+                                pt(front.right - stroke, bar_y),
+                                glyph,
+                                stroke * 0.75,
+                                None,
+                            );
+                        }
+                        ZoneKind::Leave { trailing, horizontal } => {
+                            // Arrow-out-of-group glyph: open bracket on inner side + outward arrow.
+                            let half = size * 0.42;
+                            let (dx, dy) = match (horizontal, trailing) {
+                                (true, false) => (-1.0f32, 0.0f32),
+                                (true, true) => (1.0, 0.0),
+                                (false, false) => (0.0, -1.0),
+                                (false, true) => (0.0, 1.0),
+                            };
+                            let (px_u, py_u) = (-dy, dx);
+                            let p_at = |along: f32, perp: f32| {
+                                pt(cx + dx * along + px_u * perp, cy + dy * along + py_u * perp)
+                            };
+                            let b_back = -half;
+                            let b_front = -half * 0.2;
+                            let b_half = half * 0.78;
+                            rt.DrawLine(p_at(b_front, -b_half), p_at(b_back, -b_half), glyph, stroke, None);
+                            rt.DrawLine(p_at(b_back, -b_half), p_at(b_back, b_half), glyph, stroke, None);
+                            rt.DrawLine(p_at(b_back, b_half), p_at(b_front, b_half), glyph, stroke, None);
+                            let a_start = -half * 0.35;
+                            let a_tip = half;
+                            let head = half * 0.48;
+                            rt.DrawLine(p_at(a_start, 0.0), p_at(a_tip, 0.0), glyph, stroke, None);
+                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, -head * 0.75), glyph, stroke, None);
+                            rt.DrawLine(p_at(a_tip, 0.0), p_at(a_tip - head, head * 0.75), glyph, stroke, None);
+                        }
+                    }
                 }
                 for card in *cards {
                     let x = (card.rect.x + off.x) as f32;
@@ -969,7 +1203,12 @@ impl Host {
         slot.clear();
         slot.extend_from_slice(rgn_holes);
     }
-    fn thumbnail(&mut self, id: isize, r: Rect, clip: Rect) -> bool {
+    /// Register (once) and position the DWM thumbnail of window `id`; true when it can be shown. `show` false
+    /// positions it HIDDEN (#110): during motion the stand-in usually draws the captured picture instead and hides
+    /// the thumbnail again, and a thumbnail made visible in between was composed for a frame over everything,
+    /// before the overlay's region holes are applied, covering topmost windows such as a PiP player. A thumbnail
+    /// that is already visible stays visible (hiding it until the deferred show would blank the stand-in).
+    fn thumbnail(&mut self, id: isize, r: Rect, clip: Rect, show: bool) -> bool {
         unsafe {
             let state = self.thumbs.entry(id).or_insert_with(|| {
                 let mut t = 0;
@@ -1021,7 +1260,7 @@ impl Host {
                     bottom: src.y + src.h,
                 },
                 opacity: 255,
-                fVisible: 1,
+                fVisible: (show || state.visible).into(),
                 fSourceClientAreaOnly: 0,
             };
             let hr = DwmUpdateThumbnailProperties(t, &props);
@@ -1036,7 +1275,7 @@ impl Host {
             state.tile = r;
             state.clip = clip;
             state.source_size = (size.cx, size.cy);
-            state.visible = true;
+            state.visible |= show;
             true
         }
     }
@@ -1050,6 +1289,25 @@ impl Host {
             };
             unsafe {
                 DwmUpdateThumbnailProperties(state.handle, &p);
+            }
+        }
+    }
+    /// Show a thumbnail positioned hidden by `thumbnail(.., false)`, once the region holes are applied.
+    fn show_thumbnail(&mut self, id: isize) {
+        if let Some(state) = self.thumbs.get_mut(&id)
+            && !state.visible
+            && state.handle != 0
+        {
+            let p = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_VISIBLE,
+                fVisible: 1,
+                ..Default::default()
+            };
+            let hr = unsafe { DwmUpdateThumbnailProperties(state.handle, &p) };
+            if hr >= 0 {
+                state.visible = true;
+            } else {
+                diag::trace(format!("thumbnail show failed: hwnd={id:#x} hr={hr:#x}"));
             }
         }
     }
@@ -1147,6 +1405,12 @@ pub(crate) fn should_draw_backing(
 ) -> bool {
     moving || live_proxy || open_handoff || !thumb_ok
 }
+/// Whether a stand-in's DWM thumbnail is positioned hidden and shown only after the overlay's region holes are
+/// applied (#110). True exactly when `should_draw_backing` would replace it by the captured picture even with a
+/// working thumbnail: making it visible first composed it for a frame over topmost windows (a PiP player).
+pub(crate) fn defer_thumbnail_show(moving: bool, live_proxy: bool, open_handoff: bool) -> bool {
+    should_draw_backing(moving, live_proxy, open_handoff, true)
+}
 
 /// WGC window captures normally start at the visible frame (`(0, 0)`), whereas DWM thumbnails
 /// capture the full `GetWindowRect` (requiring `win32::insets`). Only apply `dwm_insets` to a
@@ -1195,6 +1459,31 @@ pub(crate) fn choose_proxy_backing(
     Some((src_r, dst_r))
 }
 
+/// What a live stand-in does with a newly captured frame (see `Source::update_live`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveFrame {
+    /// Same content size as the pool and the picture: copy it into the picture in place.
+    Copy,
+    /// The window's content changed size: resize the pool and keep the current picture.
+    Resize,
+    /// Nothing usable (an empty content size, or a frame that does not match the picture yet).
+    Skip,
+}
+/// Decide from sizes alone, so the resize-mid-motion case is unit tested without a GPU: `content` is the
+/// frame's `ContentSize`, `pool` the size the frame pool was created with, `frame_tex` and `picture`
+/// the frame texture and the stand-in picture's texture.
+pub(crate) fn live_frame_action(
+    content: (i32, i32),
+    pool: (i32, i32),
+    frame_tex: (u32, u32),
+    picture: (u32, u32),
+    same_format: bool,
+) -> LiveFrame {
+    if content != pool {
+        return if content.0 > 0 && content.1 > 0 { LiveFrame::Resize } else { LiveFrame::Skip };
+    }
+    if frame_tex == picture && same_format { LiveFrame::Copy } else { LiveFrame::Skip }
+}
 /// True when a cached WGC capture bitmap should be dropped as stale.
 /// While `in_motion` (`moving || open_handoff`), the stand-in `rs` keeps the window's original
 /// size while the real OS window may already have been resized at `park`: judge the capture
@@ -1459,6 +1748,28 @@ pub(crate) fn holes_intersecting_rects(holes: &[Rect], rects: &[Rect], out: &mut
         }
     }
 }
+/// Region holes to cut BEFORE a DWM thumbnail is made or kept visible at `clip` (#110 review R1/R2): the holes
+/// already applied plus every hole of `holes` that `clip` intersects, in `holes` order, or `None` when every such
+/// hole is already cut. A visible thumbnail is composed by DWM as soon as its properties change, so moving an
+/// already-visible one (scroll start) or showing a settled peek (scroll end) before the frame's region holes are
+/// applied covered topmost windows (a PiP player) for a frame. Holes nothing visible overlaps are not cut, so a
+/// steady scroll past a PiP costs no `SetWindowRgn`.
+pub(crate) fn holes_needed_before_showing(applied: &[Rect], holes: &[Rect], clip: Rect) -> Option<Vec<Rect>> {
+    if holes.iter().all(|&h| applied.contains(&h) || intersect(h, clip).is_none()) {
+        return None;
+    }
+    let mut out: Vec<Rect> = holes
+        .iter()
+        .copied()
+        .filter(|&h| applied.contains(&h) || intersect(h, clip).is_some())
+        .collect();
+    for &h in applied {
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    Some(out)
+}
 /// Effective stand-in rect for a tile during motion or open/close async handoff:
 /// keeps the window's original size while the stand-in glides so neither the bitmap nor the
 /// focus border jumps ahead of the real window resize.
@@ -1695,11 +2006,13 @@ struct FrameScratch {
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
     host_hits: Vec<(Rect, isize)>,
-    fills: Vec<(Rect, u32, f32)>,
+    fills: Vec<(Rect, u32, f32, ZoneKind)>,
     mine: Vec<Rect>,
     local_holes: Vec<Rect>,
     thumb_rects: Vec<Rect>,
     rgn_holes: Vec<Rect>,
+    /// Thumbnails positioned hidden during motion that no picture replaced: shown after the region holes (#110).
+    deferred_thumbs: Vec<isize>,
 }
 
 struct RenderState {
@@ -1803,6 +2116,36 @@ impl RenderState {
             .values()
             .any(|h| !h.pictures.is_empty() || !h.pending_sources.is_empty() || !h.thumbs.is_empty())
     }
+    /// Copy the newest captured frame into the picture of every window drawn as a live stand-in
+    /// (`live_ids`). True when at least one picture changed, so the overlay needs a redraw; windows
+    /// that did not change deliver no frame and cost one `TryGetNextFrame` call.
+    fn refresh_live_pictures(&mut self) -> bool {
+        let mut changed = false;
+        let mut dead_gen = None;
+        for host in self.hosts.values_mut() {
+            let Some(surface) = &host.surface else {
+                continue;
+            };
+            for (&(id, _), source) in &mut host.pictures {
+                if !self.live_ids.contains(&id) {
+                    continue;
+                }
+                match source.update_live(surface) {
+                    Ok(c) => changed |= c,
+                    Err(e) => {
+                        if is_device_lost_hr(e.code().0) || unsafe { surface.gpu.GetDeviceRemovedReason() }.is_err() {
+                            dead_gen = Some(surface.device_gen);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(dg) = dead_gen {
+            self.invalidate_device_generation(dg);
+            return false;
+        }
+        changed
+    }
 
     fn needs_surface_recovery(&self) -> bool {
         self.hosts.values().any(|h| h.surface.is_none())
@@ -1850,11 +2193,11 @@ impl RenderState {
                 Ok(mut s) => {
                     host.last_draw_valid = false;
                     if should_draw_on_recovery(host.want_visible, &host.last_draw) {
-                        let fills: Vec<(Rect, u32, f32)> = host
+                        let fills: Vec<(Rect, u32, f32, ZoneKind)> = host
                             .last_draw
                             .fills
                             .iter()
-                            .map(|&(r, c, a)| (r, c, f32::from_bits(a)))
+                            .map(|&(r, c, a, k)| (r, c, f32::from_bits(a), k))
                             .collect();
                         let cards: Vec<CardDraw> = host
                             .last_draw
@@ -2281,6 +2624,21 @@ impl RenderState {
                 scratch.keep.clear();
                 scratch.host_hits.clear();
                 scratch.thumb_rects.clear();
+                scratch.deferred_thumbs.clear();
+                // The frame's holes are known before any tile so a thumbnail that is visible while it is positioned
+                // can have the holes it overlaps cut first (#110 review R1/R2).
+                scratch.mine.clear();
+                scratch.local_holes.clear();
+                for h in s.holes.iter() {
+                    if let Some(r) = intersect(*h, host.b) {
+                        scratch.mine.push(r);
+                        scratch.local_holes.push(Rect {
+                            x: r.x - host.b.x,
+                            y: r.y - host.b.y,
+                            ..r
+                        });
+                    }
+                }
                 let mut full = false;
                 let mut source_device_lost: Option<u64> = None;
                 for tile in s.tiles.iter().filter(|tile| &tile.monitor == name) {
@@ -2402,7 +2760,22 @@ impl RenderState {
                         tile.hidden,
                     );
                     if let Some(c) = clip {
-                        let thumb_ok = proxy && host.thumbnail(tile.id, rs, c);
+                        // In motion the captured picture normally replaces the thumbnail, so position it hidden
+                        // and show it only if no picture is drawn, after the region holes are applied (#110).
+                        let defer_show = defer_thumbnail_show(moving, live_proxy, open_handoff);
+                        // A thumbnail shown now (settled peek) or already visible (moved at scroll start) is
+                        // composed as soon as it is positioned: cut the holes it overlaps first (#110 review R1/R2).
+                        if proxy
+                            && (!defer_show || host.thumbs.get(&tile.id).is_some_and(|t| t.visible))
+                            && let Some(cut) = holes_needed_before_showing(
+                                host.applied_holes.as_deref().unwrap_or(&[]),
+                                &scratch.mine,
+                                c,
+                            )
+                        {
+                            host.apply_rgn_holes(&cut);
+                        }
+                        let thumb_ok = proxy && host.thumbnail(tile.id, rs, c, !defer_show);
                         let mut drew_backing = false;
                         if proxy
                             && should_draw_backing(moving, live_proxy, open_handoff, thumb_ok)
@@ -2424,9 +2797,18 @@ impl RenderState {
                                     source.bitmap = None;
                                 }
                             }
-                            if source.bitmap.is_none()
-                                && let Err(e) = source.update(surface, 0)
-                            {
+                            // Every drawn stand-in is live: the window's newest captured frame is copied into
+                            // its picture (one GPU copy, no allocation), so any window (video, browser,
+                            // terminal, a fullscreen app scrolled half off) keeps updating while the strip
+                            // scrolls, a group rolls or the fingers rest mid-swipe. WGC only delivers a frame
+                            // when the window changed, so a static window costs nothing. The first picture
+                            // and any size change still go through `update`.
+                            let live_result = if source.bitmap.is_some() {
+                                source.update_live(surface).map(|_| ())
+                            } else {
+                                source.update(surface, 0)
+                            };
+                            if let Err(e) = live_result {
                                 if is_device_lost_hr(e.code().0)
                                     || surface.gpu.GetDeviceRemovedReason().is_err()
                                 {
@@ -2466,6 +2848,9 @@ impl RenderState {
                                 host.hide_thumbnail(tile.id);
                             } else {
                                 scratch.thumb_rects.push(c);
+                                if defer_show {
+                                    scratch.deferred_thumbs.push(tile.id);
+                                }
                             }
                             scratch.keep.insert(tile.id);
                         }
@@ -2524,18 +2909,6 @@ impl RenderState {
                         false
                     }
                 });
-                scratch.mine.clear();
-                scratch.local_holes.clear();
-                for h in s.holes.iter() {
-                    if let Some(r) = intersect(*h, host.b) {
-                        scratch.mine.push(r);
-                        scratch.local_holes.push(Rect {
-                            x: r.x - host.b.x,
-                            y: r.y - host.b.y,
-                            ..r
-                        });
-                    }
-                }
                 if !full {
                     if scratch.mine.is_empty() {
                         scratch.hits.append(&mut scratch.host_hits);
@@ -2560,6 +2933,7 @@ impl RenderState {
                             },
                             z.color,
                             z.alpha,
+                            z.kind,
                         ));
                     }
                 }
@@ -2788,6 +3162,9 @@ impl RenderState {
                     host.desired_rgn_holes.clear();
                     host.desired_rgn_holes.extend_from_slice(&scratch.rgn_holes);
                     host.apply_rgn_holes(&scratch.rgn_holes);
+                    for &id in &scratch.deferred_thumbs {
+                        host.show_thumbnail(id);
+                    }
                     // 3. Show the overlay window ONLY after content is drawn/committed and region
                     // is applied, so stale borders or holes are never composed for a frame.
                     let can_show = !scratch.keep.is_empty() || host.surface.is_some();
@@ -3134,12 +3511,18 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             .ok();
         let mut state = RenderState::new(source_tx, source_done);
         let mut hi_res: Option<win32::HighResTimer> = None;
+        // When the live stand-ins were last polled: the next poll is one refresh period after it, so the
+        // present + DWM flush of a live redraw counts toward the period instead of adding a second one.
+        let mut live_polled = Instant::now();
         loop {
             crate::perf::heartbeat_render();
             state.poll_background_work();
             // 1 ms scheduler resolution while an animated scene is in flight: placement retries sleep
-            // 2-8 ms, which the default ~15.6 ms granularity would round up into visible hitches.
-            if state.scene.is_some() {
+            // 2-8 ms, which the default ~15.6 ms granularity would round up into visible hitches. Held for
+            // the whole live gesture too (fingers resting between scenes): every live redraw sets `scene`,
+            // so keying it on `scene` alone toggled timeBeginPeriod/timeEndPeriod at the refresh rate and
+            // left the sub-period `recv_timeout` below at the coarse default granularity (#108 review M2).
+            if state.scene.is_some() || state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
                 if hi_res.is_none() {
                     hi_res = Some(win32::HighResTimer::acquire());
                 }
@@ -3148,6 +3531,10 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             }
             let timeout = if state.scene.is_some() {
                 Duration::ZERO
+            } else if state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
+                // Live stand-ins at the display refresh rate while the fingers rest.
+                Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64)
+                    .saturating_sub(live_polled.elapsed())
             } else if state.has_active_sources() || state.verify.is_some() {
                 Duration::from_millis(33)
             } else if state.needs_surface_recovery() {
@@ -3178,7 +3565,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         apply_overlay_update(active, holes, &colors);
                     } else if let Some(mut settled) = state.last_settled_scene.take().filter(|s| s.epoch == seq) {
                         apply_overlay_update(&mut settled, holes, &colors);
-                        state.scene = Some(idle_scene_from_settled(settled));
+                        state.scene = Some(overlay_patched_settled_scene(settled));
                     }
                 }
                 Ok(Message::Scene(mut s)) => {
@@ -3225,6 +3612,19 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             let Some(s) = state.scene.take() else {
                 state.check_device_health();
                 state.try_recover_surfaces();
+                // Fingers resting mid-swipe: the parked windows' stand-ins must keep playing. Redraw
+                // only when one of them actually delivered a new frame (a static window costs nothing).
+                let live = state.last_settled_scene.as_ref().is_some_and(|s| s.live);
+                let period = Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64);
+                // Woken early by a message: wait for the period instead of polling again.
+                let due = live && live_polled.elapsed() + Duration::from_micros(500) >= period;
+                if due {
+                    live_polled = Instant::now();
+                }
+                if due && state.refresh_live_pictures() {
+                    state.scene = state.last_settled_scene.take().map(live_redraw_scene);
+                    continue;
+                }
                 state.update_idle_sources();
                 continue;
             };
@@ -3278,6 +3678,7 @@ mod tests {
         partition_landing_placements, proxy_blit_rects, refresh_thumb_props_if_resized,
         should_draw_backing, wgc_capture_insets,
     };
+    use super::{holes_intersecting_rects, holes_needed_before_showing};
     use planor::Rect;
     use std::collections::HashSet;
 
@@ -3301,6 +3702,26 @@ mod tests {
         assert_eq!(wgc_src, Rect { x: 0, y: 0, w: 1280, h: 1364 });
         assert_eq!(dwm_src, Rect { x: 8, y: 0, w: 1280, h: 1364 });
         assert_eq!(wgc_dst, dwm_dst);
+    }
+
+    /// #108 review M1: a window resized while its stand-in is live. WGC frames keep the pool's buffer size,
+    /// so the frame texture still matches the picture; only `ContentSize` shows the change. The live path
+    /// must resize the pool and keep the old picture instead of copying a cropped or banded one.
+    #[test]
+    fn live_frame_resizes_the_pool_instead_of_copying_when_content_size_changes() {
+        use super::{LiveFrame, live_frame_action};
+        // Unchanged window: copy in place.
+        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), true), LiveFrame::Copy);
+        // Resized mid-gesture, larger or smaller: textures still equal, content differs -> resize, no copy.
+        assert_eq!(live_frame_action((1000, 700), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
+        assert_eq!(live_frame_action((640, 480), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
+        // Minimised / zero-size content: nothing to copy, nothing to recreate.
+        assert_eq!(live_frame_action((0, 0), (800, 600), (800, 600), (800, 600), true), LiveFrame::Skip);
+        // After the pool resize, frames of the new size do not match the old picture: skip until the settled
+        // path stores a picture of the new size (never copy mismatched textures).
+        assert_eq!(live_frame_action((1000, 700), (1000, 700), (1000, 700), (800, 600), true), LiveFrame::Skip);
+        // Format mismatch: skip.
+        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), false), LiveFrame::Skip);
     }
 
     #[test]
@@ -3410,6 +3831,55 @@ mod tests {
                 .expect("grown source must refresh thumbnail properties");
         assert_eq!(src, Rect { x: 8, y: 0, w: 2560, h: 28 });
         assert_eq!(dst, Rect { x: 0, y: 1364, w: 2560, h: 28 });
+    }
+
+    /// #110: a stand-in whose captured picture replaces the DWM thumbnail (motion, live stand-in, open handoff) must
+    /// position the thumbnail hidden and show it only after the region holes, never visible-then-hidden in one pass;
+    /// a settled peek shows its thumbnail right away. Exhaustive over the inputs, tied to `should_draw_backing`.
+    #[test]
+    fn thumbnail_show_is_deferred_exactly_when_the_picture_replaces_it() {
+        for bits in 0..8u8 {
+            let (moving, live, handoff) = (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0);
+            assert_eq!(
+                defer_thumbnail_show(moving, live, handoff),
+                moving || live || handoff,
+                "moving={moving} live={live} handoff={handoff}"
+            );
+            assert_eq!(
+                defer_thumbnail_show(moving, live, handoff),
+                should_draw_backing(moving, live, handoff, true),
+                "deferred exactly when a working thumbnail is still replaced by the picture"
+            );
+        }
+        assert!(!defer_thumbnail_show(false, false, false), "a settled peek shows its thumbnail at once");
+    }
+
+    /// #110 review R1/R2: before a thumbnail is positioned visible at `clip`, the region must already cut every
+    /// frame hole the clip overlaps; holes cut earlier stay cut (removed only by the precise post-loop apply), and
+    /// holes the clip misses are not cut, so a steady scroll past a PiP adds no region change.
+    #[test]
+    fn holes_are_cut_before_a_visible_thumbnail_overlapping_them_is_positioned() {
+        let pip = Rect { x: 900, y: 600, w: 320, h: 180 };
+        let hud = Rect { x: 10, y: 10, w: 50, h: 20 };
+        let stale = Rect { x: 2000, y: 0, w: 10, h: 10 };
+        let peek = Rect { x: 1000, y: 0, w: 920, h: 1140 };
+        let far = Rect { x: 0, y: 200, w: 500, h: 300 };
+        let holes = [hud, pip];
+        // Scroll start / end: nothing cut yet, a visible thumbnail lands under the PiP -> cut the PiP first.
+        let cut = holes_needed_before_showing(&[], &holes, peek).expect("PiP must be cut first");
+        assert_eq!(cut, vec![pip]);
+        let mut needed = Vec::new();
+        holes_intersecting_rects(&holes, &[peek], &mut needed);
+        assert!(needed.iter().all(|h| cut.contains(h)), "every overlapped hole is cut before showing");
+        // Already cut: no region change (steady scroll / settled frames cost nothing).
+        assert_eq!(holes_needed_before_showing(&[pip], &holes, peek), None);
+        // Clip misses every hole: nothing to cut, even though holes exist.
+        assert_eq!(holes_needed_before_showing(&[], &holes, far), None);
+        // Holes cut earlier (even ones no longer in the frame) stay cut until the precise post-loop apply.
+        let cut = holes_needed_before_showing(&[stale], &holes, peek).expect("PiP must be added");
+        assert_eq!(cut, vec![pip, stale]);
+        let cut = holes_needed_before_showing(&[hud], &holes, peek).expect("PiP must be added");
+        assert_eq!(cut, vec![hud, pip], "frame order kept so the post-loop apply can be a no-op");
     }
 
     #[test]
@@ -4012,7 +4482,7 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5 }],
+            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5, kind: ZoneKind::Merge }],
             action: "open_close",
             live: true,
             force_place: true,
@@ -4028,6 +4498,41 @@ mod tests {
         assert_eq!(idle.tiles[0].id, 101);
         assert_eq!(idle.tiles[0].cookie, 3, "the capture source key (id, cookie) must survive to be re-requested");
         assert_eq!(idle.monitors.len(), 1);
+    }
+
+    /// #108 re-review F1: an `OverlayUpdate` (holes or border colours) that lands between a slow lift and its
+    /// queued settle re-arms the settled scene. A live scene must stay live, or the real windows unpark at the
+    /// mid-scroll position until the settle moves them again; a settled scene still re-arms as a static frame.
+    #[test]
+    fn overlay_patch_keeps_a_live_settled_scene_live_and_a_settled_one_idle() {
+        let scene = |live: bool| Scene {
+            epoch: 9,
+            input: None,
+            input_qpc_us: None,
+            diagnostics: false,
+            monitors: std::sync::Arc::from([]),
+            tiles: Vec::new(),
+            duration: 120,
+            spring: true,
+            width: 2.0,
+            radius: 8.0,
+            holes: std::sync::Arc::from([]),
+            zones: Vec::new(),
+            action: "scroll",
+            live,
+            force_place: true,
+        };
+        let mut live = scene(true);
+        let holes: std::sync::Arc<[Rect]> = std::sync::Arc::from([Rect { x: 10, y: 10, w: 50, h: 40 }]);
+        apply_overlay_update(&mut live, std::sync::Arc::clone(&holes), &[]);
+        let live = overlay_patched_settled_scene(live);
+        assert!(live.live, "a live settled scene stays live: its windows stay parked behind their stand-ins");
+        assert_eq!((live.action, live.duration, live.force_place), ("idle", 0, false), "no motion, no OS placement");
+        assert_eq!(live.epoch, 9, "the epoch survives so later patches still match");
+        assert_eq!(live.holes.as_ref(), holes.as_ref(), "the patch is applied");
+        let idle = overlay_patched_settled_scene(scene(false));
+        assert!(!idle.live);
+        assert_eq!((idle.action, idle.duration, idle.force_place), ("idle", 0, false));
     }
 
     /// #67: the re-arm only happens once a surface actually came back, the device is not still dead, no scene is

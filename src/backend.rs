@@ -429,6 +429,8 @@ pub(crate) mod sim {
         pub zoomed: bool,
         pub cloaked: bool,
         pub topmost: bool,
+        /// `WS_EX_TRANSPARENT`: a click-through overlay (game or recording HUD) the overlay may paint over.
+        pub transparent: bool,
         pub toolwindow: bool,
         pub noactivate: bool,
         pub thickframe: bool,
@@ -458,6 +460,7 @@ pub(crate) mod sim {
                 zoomed: false,
                 cloaked: false,
                 topmost: false,
+                transparent: false,
                 toolwindow: false,
                 noactivate: false,
                 thickframe: true,
@@ -477,8 +480,11 @@ pub(crate) mod sim {
         pub tiles_len: usize,
         pub tiles: Vec<(isize, Rect)>,
         pub action: &'static str,
+        /// The scene was live (fingers on the pad or momentum): the renderer keeps polling live stand-ins.
+        pub live: bool,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
+        pub zone_icons: Vec<render::ZoneIcon>,
         pub covered: Vec<isize>,
         pub tile_colors: Vec<(isize, Option<u32>)>,
         /// `(id, os_frame)` for fullscreen tiles: the backend-sampled frame the renderer preserves (#80).
@@ -615,8 +621,13 @@ pub(crate) mod sim {
                 tiles_len: scene.tiles.len(),
                 tiles: scene.tiles.iter().map(|t| (t.id, t.rect)).collect(),
                 action: scene.action,
+                live: scene.live,
                 holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
+                zone_icons: {
+                    let dark = crate::theme::system_is_dark();
+                    scene.zones.iter().map(|z| render::zone_icon_spec(z, dark, 1.0)).collect()
+                },
                 covered: scene
                     .tiles
                     .iter()
@@ -830,7 +841,21 @@ pub(crate) mod sim {
             if !w.visible || w.iconic || w.cloaked || w.rect.w < 40 || w.rect.h < 40 {
                 return false;
             }
+            let fills_monitor = g.monitors.iter().any(|(_, _, b)| {
+                w.rect.x <= b.x + 2
+                    && w.rect.y <= b.y + 2
+                    && w.rect.x + w.rect.w >= b.x + b.w - 2
+                    && w.rect.y + w.rect.h >= b.y + b.h - 2
+            });
             win32::is_overlay_occluder_class(&w.class)
+                || (w.topmost
+                    && win32::topmost_overlay_occluder(
+                        &w.class,
+                        // The real extended style, as `win32::overlay_occluder` reads it, so the click-through
+                        // and tooltip exclusions are covered end to end (#108 review L4).
+                        WS_EX_TOPMOST | if w.transparent { WS_EX_TRANSPARENT } else { 0 },
+                        fills_monitor,
+                    ))
         }
 
         fn class_of(&self, id: isize) -> String {
@@ -964,10 +989,20 @@ pub(crate) mod sim {
 
         fn activate(&self, id: isize) {
             let mut g = self.0.lock().unwrap();
-            if g.windows.contains_key(&id) {
+            if let Some(topmost) = g.windows.get(&id).map(|w| w.topmost) {
                 g.foreground = id;
                 g.z_order.retain(|&x| x != id);
-                g.z_order.insert(0, id);
+                // As in Windows: activating a normal window raises it to the top of the normal band,
+                // still below every WS_EX_TOPMOST window (#106).
+                let at = if topmost {
+                    0
+                } else {
+                    g.z_order
+                        .iter()
+                        .position(|x| !g.windows.get(x).is_some_and(|w| w.topmost))
+                        .unwrap_or(g.z_order.len())
+                };
+                g.z_order.insert(at, id);
             }
         }
 

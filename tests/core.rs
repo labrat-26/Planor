@@ -749,12 +749,19 @@ fn drop_zone_is_the_middle_half_of_the_window_owner_decision() {
     // after a 120 px box was hit by only 5 of 12 real four-finger drops, the owner chose "way bigger, like 50 %
     // of the window in the center". Everything else on a window swaps.
     let r = Rect { x: 100, y: 50, w: 1200, h: 900 };
-    assert_eq!(stack_zone(r, 50), Rect { x: 400, y: 275, w: 600, h: 450 });
-    let z = stack_zone(r, 50);
-    assert_eq!((z.x + z.w / 2, z.y + z.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "centred");
-    let quarter = (z.w * z.h) as f64 / (r.w * r.h) as f64;
-    assert!((quarter - 0.25).abs() < 0.01, "half the width and half the height: a quarter of the area");
-    assert_eq!(stack_zone(r, 500), stack_zone(r, 95), "never the whole window: there must be room to swap");
+    // #103: merge zones span full window height on landscape and full window width on portrait,
+    // keeping the middle 50 % along the strip axis (half of the area).
+    assert_eq!(stack_zone(r, 50, true), Rect { x: 400, y: 50, w: 600, h: 900 });
+    let zl = stack_zone(r, 50, true);
+    assert_eq!((zl.x + zl.w / 2, zl.y + zl.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "landscape centred");
+    assert_eq!((zl.y, zl.h), (r.y, r.h), "landscape spans full window height");
+    let half_l = (zl.w * zl.h) as f64 / (r.w * r.h) as f64;
+    assert!((half_l - 0.50).abs() < 0.01, "landscape: middle half width x full height = half area");
+    assert_eq!(stack_zone(r, 50, false), Rect { x: 100, y: 275, w: 1200, h: 450 });
+    let zp = stack_zone(r, 50, false);
+    assert_eq!((zp.x + zp.w / 2, zp.y + zp.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "portrait centred");
+    assert_eq!((zp.x, zp.w), (r.x, r.w), "portrait spans full window width");
+    assert_eq!(stack_zone(r, 500, true), stack_zone(r, 95, true), "never the whole window: there must be room to swap");
 }#[test]
 fn replay_three_finger_scroll_pad_trace_matches_within_tolerance() {
     let raw = include_str!("fixtures/gestures/three_finger_scroll_right.pad.log");
@@ -1399,4 +1406,93 @@ fn remove_focuses_right_then_left_then_empty() {
         s.remove(1);
         assert_eq!(s.active(), None, "{area:?}: empty strip has no active window");
     }
+}
+#[test]
+fn monitor_rays_on_owner_layout_reach_each_neighbour() {
+    // (#102 review) Owner layout: landscape laptop primary at the origin, a second landscape above it, a portrait
+    // up-left of the laptop (its bottom part beside the laptop's left edge). Rays start at the drag's actual
+    // start point (the cursor over the picked-up window), and a ray that would cross a third monitor on the way
+    // to its target is not offered: the carry would enter that monitor first and the drop would land there.
+    let laptop = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+    let above = Rect { x: 0, y: -1440, w: 2560, h: 1440 };
+    let portrait = Rect { x: -1440, y: -1800, w: 1440, h: 2560 };
+    let all = [laptop, above, portrait];
+    let centre = |r: Rect| (r.x as f64 + r.w as f64 * 0.5, r.y as f64 + r.h as f64 * 0.5);
+
+    // From the laptop's left half (window 101's centre): up toward the monitor above, up-left toward the
+    // portrait. No ray along the strip axis (the strip itself goes left/right).
+    let w101 = (480., 570.);
+    let rays = monitor_rays(laptop, &all, true, w101);
+    assert_eq!(rays.len(), 2, "laptop from {w101:?}: one ray to each neighbour: {rays:?}");
+    for (rx, ry) in &rays {
+        assert!((rx.hypot(*ry) - 1.).abs() < 1e-9, "unit rays: {rays:?}");
+        assert!(*ry < -0.25, "laptop: both neighbours are up: {rays:?}");
+    }
+    assert!(rays.iter().any(|r| r.0 < -0.25), "laptop: a diagonal up-left ray toward the portrait: {rays:?}");
+    // Window 101 sits under the monitor above, so its ray is the perpendicular: exactly straight up.
+    assert!(rays.contains(&(0., -1.)), "laptop: a straight-up ray toward the monitor above: {rays:?}");
+    // A finger swipe up-left picks the portrait ray, straight up the monitor-above ray, sideways none.
+    let up_left = best_ray(-300., -260., &rays).expect("up-left swipe picks a ray");
+    assert!(up_left.0 < -0.25, "up-left swipe goes toward the portrait: {up_left:?}");
+    let up = best_ray(40., -300., &rays).expect("up swipe picks a ray");
+    assert_eq!(up, (0., -1.), "up swipe goes straight up toward the monitor above");
+    assert_eq!(best_ray(300., 0., &rays), None, "a swipe along the strip picks no monitor ray");
+    assert_eq!(best_ray(0., 300., &rays), None, "nothing below the laptop");
+
+    // (#102 review) From the laptop's right half (window 102's centre at (1440, 570)) the centre line to the
+    // portrait crosses the monitor above (it enters it around (627, 0)): that ray must not be offered, or an
+    // up-left carry crosses the monitor above and lifting drops the window there instead of on the portrait.
+    // The strip axis reaches the portrait directly from this cursor, so only the upward ray stays.
+    let w102 = (1440., 570.);
+    let rays = monitor_rays(laptop, &all, true, w102);
+    assert_eq!(rays.len(), 1, "laptop from {w102:?}: the portrait centre ray crosses the monitor above: {rays:?}");
+    assert!(rays[0].1 < -0.9 && rays[0].0.abs() < 0.5, "the remaining ray goes up toward the monitor above: {rays:?}");
+
+    // From the portrait (vertical strip, window 301's centre): right toward the monitor above and down-right
+    // toward the laptop. The centre line to the laptop clips the monitor above's corner, so the laptop ray
+    // falls back to the nearest point of the laptop (its top-left corner) and still points down-right.
+    let w301 = centre(Rect { x: -1440, y: -1800, w: 1440, h: 1256 });
+    let rays = monitor_rays(portrait, &all, false, w301);
+    assert_eq!(rays.len(), 2, "portrait from {w301:?}: one ray to each neighbour: {rays:?}");
+    assert!(rays.iter().all(|r| r.0 > 0.25), "portrait: both neighbours are to the right: {rays:?}");
+    let down_right = best_ray(300., 250., &rays).expect("down-right swipe picks a ray");
+    assert!(down_right.1 > 0., "down-right swipe goes toward the laptop: {down_right:?}");
+
+    // A monitor two hops away (not touching) gets no ray.
+    let far = Rect { x: 5000, y: 0, w: 1920, h: 1080 };
+    assert!(
+        monitor_rays(laptop, &[laptop, far], true, centre(laptop)).is_empty(),
+        "non-adjacent monitors get no ray"
+    );
+}
+
+#[test]
+fn locked_drag_start_strip_axis_wins_ties_against_a_diagonal_monitor_ray() {
+    // (#102 review) With the strip axis locked horizontal and a diagonal up-left monitor ray offered, a start that
+    // qualifies for the strip axis (along >= 1.5 * cross) must stay on the strip even when its projection onto the
+    // ray is slightly larger than its travel along the strip: the old `proj > along` tie-break sent a clearly
+    // sideways swipe up the diagonal. The ray needs RAY_LEAD_MARGIN times the along travel to win.
+    let ray = (-0.8, -0.6);
+    let start = |dx: f64, dy: f64| {
+        let mut g = Gesture::default();
+        g.axis_lock = Some(true);
+        g.monitor_rays = vec![ray];
+        g.sample(&[(500., 500.); 4], 12., 100.);
+        // The caller (pad handler) sets the lock and rays before every sample.
+        g.axis_lock = Some(true);
+        g.monitor_rays = vec![ray];
+        let s = g.sample(&[(500. + dx, 500. + dy); 4], 12., 100.);
+        (s, g.started_cross, g.started_ray)
+    };
+    // Sideways with some upward drift: along 30, cross 12, proj onto the ray 31.2 > 30 but < 1.2 * 30.
+    let (dx, dy) = (-30., -12.);
+    let proj = dx * ray.0 + dy * ray.1;
+    assert!(proj > dx.abs() && proj < RAY_LEAD_MARGIN * dx.abs(), "the case is a near tie: proj {proj}");
+    assert_eq!(start(dx, dy), (Swipe::DragStart, false, None), "a strip-qualifying start keeps the strip axis");
+    // Clearly diagonal (strip axis does not qualify): the monitor ray wins.
+    assert_eq!(start(-30., -22.), (Swipe::DragStart, true, Some(ray)), "a diagonal start takes the monitor ray");
+    // Along the ray exactly: the ray wins.
+    assert_eq!(start(-24., -18.), (Swipe::DragStart, true, Some(ray)), "a start along the ray takes it");
+    // Pure strip-axis start: no ray.
+    assert_eq!(start(-30., 0.), (Swipe::DragStart, false, None), "a straight start keeps the strip axis");
 }
