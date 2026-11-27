@@ -680,7 +680,7 @@ impl Gesture {
                     let mon_ray = best_ray(dx, dy, &self.monitor_rays);
                     let mon_proj = mon_ray.map(|(rx, ry)| dx * rx + dy * ry);
                     if let (Some(ray), Some(proj)) = (mon_ray, mon_proj)
-                        && (!strip_ok || proj > along)
+                        && (!strip_ok || proj >= RAY_LEAD_MARGIN * along)
                     {
                         self.started_cross = true;
                         self.started_ray = Some(ray);
@@ -788,12 +788,57 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
         .min()
         .map(|(_, i)| i)
 }
-/// Unit direction vectors from `home`'s centre to every neighbouring monitor's centre (monitors whose
-/// bounds touch `home` along an edge or corner, within 2 px), excluding rays nearly collinear with
-/// `home`'s strip axis (`|cross| < 0.25`) since the strip axis already reaches those monitors (#102).
-pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool) -> Vec<(f64, f64)> {
-    let hx = home.x as f64 + home.w as f64 * 0.5;
-    let hy = home.y as f64 + home.h as f64 * 0.5;
+/// The projection lead a neighbouring-monitor ray needs over the strip axis to win when the
+/// gesture already qualifies for the strip axis (`along >= 1.5 * cross`): a swipe that is clearly
+/// along the strip must not drift onto a diagonal ray (#102 review).
+pub const RAY_LEAD_MARGIN: f64 = 1.2;
+
+/// Whether the ray `origin + t * dir` (t in 0..=`len`, `dir` a unit vector) passes more than 2 px
+/// into the interior of any monitor in `others` except `target` and `home` (#102 review): a carry
+/// along such a ray would enter that monitor first and the drop would land there, not on `target`.
+fn ray_blocked(dir: (f64, f64), len: f64, origin: (f64, f64), target: Rect, home: Rect, others: &[Rect]) -> bool {
+    const PAD: f64 = 2.0;
+    others.iter().any(|&m| {
+        if m == target || m == home {
+            return false;
+        }
+        let (x0, y0) = (m.x as f64 + PAD, m.y as f64 + PAD);
+        let (x1, y1) = ((m.x + m.w) as f64 - PAD, (m.y + m.h) as f64 - PAD);
+        if x0 >= x1 || y0 >= y1 {
+            return false;
+        }
+        let (mut tmin, mut tmax) = (0.0f64, len);
+        for (o, d, a, b) in [(origin.0, dir.0, x0, x1), (origin.1, dir.1, y0, y1)] {
+            if d.abs() < 1e-9 {
+                if o < a || o > b {
+                    return false;
+                }
+            } else {
+                let (mut t1, mut t2) = ((a - o) / d, (b - o) / d);
+                if t1 > t2 {
+                    std::mem::swap(&mut t1, &mut t2);
+                }
+                tmin = tmin.max(t1);
+                tmax = tmax.min(t2);
+                if tmin >= tmax {
+                    return false;
+                }
+            }
+        }
+        true
+    })
+}
+
+/// Unit direction vectors from `origin` (the drag's actual start point, usually the cursor over
+/// the picked-up window) toward every neighbouring monitor (monitors whose bounds touch `home`
+/// along an edge or corner, within 2 px), excluding rays nearly collinear with `home`'s strip axis
+/// (`|cross| < 0.25`) since the strip axis already reaches those monitors (#102). The target point
+/// is the foot of the perpendicular when the neighbour lies straight across an edge from `origin`,
+/// else the neighbour's centre; when that ray would cross a third monitor on the way (the carry
+/// would enter it first and the drop would land there, #102 review) or run along the strip axis,
+/// the nearest point of the neighbour's rect is tried before giving up on that neighbour.
+pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool, origin: (f64, f64)) -> Vec<(f64, f64)> {
+    let (ox, oy) = origin;
     let mut rays = Vec::new();
     for &b in others {
         if b == home {
@@ -804,22 +849,37 @@ pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool) -> Vec<(f64, 
         if gap_x > 2 || gap_y > 2 {
             continue;
         }
-        let dx = (b.x as f64 + b.w as f64 * 0.5) - hx;
-        let dy = (b.y as f64 + b.h as f64 * 0.5) - hy;
-        let len = dx.hypot(dy);
-        if len < 1.0 {
-            continue;
-        }
-        let (rx, ry) = (dx / len, dy / len);
-        let cross = if horizontal { ry.abs() } else { rx.abs() };
         let covers_strip_edge = if horizontal {
             b.y <= home.y && b.y + b.h >= home.y + home.h
         } else {
             b.x <= home.x && b.x + b.w >= home.x + home.w
         };
-        if cross < 0.25 || covers_strip_edge {
+        if covers_strip_edge {
             continue;
         }
+        let centre = (b.x as f64 + b.w as f64 * 0.5, b.y as f64 + b.h as f64 * 0.5);
+        let nearest = (
+            ox.clamp(b.x as f64, (b.x + b.w) as f64),
+            oy.clamp(b.y as f64, (b.y + b.h) as f64),
+        );
+        // When the neighbour lies straight across an edge from the origin (the nearest point differs
+        // in one coordinate only), the perpendicular ray reaches it by the shortest path: straight up
+        // from under a monitor above carries straight up instead of slanting toward its centre.
+        let straight = (nearest.0 == ox || nearest.1 == oy).then_some(nearest);
+        let dir = straight.into_iter().chain([centre, nearest]).find_map(|(tx, ty)| {
+            let (dx, dy) = (tx - ox, ty - oy);
+            let len = dx.hypot(dy);
+            let unit = (dx / len.max(1e-9), dy / len.max(1e-9));
+            let cross = if horizontal { unit.1.abs() } else { unit.0.abs() };
+            // A ray nearly along the strip axis is not offered: the strip axis already gets there.
+            if len < 1.0 || cross < 0.25 || ray_blocked(unit, len, (ox, oy), b, home, others) {
+                return None;
+            }
+            Some(unit)
+        });
+        let Some((rx, ry)) = dir else {
+            continue;
+        };
         rays.push((rx, ry));
     }
     rays

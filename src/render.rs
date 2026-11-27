@@ -91,25 +91,31 @@ pub struct Zone {
     pub kind: ZoneKind,
 }
 
-/// Compute the centred, zone-scaled, theme-aware icon specification for a drop zone (#104).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn zone_icon_spec(z: &Zone, dark: bool) -> ZoneIcon {
-    let min_dim = z.rect.w.min(z.rect.h).max(1);
-    let side = ((min_dim as f32) * 0.32)
-        .clamp(20.0, 64.0)
-        .min(min_dim as f32)
+/// Compute the centred, zone-scaled, theme-aware icon specification for a drop-zone rect (#104).
+/// The renderer's glyph draw uses this same maths (with its DPI scale), so the tests that check
+/// the spec cover what is actually drawn (#102 review).
+pub(crate) fn zone_icon_rect(rect: &Rect, kind: ZoneKind, dark: bool, dpi: f32) -> ZoneIcon {
+    let min_dim = rect.w.min(rect.h).max(1) as f32;
+    let side = (min_dim * 0.32)
+        .clamp(20.0 * dpi, 64.0 * dpi)
+        .min(min_dim * 0.85)
         .round()
         .max(1.0) as i32;
     ZoneIcon {
-        kind: z.kind,
+        kind,
         rect: Rect {
-            x: z.rect.x + (z.rect.w - side) / 2,
-            y: z.rect.y + (z.rect.h - side) / 2,
+            x: rect.x + (rect.w - side) / 2,
+            y: rect.y + (rect.h - side) / 2,
             w: side,
             h: side,
         },
         color: crate::theme::zone_icon_color(dark),
     }
+}
+/// Compute the centred, zone-scaled, theme-aware icon specification for a drop zone (#104).
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn zone_icon_spec(z: &Zone, dark: bool, dpi: f32) -> ZoneIcon {
+    zone_icon_rect(&z.rect, z.kind, dark, dpi)
 }
 pub enum Message {
     Scene(Scene),
@@ -595,6 +601,10 @@ struct Surface {
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
     clear_brush: Option<ID2D1SolidColorBrush>,
     timer: crate::gpu::GpuTimer,
+    /// Cached `theme::system_is_dark()` (a registry read): refreshed at most once a second and
+    /// only while drop zones are drawn (#102 review).
+    dark: bool,
+    dark_at: Instant,
 }
 impl Surface {
     unsafe fn brush_for<'a>(
@@ -645,6 +655,8 @@ impl Surface {
                 brushes: HashMap::new(),
                 clear_brush: None,
                 timer: Default::default(),
+                dark: crate::theme::system_is_dark(),
+                dark_at: Instant::now(),
             })
         }
     }
@@ -703,11 +715,21 @@ impl Surface {
                         }),
                     )
                 }
-                // The theme is a registry read: only while drop zones are drawn, not on every frame.
+                // The theme is a registry read: cached on the surface, refreshed at most once a
+                // second, and only while drop zones are drawn (#102 review).
+                let dark = if fills.is_empty() {
+                    false
+                } else {
+                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
+                        self.dark = crate::theme::system_is_dark();
+                        self.dark_at = Instant::now();
+                    }
+                    self.dark
+                };
                 let icon_color = if fills.is_empty() {
                     0
                 } else {
-                    crate::theme::zone_icon_color(crate::theme::system_is_dark())
+                    crate::theme::zone_icon_color(dark)
                 };
                 let pt = |px: f32, py: f32| {
                     let mut p = D2D1_ELLIPSE::default().point;
@@ -729,10 +751,11 @@ impl Surface {
                         brush,
                     );
                     // #104: centred, scaled, theme-aware vector icon on merge and leave zones.
-                    let min_dim = r.w.min(r.h).max(1) as f32;
-                    let size = (min_dim * 0.32).clamp(20.0 * dpi, 64.0 * dpi).min(min_dim * 0.85);
-                    let cx = x + r.w as f32 * 0.5;
-                    let cy = y + r.h as f32 * 0.5;
+                    // Sized through zone_icon_rect, the same maths the spec tests check (#102 review).
+                    let icon = zone_icon_rect(&r, kind, dark, dpi);
+                    let size = icon.rect.w as f32;
+                    let cx = (icon.rect.x + off.x) as f32 + size * 0.5;
+                    let cy = (icon.rect.y + off.y) as f32 + size * 0.5;
                     let stroke = (size * 0.085).clamp(2.0 * dpi, 4.0 * dpi);
                     let glyph = Self::brush_for(&mut self.brushes, rt, icon_color)?;
                     glyph.SetOpacity(if alpha > 0.5 { 0.95 } else { 0.80 });

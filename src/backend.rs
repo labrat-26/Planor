@@ -620,7 +620,7 @@ pub(crate) mod sim {
                 zones: scene.zones.clone(),
                 zone_icons: {
                     let dark = crate::theme::system_is_dark();
-                    scene.zones.iter().map(|z| render::zone_icon_spec(z, dark)).collect()
+                    scene.zones.iter().map(|z| render::zone_icon_spec(z, dark, 1.0)).collect()
                 },
                 covered: scene
                     .tiles
@@ -835,8 +835,15 @@ pub(crate) mod sim {
             if !w.visible || w.iconic || w.cloaked || w.rect.w < 40 || w.rect.h < 40 {
                 return false;
             }
+            let fills_monitor = g.monitors.iter().any(|(_, _, b)| {
+                w.rect.x <= b.x + 2
+                    && w.rect.y <= b.y + 2
+                    && w.rect.x + w.rect.w >= b.x + b.w - 2
+                    && w.rect.y + w.rect.h >= b.y + b.h - 2
+            });
             win32::is_overlay_occluder_class(&w.class)
-                || (w.topmost && win32::topmost_overlay_occluder(&w.class, WS_EX_TOPMOST))
+                || (w.topmost
+                    && win32::topmost_overlay_occluder(&w.class, WS_EX_TOPMOST, fills_monitor))
         }
 
         fn class_of(&self, id: isize) -> String {

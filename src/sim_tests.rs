@@ -6066,18 +6066,29 @@ fn axis_lock_linear_rays_on_owner_rig_up_left_and_diagonal_up_left() {
     // - straight down / down-right (non-adjacent) are rejected
     let cfg = cross_cfg();
 
-    // 1. Straight up -> MON1 (stays on MON1's ray even with slight finger jitter)
+    // 1. Straight up -> MON1 (stays on MON1's ray even with slight finger jitter while on MON0; on MON1
+    // the ray is dropped and the destination strip axis takes over (#102 review))
     let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg.clone(), owner_three_per_monitor);
     focus(&mut h, 101);
     let mut steps = vec![(0., -12.); 8];
     for i in 0..8 {
         steps.push((if i % 2 == 0 { 3. } else { -3. }, -15.));
     }
-    feed_steps(&mut h, &steps);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    let mut home_ray = None;
+    for s in &steps {
+        x += s.0;
+        y += s.1;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if let Some(p) = h.engine.pad.as_ref().filter(|p| !p.left_home) {
+            home_ray = home_ray.or(p.ray);
+        }
+    }
     let p = h.engine.pad.as_ref().expect("carrying up toward MON1");
-    let ray = p.ray.expect("locked onto MON1 ray");
+    let ray = home_ray.expect("locked onto MON1 ray on the home monitor");
     assert!(ray.1 < -0.9, "MON1 ray points up: {ray:?}");
-    assert!(p.cursor.1 < -50., "cursor reached MON1: {:?}", p.cursor);
+    assert!(p.cursor.1 < 0., "cursor reached MON1: {:?}", p.cursor);
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
     let landed = h.engine.strips.iter().find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
@@ -6114,7 +6125,9 @@ fn axis_lock_linear_rays_on_owner_rig_up_left_and_diagonal_up_left() {
                 origin = Some(p.cursor);
                 active_ray = p.ray;
             }
-            if let (Some(o), Some((rx, ry))) = (origin, active_ray) {
+            // Linear while on the home monitor; once the ray delivered the window onto MON2 it is
+            // dropped and the carry is free (#102 review), so wobble there is no longer projected.
+            if let (Some(o), Some((rx, ry)), true) = (origin, active_ray, p.cursor.0 >= 0.) {
                 let (dx, dy) = (p.cursor.0 - o.0, p.cursor.1 - o.1);
                 let perp = (dx * ry - dy * rx).abs();
                 max_perp_err = max_perp_err.max(perp);
@@ -6150,6 +6163,67 @@ fn axis_lock_linear_rays_on_owner_rig_up_left_and_diagonal_up_left() {
 }
 
 #[test]
+fn owner_rig_rays_start_at_the_dragged_window_and_end_on_the_destination() {
+    // (#102 review) 1. Rays start at the picked-up window, not the monitor centre. From window 102 (right
+    // half of MON0, centre (1440, 570)) the line to MON2 crosses MON1 first, so no up-left ray is offered:
+    // carrying along it would enter MON1 and the drop would land there instead of on MON2.
+    let cfg = cross_cfg();
+    let mut h = SimHarness::with_setup(
+        owner_three_monitor_rig(),
+        cfg.clone(),
+        owner_three_per_monitor,
+    );
+    focus(&mut h, 102);
+    feed_steps(&mut h, &[(0., -12.); 8]);
+    let rays = h.engine.gesture.monitor_rays.clone();
+    assert!(
+        !rays.is_empty(),
+        "MON1 above is still offered from window 102"
+    );
+    assert!(
+        rays.iter().all(|r| r.0 > -0.25),
+        "no up-left ray toward MON2 through MON1 from window 102: {rays:?}"
+    );
+
+    // 2. Once the diagonal ray has delivered window 101 onto MON2 it is dropped: travel down MON2's
+    // vertical strip moves the window down instead of being projected back onto the up-left ray.
+    let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg, owner_three_per_monitor);
+    focus(&mut h, 101);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    for _ in 0..80 {
+        x -= 12.;
+        y -= 8.5;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if h.engine.pad.as_ref().is_some_and(|p| p.cursor.0 < -200.) {
+            break;
+        }
+    }
+    let p = h.engine.pad.as_ref().expect("carried diagonally onto MON2");
+    assert!(p.cursor.0 < -200., "reached MON2: {:?}", p.cursor);
+    assert!(p.left_home, "the carry left the home monitor");
+    assert_eq!(p.ray, None, "the ray is dropped on the destination monitor");
+    let before = p.cursor;
+    // A short move: MON2 ends at y=701, and travel past it would leave MON2 again.
+    for _ in 0..4 {
+        y += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+    }
+    let after = h.engine.pad.as_ref().expect("still carrying on MON2").cursor;
+    assert!(
+        after.1 > before.1 + 50. && after.1 < 650. && after.0 < 0.,
+        "finger travel down MON2 moves the window down within MON2: {before:?} -> {after:?}"
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let landed = h
+        .engine
+        .strips
+        .iter()
+        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
+    assert_eq!(landed, Some("MON2"), "the window drops on MON2 (carry {before:?} -> {after:?})");
+}
+#[test]
 fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
     // (#102) On stacked_rig(): MON0->MON1 is exact straight up (0, -1), MON2->MON1 is diagonal up-right,
     // and non-adjacent monitors (MON2->MON1 in three_monitor_rig where MON0 sits between them) are excluded.
@@ -6167,7 +6241,14 @@ fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
         h.engine.event(Event::Contacts(four(x, y)));
         if let Some(p) = h.engine.pad.as_ref() {
             let sx = *start_x.get_or_insert(p.cursor.0);
-            assert!((p.cursor.0 - sx).abs() < 1.0, "straight-up ray keeps x fixed: {} vs {}", p.cursor.0, sx);
+            // On the home monitor only: once on MON1 the ray is dropped and MON1's strip axis takes
+            // over (#102 review).
+            assert!(
+                p.left_home || (p.cursor.0 - sx).abs() < 1.0,
+                "straight-up ray keeps x fixed on the home monitor: {} vs {}",
+                p.cursor.0,
+                sx
+            );
         }
     }
     let p = h.engine.pad.as_ref().expect("carrying up on stacked_rig");
@@ -6181,7 +6262,15 @@ fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
     // do not touch; monitor_rays from MON2 only offers MON0 (1 ray), never MON1.
     let rig = three_monitor_rig();
     let bounds: Vec<Rect> = rig.iter().map(|m| m.2).collect();
-    let mon2_rays = planor::monitor_rays(bounds[2], &bounds, false);
+    let mon2_rays = planor::monitor_rays(
+        bounds[2],
+        &bounds,
+        false,
+        (
+            bounds[2].x as f64 + bounds[2].w as f64 * 0.5,
+            bounds[2].y as f64 + bounds[2].h as f64 * 0.5,
+        ),
+    );
     assert_eq!(mon2_rays.len(), 1, "MON2 only touches MON0, not MON1: {mon2_rays:?}");
 }
 

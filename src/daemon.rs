@@ -918,6 +918,9 @@ impl<B: WindowBackend> Engine<B> {
         let mut tiles_json = Vec::new();
         let mut parked_json = Vec::new();
 
+        // The same debounced foreground id the render path uses (#107 parity): a raw
+        // backend.foreground() read can see the transient NULL during a window activation.
+        let focused_id = self.managed_foreground_id(self.last_foreground);
         for ((desk, name), strip) in &self.strips {
             if Some(*desk) != self.desktop {
                 continue;
@@ -980,8 +983,6 @@ impl<B: WindowBackend> Engine<B> {
                     || rect.y + rect.h > bound.y + bound.h;
                 let parked = hidden || preview || clipped;
                 let os_rect = self.backend.frame(id);
-                let foreground = self.backend.foreground();
-                let focused_id = self.managed_foreground_id(foreground);
                 let color = if fullscreen {
                     None
                 } else if strip.columns[ci].members.len() > 1
@@ -1593,7 +1594,8 @@ impl<B: WindowBackend> Engine<B> {
         let hot = self.hot;
         // While a window is carried nothing dodges out of its way (that reflow was erratic: too eager or not
         // at all). Instead every window on the monitor under the cursor shows its stack zone, filled; the
-        // one under the cursor is stronger, and the window a drop would swap with gets the drop border.
+        // one under the cursor is stronger. The swap target gets no green drop border while it is
+        // hovered (#105); the drop itself is what swaps the windows.
         let mut zones = vec![];
         if let Some(d) = &self.drag
             && d.moved
@@ -1917,7 +1919,17 @@ impl<B: WindowBackend> Engine<B> {
             self.gesture.monitor_rays = match (self.gesture.axis_lock, home_bounds) {
                 (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
                     let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
-                    planor::monitor_rays(b, &bounds, h)
+                    // Rays start where the drag starts: pad_begin grabs the strip's active window at its
+                    // centre (#102 review), so a ray from the monitor centre can point across a
+                    // third monitor the carry would enter first.
+                    let origin = self
+                        .key()
+                        .and_then(|k| self.strips.get(&k))
+                        .and_then(|s| s.active())
+                        .and_then(|id| self.backend.frame(id))
+                        .map(|r| (r.x as f64 + r.w as f64 * 0.5, r.y as f64 + r.h as f64 * 0.5))
+                        .unwrap_or((b.x as f64 + b.w as f64 * 0.5, b.y as f64 + b.h as f64 * 0.5));
+                    planor::monitor_rays(b, &bounds, h, origin)
                 }
                 _ => Vec::new(),
             };
@@ -2602,7 +2614,7 @@ impl<B: WindowBackend> Engine<B> {
             // Whether another monitor lies that way is judged from the monitor the cursor is on now.
             let at = at_info.map(|(r, _)| r);
             let at_h = at_info.map(|(_, ah)| ah).unwrap_or(h);
-            let rays = at.map(|b| planor::monitor_rays(b, &bounds, at_h)).unwrap_or_default();
+            let rays = at.map(|b| planor::monitor_rays(b, &bounds, at_h, p.cursor)).unwrap_or_default();
             let picked_ray = planor::best_ray(p.off.0, p.off.1, &rays)
                 .filter(|&(rx, ry)| (if h { ry } else { rx }) * p.cross > 0.);
             let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
@@ -2631,7 +2643,7 @@ impl<B: WindowBackend> Engine<B> {
                 let (along, cross) = if at_h { (p.off.0.abs(), p.off.1.abs()) } else { (p.off.1.abs(), p.off.0.abs()) };
                 let strip_ok = along >= 1.5 * cross;
                 let rays: Vec<(f64, f64)> = if cross_ok {
-                    planor::monitor_rays(at_r, &bounds, at_h)
+                    planor::monitor_rays(at_r, &bounds, at_h, p.cursor)
                         .into_iter()
                         .filter(|&(nrx, nry)| nrx * rx + nry * ry < 0.99)
                         .collect()
@@ -2641,7 +2653,7 @@ impl<B: WindowBackend> Engine<B> {
                 let alt_ray = planor::best_ray(p.off.0, p.off.1, &rays);
                 let alt_proj = alt_ray.map(|(nrx, nry)| p.off.0 * nrx + p.off.1 * nry);
                 if let (Some(nr), Some(ap)) = (alt_ray, alt_proj)
-                    && (!strip_ok || ap > along)
+                    && (!strip_ok || ap >= planor::RAY_LEAD_MARGIN * along)
                 {
                     p.ray = Some(nr);
                     p.cross = 0.;
@@ -2707,7 +2719,16 @@ impl<B: WindowBackend> Engine<B> {
                         p.off = (0., 0.);
                     }
                 } else {
-                    p.left_home = true;
+                    if !p.left_home {
+                        p.left_home = true;
+                        // (#102 review) The ray carried the window onto the destination monitor;
+                        // keeping it would project sideways finger travel back onto the ray and
+                        // stick the window there. From here the carry is free (a released lock
+                        // stays released) or locked to the destination strip axis below.
+                        p.ray = None;
+                        p.cross = 0.;
+                        p.off = (0., 0.);
+                    }
                     if p.lock.is_some() && p.lock != Some(dest_h) {
                         p.lock = Some(dest_h);
                         p.line = line_for(dest_h);
