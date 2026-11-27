@@ -1303,8 +1303,11 @@ impl Host {
                 fVisible: 1,
                 ..Default::default()
             };
-            if unsafe { DwmUpdateThumbnailProperties(state.handle, &p) } >= 0 {
+            let hr = unsafe { DwmUpdateThumbnailProperties(state.handle, &p) };
+            if hr >= 0 {
                 state.visible = true;
+            } else {
+                diag::trace(format!("thumbnail show failed: hwnd={id:#x} hr={hr:#x}"));
             }
         }
     }
@@ -1744,6 +1747,28 @@ pub(crate) fn holes_intersecting_rects(holes: &[Rect], rects: &[Rect], out: &mut
             out.push(h);
         }
     }
+}
+/// Region holes to cut BEFORE a DWM thumbnail is made or kept visible at `clip` (#110 review R1/R2): the holes
+/// already applied plus every hole of `holes` that `clip` intersects, in `holes` order, or `None` when every such
+/// hole is already cut. A visible thumbnail is composed by DWM as soon as its properties change, so moving an
+/// already-visible one (scroll start) or showing a settled peek (scroll end) before the frame's region holes are
+/// applied covered topmost windows (a PiP player) for a frame. Holes nothing visible overlaps are not cut, so a
+/// steady scroll past a PiP costs no `SetWindowRgn`.
+pub(crate) fn holes_needed_before_showing(applied: &[Rect], holes: &[Rect], clip: Rect) -> Option<Vec<Rect>> {
+    if holes.iter().all(|&h| applied.contains(&h) || intersect(h, clip).is_none()) {
+        return None;
+    }
+    let mut out: Vec<Rect> = holes
+        .iter()
+        .copied()
+        .filter(|&h| applied.contains(&h) || intersect(h, clip).is_some())
+        .collect();
+    for &h in applied {
+        if !out.contains(&h) {
+            out.push(h);
+        }
+    }
+    Some(out)
 }
 /// Effective stand-in rect for a tile during motion or open/close async handoff:
 /// keeps the window's original size while the stand-in glides so neither the bitmap nor the
@@ -2600,6 +2625,20 @@ impl RenderState {
                 scratch.host_hits.clear();
                 scratch.thumb_rects.clear();
                 scratch.deferred_thumbs.clear();
+                // The frame's holes are known before any tile so a thumbnail that is visible while it is positioned
+                // can have the holes it overlaps cut first (#110 review R1/R2).
+                scratch.mine.clear();
+                scratch.local_holes.clear();
+                for h in s.holes.iter() {
+                    if let Some(r) = intersect(*h, host.b) {
+                        scratch.mine.push(r);
+                        scratch.local_holes.push(Rect {
+                            x: r.x - host.b.x,
+                            y: r.y - host.b.y,
+                            ..r
+                        });
+                    }
+                }
                 let mut full = false;
                 let mut source_device_lost: Option<u64> = None;
                 for tile in s.tiles.iter().filter(|tile| &tile.monitor == name) {
@@ -2724,6 +2763,18 @@ impl RenderState {
                         // In motion the captured picture normally replaces the thumbnail, so position it hidden
                         // and show it only if no picture is drawn, after the region holes are applied (#110).
                         let defer_show = defer_thumbnail_show(moving, live_proxy, open_handoff);
+                        // A thumbnail shown now (settled peek) or already visible (moved at scroll start) is
+                        // composed as soon as it is positioned: cut the holes it overlaps first (#110 review R1/R2).
+                        if proxy
+                            && (!defer_show || host.thumbs.get(&tile.id).is_some_and(|t| t.visible))
+                            && let Some(cut) = holes_needed_before_showing(
+                                host.applied_holes.as_deref().unwrap_or(&[]),
+                                &scratch.mine,
+                                c,
+                            )
+                        {
+                            host.apply_rgn_holes(&cut);
+                        }
                         let thumb_ok = proxy && host.thumbnail(tile.id, rs, c, !defer_show);
                         let mut drew_backing = false;
                         if proxy
@@ -2858,18 +2909,6 @@ impl RenderState {
                         false
                     }
                 });
-                scratch.mine.clear();
-                scratch.local_holes.clear();
-                for h in s.holes.iter() {
-                    if let Some(r) = intersect(*h, host.b) {
-                        scratch.mine.push(r);
-                        scratch.local_holes.push(Rect {
-                            x: r.x - host.b.x,
-                            y: r.y - host.b.y,
-                            ..r
-                        });
-                    }
-                }
                 if !full {
                     if scratch.mine.is_empty() {
                         scratch.hits.append(&mut scratch.host_hits);
@@ -3639,6 +3678,7 @@ mod tests {
         partition_landing_placements, proxy_blit_rects, refresh_thumb_props_if_resized,
         should_draw_backing, wgc_capture_insets,
     };
+    use super::{holes_intersecting_rects, holes_needed_before_showing};
     use planor::Rect;
     use std::collections::HashSet;
 
@@ -3812,6 +3852,34 @@ mod tests {
             );
         }
         assert!(!defer_thumbnail_show(false, false, false), "a settled peek shows its thumbnail at once");
+    }
+
+    /// #110 review R1/R2: before a thumbnail is positioned visible at `clip`, the region must already cut every
+    /// frame hole the clip overlaps; holes cut earlier stay cut (removed only by the precise post-loop apply), and
+    /// holes the clip misses are not cut, so a steady scroll past a PiP adds no region change.
+    #[test]
+    fn holes_are_cut_before_a_visible_thumbnail_overlapping_them_is_positioned() {
+        let pip = Rect { x: 900, y: 600, w: 320, h: 180 };
+        let hud = Rect { x: 10, y: 10, w: 50, h: 20 };
+        let stale = Rect { x: 2000, y: 0, w: 10, h: 10 };
+        let peek = Rect { x: 1000, y: 0, w: 920, h: 1140 };
+        let far = Rect { x: 0, y: 200, w: 500, h: 300 };
+        let holes = [hud, pip];
+        // Scroll start / end: nothing cut yet, a visible thumbnail lands under the PiP -> cut the PiP first.
+        let cut = holes_needed_before_showing(&[], &holes, peek).expect("PiP must be cut first");
+        assert_eq!(cut, vec![pip]);
+        let mut needed = Vec::new();
+        holes_intersecting_rects(&holes, &[peek], &mut needed);
+        assert!(needed.iter().all(|h| cut.contains(h)), "every overlapped hole is cut before showing");
+        // Already cut: no region change (steady scroll / settled frames cost nothing).
+        assert_eq!(holes_needed_before_showing(&[pip], &holes, peek), None);
+        // Clip misses every hole: nothing to cut, even though holes exist.
+        assert_eq!(holes_needed_before_showing(&[], &holes, far), None);
+        // Holes cut earlier (even ones no longer in the frame) stay cut until the precise post-loop apply.
+        let cut = holes_needed_before_showing(&[stale], &holes, peek).expect("PiP must be added");
+        assert_eq!(cut, vec![pip, stale]);
+        let cut = holes_needed_before_showing(&[hud], &holes, peek).expect("PiP must be added");
+        assert_eq!(cut, vec![hud, pip], "frame order kept so the post-loop apply can be a no-op");
     }
 
     #[test]
