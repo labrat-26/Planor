@@ -3387,6 +3387,9 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             .ok();
         let mut state = RenderState::new(source_tx, source_done);
         let mut hi_res: Option<win32::HighResTimer> = None;
+        // When the live stand-ins were last polled: the next poll is one refresh period after it, so the
+        // present + DWM flush of a live redraw counts toward the period instead of adding a second one.
+        let mut live_polled = Instant::now();
         loop {
             crate::perf::heartbeat_render();
             state.poll_background_work();
@@ -3404,6 +3407,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             } else if state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
                 // Live stand-ins at the display refresh rate while the fingers rest.
                 Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64)
+                    .saturating_sub(live_polled.elapsed())
             } else if state.has_active_sources() || state.verify.is_some() {
                 Duration::from_millis(33)
             } else if state.needs_surface_recovery() {
@@ -3483,7 +3487,14 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 state.try_recover_surfaces();
                 // Fingers resting mid-swipe: the parked windows' stand-ins must keep playing. Redraw
                 // only when one of them actually delivered a new frame (a static window costs nothing).
-                if state.last_settled_scene.as_ref().is_some_and(|s| s.live) && state.refresh_live_pictures() {
+                let live = state.last_settled_scene.as_ref().is_some_and(|s| s.live);
+                let period = Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64);
+                // Woken early by a message: wait for the period instead of polling again.
+                let due = live && live_polled.elapsed() + Duration::from_micros(500) >= period;
+                if due {
+                    live_polled = Instant::now();
+                }
+                if due && state.refresh_live_pictures() {
                     state.scene = state.last_settled_scene.take().map(live_redraw_scene);
                     continue;
                 }
