@@ -9502,7 +9502,7 @@ fn axis_lock_pad_drag_swaps_with_a_sibling_across_the_axis() {
 
 #[test]
 fn axis_lock_keeps_the_lock_on_a_side_with_no_monitor_and_ignores_a_flick_there() {
-    let mut cfg = note_cfg();
+    let cfg = note_cfg();
     let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
     focus(&mut h, 102);
     let (mut x, mut y) = (500., 500.);
@@ -10591,4 +10591,92 @@ fn stack_exit_needs_a_quarter_pull_both_orientations() {
             h.stop_clean();
         }
     }
+}
+
+/// Review #1: a topology change mid four-finger drag cancels both the session and the pad carry.
+#[test]
+fn topology_change_during_a_pad_drag_clears_session_and_pad() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=12 {
+        h.engine
+            .event(Event::Contacts(four(500. + 10. * i as f64, 500.)));
+    }
+    assert!(h.engine.pad.is_some(), "carrying");
+    h.desktop.0.lock().unwrap().monitors = primary_only_rig();
+    h.engine.event(Event::Topology);
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    assert!(h.engine.drag.is_none(), "session cancelled");
+    assert!(h.engine.pad.is_none(), "pad carry cancelled too");
+}
+
+/// #113: after a pad preview, a perpendicular swipe commits group mode, a reverse swipe reverts it,
+/// and the swipe direction picks the stack position.
+#[test]
+fn pad_perpendicular_swipe_commits_group_mode_and_reverse_reverts() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let mut x = 500.;
+    let mut seen_preview = false;
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            seen_preview = true;
+            break;
+        }
+    }
+    assert!(seen_preview, "pad drag reached a preview: {:?}", phase(&h));
+    let mut y = 500.;
+    for _ in 0..30 {
+        y -= 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { direction: -1, .. })
+        ),
+        "perpendicular swipe commits: {:?}",
+        phase(&h)
+    );
+    for _ in 0..40 {
+        y += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ),
+        "reverse swipe reverts: {:?}",
+        phase(&h)
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
 }

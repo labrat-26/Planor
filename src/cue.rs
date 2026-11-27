@@ -162,10 +162,11 @@ fn overlap_area(a: Rect, b: Rect) -> i64 {
 }
 
 fn clamp_rect(r: Rect, bounds: Rect) -> Rect {
-    let w = r.w.min(bounds.w).max(1);
-    let h = r.h.min(bounds.h).max(1);
-    let x = r.x.clamp(bounds.x, bounds.x + bounds.w - w);
-    let y = r.y.clamp(bounds.y, bounds.y + bounds.h - h);
+    // A transient zero-sized work area (topology change) must not make clamp() panic (min > max).
+    let w = r.w.min(bounds.w.max(1)).max(1);
+    let h = r.h.min(bounds.h.max(1)).max(1);
+    let x = r.x.clamp(bounds.x, (bounds.x + bounds.w - w).max(bounds.x));
+    let y = r.y.clamp(bounds.y, (bounds.y + bounds.h - h).max(bounds.y));
     Rect { x, y, w, h }
 }
 

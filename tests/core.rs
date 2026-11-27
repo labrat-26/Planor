@@ -1092,7 +1092,6 @@ fn mockup_spec_states_match_layout() {
 }
 
 #[test]
-#[test]
 fn neighbour_bands_are_measured_from_the_entry_edge() {
     // span 400 at lo 100: 1/4 = 200, 3/4 = 400 from the leading edge.
     let c = |pos, edge| classify_neighbour_entry(pos, 100, 400, edge).1;
@@ -2248,4 +2247,24 @@ fn locked_drag_start_strip_axis_wins_ties_against_a_diagonal_monitor_ray() {
         (Swipe::DragStart, false, None),
         "a straight start keeps the strip axis"
     );
+}
+#[test]
+fn group_at_places_the_joiner_by_swipe_direction() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 800,
+    };
+    for (leading, want) in [(false, vec![2, 3, 1]), (true, vec![1, 2, 3])] {
+        let mut s = Strip::new(area);
+        s.insert(1, 300);
+        s.insert(2, 300);
+        s.insert(3, 300);
+        s.group(3, 2);
+        s.group_at(1, 2, leading);
+        let (i, _) = s.locate(1).unwrap();
+        assert_eq!(s.columns[i].members, want, "leading={leading}");
+        assert_eq!(s.active(), Some(1), "joiner becomes active");
+    }
 }

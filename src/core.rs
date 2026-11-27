@@ -248,6 +248,23 @@ impl Strip {
             c.length = self.area.length().max(c.minimum)
         }
     }
+    /// Like `group`, but `leading` puts the joiner before the target's members (up on landscape, left on
+    /// portrait) instead of after them; it becomes the active member either way (#113 swipe direction).
+    pub fn group_at(&mut self, id: WindowId, target: WindowId, leading: bool) {
+        self.group(id, target);
+        if leading
+            && let Some((i, _)) = self.locate(id)
+            && self.columns[i].members.len() > 1
+        {
+            let c = &mut self.columns[i];
+            let Some(at) = c.members.iter().position(|m| *m == id) else {
+                return;
+            };
+            let m = c.members.remove(at);
+            c.members.insert(0, m);
+            c.active = 0;
+        }
+    }
     pub fn ungroup(&mut self, id: WindowId) {
         if let Some((i, _)) = self.locate(id)
             && self.columns[i].members.len() > 1

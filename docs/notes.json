@@ -164,7 +164,7 @@
                       "time_utc":  "14:42:08.571 (local)",
                       "text":  "a green boarder appears ??",
                       "status":  "open",
-                      "note":  "explained: the green is drop_target_color (#10B981), which used to appear only after a 350 ms hover in the centre of a target. Now used during every drag only for the filled merge zones; the hovered swap target no longer gets a green border (#105, test src/sim_tests.rs::drag_hover_suppresses_green_border_while_keeping_zones_and_icons). Confirm with the owner."
+                      "note":  "explained: the green is drop_target_color (#10B981), which used to appear only after a 350 ms hover in the centre of a target. Now used during every drag only for the filled merge zones; the hovered swap target no longer gets a green border (#105, test src/sim_tests.rs::drag_hover_suppresses_green_border). Confirm with the owner."
                   },
                   {
                       "id":  "N-022",

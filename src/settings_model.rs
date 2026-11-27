@@ -192,12 +192,7 @@ impl Model {
                 } else {
                     1
                 };
-                let max = match e.key.as_str() {
-                    "drag_dwell_ms" => 5000,
-                    "drag_vacancy_delay_ms" => 10000,
-                    "drag_edge_scroll_percent" => 40,
-                    _ => 100000,
-                };
+                let max = crate::int_max(e.key.as_str());
                 toml::Value::Integer((n + dir * unit).clamp(0, max))
             }
             (toml::Value::Float(f), _) => {

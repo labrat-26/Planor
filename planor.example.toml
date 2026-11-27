@@ -33,6 +33,7 @@ corner_radius_px = 8
 focused_color = "#3B82F6"
 stacked_color = "#A855F7"
 pinned_color = "#F59E0B"
+# Unused since 4.8: the drop-target highlight was removed with the drop zones (#112); kept so old configs load.
 drop_target_color = "#10B981"
 # A dragged window over a group lights the group in a lighter shade of the focus colour.
 group_hover_color = "#93C5FD"

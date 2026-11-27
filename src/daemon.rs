@@ -369,17 +369,19 @@ pub(crate) enum DragPhase {
 
 pub(crate) struct DragSession {
     pub session_gen: u64,
+    /// Minimum size of the held window, read once at pick-up (a `WM_GETMINMAXINFO` round trip can block).
+    pub min_size: (i32, i32),
     pub topology_gen: u64,
     pub id: isize,
     pub key: Key,
     pub original: Rect,
     pub start_point: (i32, i32),
     pub point: (i32, i32),
-    pub prev_point: (i32, i32),
-    pub sampled: Instant,
-    pub hover: Instant,
     pub target: Option<isize>,
     pub entry_edge: Option<planor::EntryEdge>,
+    /// Target and its visible rect frozen at entry: bands are measured on it, not on the preview-shifted
+    /// overlay, so the preview never moves the thresholds under the pointer.
+    pub target_rect: Option<(isize, Rect)>,
     pub dwell_anchor: (i32, i32),
     pub dwell_since: Option<Instant>,
     pub phase: DragPhase,
@@ -388,7 +390,6 @@ pub(crate) struct DragSession {
     pub cue_started_at: Option<Instant>,
     pub cue_sig: Option<(crate::cue::CueInput, crate::cue::CueKind, String)>,
     pub pad_perp_accum: f64,
-    pub pad_perp_dir: i8,
     pub destination: Option<Key>,
     pub resizing: bool,
     pub moved: bool,
@@ -615,13 +616,13 @@ impl<B: WindowBackend> Engine<B> {
     pub(crate) fn advance_drag_timers_for_test(&mut self, delta: Duration) {
         if let Some(d) = self.drag.as_mut() {
             if let Some(since) = d.dwell_since.as_mut() {
-                *since -= delta;
+                *since = since.checked_sub(delta).unwrap_or(*since);
             }
             if let VacancyState::Reserved { armed_at, .. } = &mut d.vacancy {
-                *armed_at -= delta;
+                *armed_at = armed_at.checked_sub(delta).unwrap_or(*armed_at);
             }
             if let Some(at) = d.edge_scroll_at.as_mut() {
-                *at -= delta;
+                *at = at.checked_sub(delta).unwrap_or(*at);
             }
         }
     }
@@ -1658,7 +1659,7 @@ impl<B: WindowBackend> Engine<B> {
         if old != self.displays {
             self.topology_gen = self.topology_gen.wrapping_add(1);
             // #114, #116: a topology change cancels any in-flight drag and invalidates its timers.
-            if self.drag.take().is_some() || self.pad.take().is_some() {
+            if self.drag.take().is_some() | self.pad.take().is_some() {
                 self.flung = false;
                 self.gesture = Default::default();
             }
@@ -1847,7 +1848,13 @@ impl<B: WindowBackend> Engine<B> {
                         modifier: hot.drag_stack_modifier_name,
                     }
                 };
-                let sig = (input, kind, dest_key.1.clone());
+                let sig_kind = match kind {
+                    crate::cue::CueKind::StackEntryPreview { .. } => {
+                        crate::cue::CueKind::StackEntryPreview { after: false }
+                    }
+                    k => k,
+                };
+                let sig = (input, sig_kind, dest_key.1.clone());
                 if d.cue_sig.as_ref() != Some(&sig) {
                     d.cue_sig = Some(sig);
                     d.cue_started_at = Some(Instant::now());
@@ -1895,7 +1902,7 @@ impl<B: WindowBackend> Engine<B> {
                     if let Some(dest_s) = self.strips.get(&dest_key) {
                         let mut cloned = dest_s.clone();
                         if dest_key != d.key {
-                            let (min_w, min_h) = self.backend.minimum_size(d.id);
+                            let (min_w, min_h) = d.min_size;
                             cloned.insert(
                                 d.id,
                                 if cloned.area.horizontal() {
@@ -1915,7 +1922,7 @@ impl<B: WindowBackend> Engine<B> {
                     if let Some(dest_s) = self.strips.get(&dest_key) {
                         let mut cloned = dest_s.clone();
                         if dest_key != d.key {
-                            let (min_w, min_h) = self.backend.minimum_size(d.id);
+                            let (min_w, min_h) = d.min_size;
                             cloned.insert(
                                 d.id,
                                 if cloned.area.horizontal() {
@@ -1970,6 +1977,10 @@ impl<B: WindowBackend> Engine<B> {
                                 .is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
                             && d.target
                                 .is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
+                            && matches!(
+                                d.phase,
+                                DragPhase::MiddlePreview { .. } | DragPhase::MiddleGroup { .. }
+                            )
                             && strip.columns[i].members.len() > 1
                             && strip.columns[i].members[strip.columns[i].active] == id
                     }) {
@@ -2072,7 +2083,6 @@ impl<B: WindowBackend> Engine<B> {
                 )
             })
             .collect();
-        let cue_changed = self.last_cue != cue;
         self.last_cue = cue.clone();
         // A holes/colour/cue-only refresh with unchanged tile geometry must NEVER supersede an active
         // animation or open/close handoff with a new scene epoch; patch directly on the renderer instead.
@@ -2084,7 +2094,6 @@ impl<B: WindowBackend> Engine<B> {
             && !self.quick
             && !self.last_tile_geometry.is_empty()
             && self.last_tile_geometry == geom;
-        let _ = cue_changed;
         if overlay_only {
             self.overlay_seq += 1;
             let colors = tiles.iter().map(|t| (t.id, t.color)).collect();
@@ -2468,17 +2477,16 @@ impl<B: WindowBackend> Engine<B> {
             };
             self.drag = Some(DragSession {
                 session_gen: self.drag_gen,
+                min_size: self.backend.minimum_size(id),
                 topology_gen: self.topology_gen,
                 id,
                 key,
                 original,
                 start_point: point,
                 point,
-                prev_point: point,
-                sampled: now,
-                hover: now,
                 target: None,
                 entry_edge: None,
+                target_rect: None,
                 dwell_anchor: point,
                 dwell_since: None,
                 phase: DragPhase::None,
@@ -2487,7 +2495,6 @@ impl<B: WindowBackend> Engine<B> {
                 cue_started_at: None,
                 cue_sig: None,
                 pad_perp_accum: 0.0,
-                pad_perp_dir: 0,
                 destination: None,
                 resizing: false,
                 edge_scroll_at: None,
@@ -2937,7 +2944,6 @@ impl<B: WindowBackend> Engine<B> {
         if let Some(d) = self.drag.as_mut() {
             d.start_point = (cx, cy);
             d.point = (cx, cy);
-            d.prev_point = (cx, cy);
             d.dwell_anchor = (cx, cy);
             d.destination = home.clone();
             d.vacancy = if self.hot.drag_vacancy_delay_ms == 0 {
@@ -3053,7 +3059,6 @@ impl<B: WindowBackend> Engine<B> {
                             direction: dir,
                         };
                         d.mode = planor::Drag::Stack;
-                        d.pad_perp_dir = dir;
                         d.pad_perp_accum = 0.0;
                         d.vacancy = VacancyState::Bypassed;
                         d.edge_scroll_at = None;
@@ -3081,7 +3086,6 @@ impl<B: WindowBackend> Engine<B> {
                             } else {
                                 planor::Drag::Before
                             };
-                            d.pad_perp_dir = 0;
                             d.pad_perp_accum = 0.0;
                             perp_triggered = true;
                         }
@@ -3091,7 +3095,6 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 _ => {
                     d.pad_perp_accum = 0.0;
-                    d.pad_perp_dir = 0;
                 }
             }
         }
@@ -3180,7 +3183,26 @@ impl<B: WindowBackend> Engine<B> {
             // #111: a fling transfers only across a connected/reachable monitor boundary, never a disconnected gap.
             let dest = current
                 .and_then(|n| self.displays.iter().position(|m| m.0 == n))
-                .and_then(|i| planor::connected_adjacent(bounds[i], &bounds, dx, dy));
+                .and_then(|i| {
+                    // The dominant axis first; a clearly diagonal fling (secondary >= 1/3 of the dominant) may
+                    // use the other axis. A monitor touching only at a corner or across a gap stays unreachable.
+                    planor::connected_adjacent(bounds[i], &bounds, dx, dy).or_else(|| {
+                        let (minor, major) = if dx != 0 {
+                            (vy.abs(), vx.abs())
+                        } else {
+                            (vx.abs(), vy.abs())
+                        };
+                        if minor * 3.0 < major {
+                            return None;
+                        }
+                        let (sx, sy) = if dx != 0 {
+                            (0, if vy > 0. { 1 } else { -1 })
+                        } else {
+                            (if vx > 0. { 1 } else { -1 }, 0)
+                        };
+                        planor::connected_adjacent(bounds[i], &bounds, sx, sy)
+                    })
+                });
             if let Some(i) = dest {
                 let b = bounds[i];
                 let dest_mon = self.displays[i].0.clone();
@@ -3214,6 +3236,7 @@ impl<B: WindowBackend> Engine<B> {
         }
         let now = Instant::now();
         let topology_gen = self.topology_gen;
+        let engine_gen = self.drag_gen;
         let hot = self.hot;
         let Some(d) = self.drag.as_mut() else { return };
         let release_sampled = d.lbutton_up_since.is_some();
@@ -3266,6 +3289,7 @@ impl<B: WindowBackend> Engine<B> {
             {
                 d.target = None;
                 d.entry_edge = None;
+                d.target_rect = None;
                 d.dwell_since = None;
                 d.phase = DragPhase::None;
                 d.mode = planor::Drag::None;
@@ -3299,7 +3323,8 @@ impl<B: WindowBackend> Engine<B> {
                 drag_gen,
                 topology_gen: armed_topo,
             } => {
-                if drag_gen != d.session_gen || armed_topo != topology_gen {
+                if drag_gen != d.session_gen || drag_gen != engine_gen || armed_topo != topology_gen
+                {
                     d.vacancy = VacancyState::Bypassed;
                 } else if now.duration_since(armed_at) >= Duration::from_millis(delay_ms) {
                     d.vacancy = VacancyState::Closed;
@@ -3322,9 +3347,7 @@ impl<B: WindowBackend> Engine<B> {
         };
         let prev_point = d.point;
         let point_moved = p != d.point;
-        d.prev_point = prev_point;
         d.point = p;
-        d.sampled = now;
 
         // #111: four-finger pad drags stay bound to their starting monitor (only fling transfers).
         // Mouse drags resolve the monitor currently under the cursor; disconnected gaps yield None.
@@ -3337,6 +3360,7 @@ impl<B: WindowBackend> Engine<B> {
                 }) else {
                     d.target = None;
                     d.entry_edge = None;
+                    d.target_rect = None;
                     d.dwell_since = None;
                     d.phase = DragPhase::None;
                     d.mode = planor::Drag::None;
@@ -3358,11 +3382,11 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_dir = 0;
             d.target = None;
             d.entry_edge = None;
+            d.target_rect = None;
             d.dwell_since = None;
             d.phase = DragPhase::None;
             d.mode = planor::Drag::None;
             d.pad_perp_accum = 0.0;
-            d.pad_perp_dir = 0;
             self.dirty = true;
         }
 
@@ -3370,7 +3394,9 @@ impl<B: WindowBackend> Engine<B> {
         let mut edge_scrolled = false;
         let block_edge_scroll = matches!(
             d.phase,
-            DragPhase::MiddleGroup { .. } | DragPhase::StackExit { .. }
+            DragPhase::MiddlePreview { .. }
+                | DragPhase::MiddleGroup { .. }
+                | DragPhase::StackExit { .. }
         );
         if allow_edge_scroll && !block_edge_scroll && hot.drag_edge_scroll_percent > 0 {
             if let Some(s) = self.strips.get_mut(&k) {
@@ -3449,9 +3475,23 @@ impl<B: WindowBackend> Engine<B> {
             } else {
                 None
             };
+            // The neighbour's visible overlay span along the stack axis (a scrolled-off or peeked
+            // neighbour gives its visible part, as in the entry bands); own column when none exists.
+            let visible_span = |col: usize| -> i32 {
+                let rects = s.rects(peek);
+                s.columns[col]
+                    .members
+                    .iter()
+                    .filter_map(|m| rects.iter().find(|(id, _)| id == m))
+                    .filter_map(|(_, r)| clip(*r, s.area))
+                    .map(|v| if horizontal { v.w } else { v.h })
+                    .max()
+                    .unwrap_or(0)
+            };
             let relevant_span = neighbour_col
-                .map(|ni| s.columns[ni].length.min(s.area.length()))
-                .unwrap_or_else(|| s.columns[ci].length.min(s.area.length()))
+                .map(visible_span)
+                .filter(|v| *v > 0)
+                .unwrap_or_else(|| visible_span(ci).max(1))
                 .max(1);
             let in_own_col = contains(group_column_rect(s, d.id, peek), p);
             planor::classify_stack_exit(delta_along, delta_cross, relevant_span, in_own_col)
@@ -3459,44 +3499,58 @@ impl<B: WindowBackend> Engine<B> {
             None
         };
 
-        // Hit-test visible tiles on destination strip `k`.
+        // Hit-test visible tiles on destination strip `k`. While the pointer stays inside the frozen
+        // rect of the current target, that rect is used (review #2).
+        let frozen = d.target_rect.filter(|(tid, v)| {
+            contains(*v, p)
+                && *tid != d.id
+                && self
+                    .strips
+                    .get(&k)
+                    .is_some_and(|s| s.locate(*tid).is_some())
+        });
         let hit = self.strips.get(&k).and_then(|s| {
             let horizontal = s.area.horizontal();
-            s.rects(peek)
-                .into_iter()
-                .filter(|(id, _)| *id != d.id)
-                .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v)))
-                .find(|(_, v)| contains(*v, p))
-                .map(|(tid, v)| {
-                    let t_col = s.locate(tid).map(|(c, _)| c);
-                    let sibling = k == d.key && t_col == own_col;
-                    let (lo, span, cur_along, prev_along) = if horizontal {
-                        (v.x, v.w.max(1), p.0, prev_point.0)
-                    } else {
-                        (v.y, v.h.max(1), p.1, prev_point.1)
-                    };
-                    (tid, sibling, t_col, lo, span, cur_along, prev_along)
-                })
+            let found = match frozen {
+                Some(fr) => Some(fr),
+                None => s
+                    .rects(peek)
+                    .into_iter()
+                    .filter(|(id, _)| *id != d.id)
+                    .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v)))
+                    .find(|(_, v)| contains(*v, p)),
+            };
+            found.map(|(tid, v)| {
+                let t_col = s.locate(tid).map(|(c, _)| c);
+                let sibling = k == d.key && t_col == own_col;
+                let (lo, span, cur_along, prev_along) = if horizontal {
+                    (v.x, v.w.max(1), p.0, prev_point.0)
+                } else {
+                    (v.y, v.h.max(1), p.1, prev_point.1)
+                };
+                (tid, sibling, t_col, lo, span, cur_along, prev_along, v)
+            })
         });
+        d.target_rect = hit.map(|h| (h.0, h.7));
 
         let prev_phase = d.phase;
         let prev_target = d.target;
         let prev_mode = d.mode;
 
         let (new_target, new_phase, new_mode) = match hit {
-            Some((tid, true, _, _, _, _, _)) if stack_exit_dir.is_none() => {
+            Some((tid, true, _, _, _, _, _, _)) if stack_exit_dir.is_none() => {
                 // Reordering siblings within the window's own group column.
                 d.entry_edge = None;
+                d.target_rect = None;
                 d.dwell_since = None;
                 d.pad_perp_accum = 0.0;
-                d.pad_perp_dir = 0;
                 (
                     Some(tid),
                     DragPhase::SiblingSwap { target: tid },
                     planor::Drag::Swap,
                 )
             }
-            Some((tid, false, t_col, lo, span, cur_along, prev_along)) => {
+            Some((tid, false, t_col, lo, span, cur_along, prev_along, _)) => {
                 let edge = if prev_target == Some(tid)
                     && let Some(e) = d.entry_edge
                 {
@@ -3515,8 +3569,6 @@ impl<B: WindowBackend> Engine<B> {
                     d.dwell_anchor = p;
                     d.dwell_since = None;
                     d.pad_perp_accum = 0.0;
-                    d.pad_perp_dir = 0;
-                    d.hover = now;
                     inferred
                 };
                 let (_progress, band) = planor::classify_neighbour_entry(cur_along, lo, span, edge);
@@ -3524,7 +3576,6 @@ impl<B: WindowBackend> Engine<B> {
                     planor::NeighbourBand::BeforeQuarter => {
                         d.dwell_since = None;
                         d.pad_perp_accum = 0.0;
-                        d.pad_perp_dir = 0;
                         if let Some(trailing) = stack_exit_dir {
                             d.vacancy = VacancyState::Bypassed;
                             (None, DragPhase::StackExit { trailing }, planor::Drag::None)
@@ -3549,6 +3600,7 @@ impl<B: WindowBackend> Engine<B> {
                             planor::Drag::Before
                         };
                         if already_preview_or_group {
+                            d.dwell_since = None; // nothing left to time: stop the fast tick (review #5)
                             d.vacancy = VacancyState::Bypassed;
                             if !d.pad_drag {
                                 // Group mode latches once the modifier activated it: releasing the key together with the
@@ -3599,24 +3651,15 @@ impl<B: WindowBackend> Engine<B> {
                                         >= Duration::from_millis(hot.drag_dwell_ms)
                                 });
                             if dwell_done {
+                                d.dwell_since = None;
                                 d.vacancy = VacancyState::Bypassed;
-                                if !d.pad_drag && self.backend.key_down(hot.drag_stack_modifier_vk)
-                                {
-                                    (
-                                        Some(tid),
-                                        DragPhase::MiddleGroup {
-                                            target: tid,
-                                            direction: 0,
-                                        },
-                                        planor::Drag::Stack,
-                                    )
-                                } else {
-                                    (
-                                        Some(tid),
-                                        DragPhase::MiddlePreview { target: tid, after },
-                                        tile_mode,
-                                    )
-                                }
+                                // Always enter the preview first: the press-key cue shows, and only a press seen
+                                // afterwards activates group mode (review #21).
+                                (
+                                    Some(tid),
+                                    DragPhase::MiddlePreview { target: tid, after },
+                                    tile_mode,
+                                )
                             } else {
                                 (
                                     Some(tid),
@@ -3629,7 +3672,6 @@ impl<B: WindowBackend> Engine<B> {
                     planor::NeighbourBand::PastThreeQuarters { after } => {
                         d.dwell_since = None;
                         d.pad_perp_accum = 0.0;
-                        d.pad_perp_dir = 0;
                         let tile_mode = if after {
                             planor::Drag::After
                         } else {
@@ -3645,9 +3687,9 @@ impl<B: WindowBackend> Engine<B> {
             }
             _ => {
                 d.entry_edge = None;
+                d.target_rect = None;
                 d.dwell_since = None;
                 d.pad_perp_accum = 0.0;
-                d.pad_perp_dir = 0;
                 if let Some(trailing) = stack_exit_dir {
                     d.vacancy = VacancyState::Bypassed;
                     (None, DragPhase::StackExit { trailing }, planor::Drag::None)
@@ -3858,8 +3900,8 @@ impl<B: WindowBackend> Engine<B> {
                     d.entry_edge == Some(planor::EntryEdge::Trailing),
                 );
             }
-            DragPhase::MiddleGroup { target, .. } => {
-                s.group(id, target);
+            DragPhase::MiddleGroup { target, direction } => {
+                s.group_at(id, target, direction < 0);
             }
             DragPhase::MiddleWaiting { target, after }
             | DragPhase::MiddlePreview { target, after }

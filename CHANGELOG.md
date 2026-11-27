@@ -1,6 +1,21 @@
 # Changelog
 
 All notable changes to Planor and its developer tooling harness are documented here.
+## [Unreleased]
+
+Milestone 4.8 (#111-#117).
+
+### Changed
+- **Gesture-driven grouping (#113)**: the group/ungroup drop zones are gone. Thresholds at 1/4 and 3/4 of the neighbour (from the entry edge), a stationary dwell preview, the group modifier (mouse; latches once pressed) or a perpendicular swipe (four fingers). `drag_stack_modifier` now *activates* grouping instead of cancelling a drop.
+- **Monitor-bound four-finger drags (#111)**: only a fling crosses monitors, and only over a connected boundary.
+- **Stack exit (#115)**: pull a member a quarter of the neighbour span along the strip.
+
+### Added
+- Animated, orientation-aware SVG cues (#112), vacated-space delay `drag_vacancy_delay_ms` (#114), edge scroll for mouse and pad via `drag_edge_scroll_percent` (#116), `drag_dwell_ms`.
+
+### Removed
+- `stack_zone_percent` and `swipe_drag_cross_monitors` (old configs still load; the keys are ignored silently).
+
 
 ## [0.11.0] - 2026-11-27
 

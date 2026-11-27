@@ -3022,7 +3022,7 @@ impl RenderState {
                         host_origin: (host.b.x, host.b.y),
                         world_holes: scratch.mine.clone(),
                         phase_ms,
-                        phase_bucket: phase_ms / 16,
+                        phase_bucket: phase_ms / 33,
                     }
                 });
                 if let Some(dead_gen) = source_device_lost {

@@ -138,12 +138,14 @@ Keyboard only? <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> moves focus along 
 
 Sometimes two windows belong in one place, such as a chat beside its notes. **Stacking** puts them in one slot, and you flip between them.
 
-Pick a window up with **four fingers** (or drag it with the mouse), then drop it on another window:
+Pick a window up with **four fingers** (or drag it with the mouse) and bring it over a neighbour. What happens depends on how far in you go, measured from the edge you entered:
 
-- **Green middle zone** (the middle half of the window): the two **stack**. The outline turns purple.
-- **Anywhere else on the window:** the two **swap** places.
-- **Hold <kbd>Shift</kbd> while dropping:** nothing happens and the window goes back to its slot.
+- **Less than a quarter in:** letting go puts the window back where it was.
+- **Between a quarter and three quarters:** hold still for a moment (`drag_dwell_ms`, 250 ms) and the neighbour previews where it would move. With the **mouse**, press the group key (`drag_stack_modifier`, Shift by default) to stack; with **four fingers**, swipe across the strip (up or down on landscape, sideways on portrait). Letting go without that tiles the window on the side of the neighbour's midpoint you are on.
+- **More than three quarters in:** the window tiles on the far side.
+- **Leaving a stack:** pull a member along the strip by a quarter of the neighbour's width (height on portrait); it leaves toward the side you pulled.
 
+A four-finger drag stays on its own monitor; only a fling sends it to another one. A mouse drag can cross monitors freely. Near the strip edge (`drag_edge_scroll_percent`, 10 % of the screen) the strip scrolls while you drag.
 <p align="center">
   <img src="docs/img/stack.svg" alt="Animation: a window dropped on the middle zone of another stacks with it" width="800">
 </p>
@@ -202,7 +204,6 @@ You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <k
 | 🔵 **Blue** | This is the window you are working in |
 | 🟣 **Purple** | The window is part of a stack |
 | 🟠 **Orange** | The window is *pinned* (it stays on screen while the strip scrolls) |
-| 🟢 **Green** | A drop target while you are dragging |
 
 The thin slivers at the screen edges are **peeks**. They show that more windows wait just off-screen. Click one to bring that window in.
 
