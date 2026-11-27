@@ -352,6 +352,10 @@ pub(crate) struct PadDrag {
     pub home_lock: Option<bool>,
     /// The cursor has been on another monitor since the lock was released or pick-up.
     pub left_home: bool,
+    /// Unit ray toward a neighbouring monitor when carrying off the strip axis (#102).
+    pub ray: Option<(f64, f64)>,
+    /// Exponentially smoothed recent finger vector used to pick the target ray on lock release/switch (#102).
+    pub off: (f64, f64),
 }
 pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
@@ -1903,6 +1907,13 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 _ => (false, false),
             };
+            self.gesture.monitor_rays = match (self.gesture.axis_lock, home_bounds) {
+                (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
+                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                    planor::monitor_rays(b, &bounds, h)
+                }
+                _ => Vec::new(),
+            };
         }
         let swipe = self.gesture.sample(
             &p,
@@ -2502,6 +2513,7 @@ impl<B: WindowBackend> Engine<B> {
         let home = self.owning(id);
         let home_lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
         let lock = home_lock.filter(|_| !self.gesture.started_cross);
+        let ray = if self.gesture.started_cross { self.gesture.started_ray } else { None };
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2520,6 +2532,8 @@ impl<B: WindowBackend> Engine<B> {
             cross: 0.,
             home_lock,
             left_home: false,
+            ray,
+            off: (0., 0.),
         });
     }
     fn pad_move(&mut self, dx: f64, dy: f64) {
@@ -2565,6 +2579,12 @@ impl<B: WindowBackend> Engine<B> {
         // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
         let (raw_dx, raw_dy) = (dx, dy);
         let (mut dx, mut dy) = (dx, dy);
+        p.off = (p.off.0 * 0.85 + raw_dx, p.off.1 * 0.85 + raw_dy);
+        let at_info = monitor_axes
+            .iter()
+            .find(|(r, _)| inside(*r, p.cursor))
+            .copied()
+            .or_else(|| home_bounds.map(|b| (b, p.home_lock.unwrap_or(true))));
         if let Some(h) = p.lock {
             // Travel over the window's own group column is a regroup/reorder across the axis, not an
             // intent to leave for another monitor: it does not count towards the lock release (#84).
@@ -2573,12 +2593,68 @@ impl<B: WindowBackend> Engine<B> {
             }
             let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
             // Whether another monitor lies that way is judged from the monitor the cursor is on now.
-            let at = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, _)| *r).or(home_bounds);
+            let at = at_info.map(|(r, _)| r);
+            let at_h = at_info.map(|(_, ah)| ah).unwrap_or(h);
+            let rays = at.map(|b| planor::monitor_rays(b, &bounds, at_h)).unwrap_or_default();
+            let picked_ray = planor::best_ray(p.off.0, p.off.1, &rays)
+                .filter(|&(rx, ry)| (if h { ry } else { rx }) * p.cross > 0.);
             let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
-            if cross_ok && monitor_that_way && p.cross.abs() >= relax {
+            if cross_ok && p.cross.abs() >= relax && (picked_ray.is_some() || monitor_that_way) {
                 p.lock = None;
+                p.ray = picked_ray;
+                p.cross = 0.;
+                p.off = (0., 0.);
+                if let Some((rx, ry)) = p.ray {
+                    let proj = raw_dx * rx + raw_dy * ry;
+                    dx = proj * rx;
+                    dy = proj * ry;
+                }
             } else if !in_column {
                 if h { dy = 0. } else { dx = 0. }
+            }
+        } else if let Some((rx, ry)) = p.ray {
+            // Constrained to a linear ray toward a neighbouring monitor (#102); switching to another
+            // offered ray (or back to the strip axis) follows the same relax threshold.
+            if !in_column {
+                p.cross += raw_dx * (-ry) + raw_dy * rx;
+            }
+            if !in_column && !p.left_home && p.cross.abs() >= relax
+                && let Some((at_r, at_h)) = at_info
+            {
+                let (along, cross) = if at_h { (p.off.0.abs(), p.off.1.abs()) } else { (p.off.1.abs(), p.off.0.abs()) };
+                let strip_ok = along >= 1.5 * cross;
+                let rays: Vec<(f64, f64)> = if cross_ok {
+                    planor::monitor_rays(at_r, &bounds, at_h)
+                        .into_iter()
+                        .filter(|&(nrx, nry)| nrx * rx + nry * ry < 0.99)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                let alt_ray = planor::best_ray(p.off.0, p.off.1, &rays);
+                let alt_proj = alt_ray.map(|(nrx, nry)| p.off.0 * nrx + p.off.1 * nry);
+                if let (Some(nr), Some(ap)) = (alt_ray, alt_proj)
+                    && (!strip_ok || ap > along)
+                {
+                    p.ray = Some(nr);
+                    p.cross = 0.;
+                    p.off = (0., 0.);
+                } else if strip_ok {
+                    p.lock = Some(at_h);
+                    p.ray = None;
+                    p.line = if at_h { p.cursor.1 } else { p.cursor.0 };
+                    p.cross = 0.;
+                    p.off = (0., 0.);
+                }
+            }
+            if !in_column {
+                if let Some((crx, cry)) = p.ray {
+                    let proj = raw_dx * crx + raw_dy * cry;
+                    dx = proj * crx;
+                    dy = proj * cry;
+                } else if let Some(h) = p.lock {
+                    if h { dy = 0. } else { dx = 0. }
+                }
             }
         }
         let now = Instant::now();
@@ -2620,6 +2696,8 @@ impl<B: WindowBackend> Engine<B> {
                         p.lock = Some(hl);
                         p.line = line_for(hl);
                         p.cross = 0.;
+                        p.ray = None;
+                        p.off = (0., 0.);
                     }
                 } else {
                     p.left_home = true;
@@ -2627,6 +2705,7 @@ impl<B: WindowBackend> Engine<B> {
                         p.lock = Some(dest_h);
                         p.line = line_for(dest_h);
                         p.cross = 0.;
+                        p.off = (0., 0.);
                     }
                 }
             }

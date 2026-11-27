@@ -5903,3 +5903,154 @@ fn spawn_on_cursor_monitor_false_lands_on_default_monitor() {
         "window shown on MON0 must stay on MON0 when spawn_on_cursor_monitor = false"
     );
 }
+
+/// Exact layout of the owner's 3-monitor desk (#102): laptop primary (MON0), upper landscape (MON1),
+/// and portrait up-left (MON2).
+fn owner_three_monitor_rig() -> Vec<(String, Rect, Rect)> {
+    vec![
+        ("MON0".into(), Rect { x: 0, y: 0, w: 1920, h: 1140 }, Rect { x: 0, y: 0, w: 1920, h: 1200 }),
+        ("MON1".into(), Rect { x: 0, y: -1440, w: 2560, h: 1392 }, Rect { x: 0, y: -1440, w: 2560, h: 1440 }),
+        ("MON2".into(), Rect { x: -1440, y: -1859, w: 1440, h: 2512 }, Rect { x: -1440, y: -1859, w: 1440, h: 2560 }),
+    ]
+}
+
+fn owner_three_per_monitor(sim: &mut SimDesktop) {
+    for (id, x, y, w, h) in [
+        (101, 0, 0, 960, 1140),
+        (102, 960, 0, 960, 1140),
+        (201, 0, -1440, 1280, 1392),
+        (202, 1280, -1440, 1280, 1392),
+        (301, -1440, -1859, 1440, 1256),
+        (302, -1440, -603, 1440, 1256),
+    ] {
+        sim.add_window(SimWindow::new(id, Rect { x, y, w, h }));
+    }
+}
+
+#[test]
+fn axis_lock_linear_rays_on_owner_rig_up_left_and_diagonal_up_left() {
+    // (#102) On the owner's desk from laptop MON0:
+    // - straight up carries linearly along MON1's ray and drops onto MON1
+    // - straight left carries linearly along MON0's strip axis and drops onto MON2
+    // - diagonal up-left carries linearly along MON2's diagonal ray and drops onto MON2
+    // - straight down / down-right (non-adjacent) are rejected
+    let cfg = cross_cfg();
+
+    // 1. Straight up -> MON1 (stays on MON1's ray even with slight finger jitter)
+    let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg.clone(), owner_three_per_monitor);
+    focus(&mut h, 101);
+    let mut steps = vec![(0., -12.); 8];
+    for i in 0..8 {
+        steps.push((if i % 2 == 0 { 3. } else { -3. }, -15.));
+    }
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying up toward MON1");
+    let ray = p.ray.expect("locked onto MON1 ray");
+    assert!(ray.1 < -0.9, "MON1 ray points up: {ray:?}");
+    assert!(p.cursor.1 < -50., "cursor reached MON1: {:?}", p.cursor);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let landed = h.engine.strips.iter().find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
+    assert_eq!(landed, Some("MON1"), "upward linear carry drops onto MON1 (cursor={:?})", h.desktop.0.lock().unwrap().cursor);
+
+    // 2. Straight left -> horizontal strip axis onto MON2 (y stays fixed on pick-up line)
+    let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg.clone(), owner_three_per_monitor);
+    focus(&mut h, 101);
+    let steps = vec![(-12., 0.); 55];
+    feed_steps(&mut h, &steps);
+    let p = h.engine.pad.as_ref().expect("carrying left toward MON2");
+    assert!(p.cursor.0 < 0., "cursor crossed left onto MON2: {:?}", p.cursor);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let landed = h.engine.strips.iter().find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
+    assert_eq!(landed, Some("MON2"), "leftward linear carry drops onto MON2");
+
+    // 3. Diagonal up-left -> MON2 diagonal ray; trajectory stays strictly collinear with ray
+    let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg.clone(), owner_three_per_monitor);
+    focus(&mut h, 101);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    let mut origin = None;
+    let mut active_ray = None;
+    let mut max_perp_err = 0.0f64;
+    for i in 0..70 {
+        // Diagonal up-left with alternating perpendicular wobble to prove projection onto the ray
+        let wobble = if i % 2 == 0 { 2.5 } else { -2.5 };
+        x += -12. + wobble * 0.57;
+        y += -8.5 - wobble * 0.82;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if let Some(p) = h.engine.pad.as_ref() {
+            if origin.is_none() {
+                origin = Some(p.cursor);
+                active_ray = p.ray;
+            }
+            if let (Some(o), Some((rx, ry))) = (origin, active_ray) {
+                let (dx, dy) = (p.cursor.0 - o.0, p.cursor.1 - o.1);
+                let perp = (dx * ry - dy * rx).abs();
+                max_perp_err = max_perp_err.max(perp);
+            }
+            if p.cursor.0 < -500. {
+                break;
+            }
+        }
+    }
+    let ray = active_ray.expect("diagonal up-left carry locks onto MON2 diagonal ray");
+    assert!(ray.0 < -0.5 && ray.1 < -0.3, "MON2 ray is diagonal up-left: {ray:?}");
+    assert!(max_perp_err < 2.0, "diagonal carry stayed linear on its ray (max perp err {max_perp_err:.2}px)");
+    let p = h.engine.pad.as_ref().expect("still carrying on MON2");
+    assert!(p.cursor.0 < 0., "diagonal ray reached MON2: {:?}", p.cursor);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let landed = h.engine.strips.iter().find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
+    assert_eq!(landed, Some("MON2"), "diagonal up-left carry drops onto MON2");
+
+    // 4. Non-adjacent directions (straight down and down-right) are NOT offered
+    for step in [(0., 25.), (20., 20.)] {
+        let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg.clone(), owner_three_per_monitor);
+        focus(&mut h, 101);
+        let (mut x, mut y) = (500., 500.);
+        h.engine.event(Event::Contacts(four(x, y)));
+        for _ in 0..8 {
+            x += step.0;
+            y += step.1;
+            h.engine.event(Event::Contacts(four(x, y)));
+        }
+        assert!(h.engine.pad.is_none(), "non-adjacent direction {step:?} must not pick up");
+    }
+}
+
+#[test]
+fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
+    // (#102) On stacked_rig(): MON0->MON1 is exact straight up (0, -1), MON2->MON1 is diagonal up-right,
+    // and non-adjacent monitors (MON2->MON1 in three_monitor_rig where MON0 sits between them) are excluded.
+    let cfg = cross_cfg();
+
+    // MON0 straight up -> exact vertical ray (x stays fixed) and drops onto MON1
+    let mut h = SimHarness::with_setup(stacked_rig(), cfg.clone(), three_per_monitor);
+    focus(&mut h, 101);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    let mut start_x = None;
+    for i in 0..60 {
+        x += if i % 2 == 0 { 2. } else { -2. };
+        y -= 15.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if let Some(p) = h.engine.pad.as_ref() {
+            let sx = *start_x.get_or_insert(p.cursor.0);
+            assert!((p.cursor.0 - sx).abs() < 1.0, "straight-up ray keeps x fixed: {} vs {}", p.cursor.0, sx);
+        }
+    }
+    let p = h.engine.pad.as_ref().expect("carrying up on stacked_rig");
+    assert!(p.cursor.1 < 0., "reached MON1: {:?}", p.cursor);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let landed = h.engine.strips.iter().find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
+    assert_eq!(landed, Some("MON1"), "stacked_rig straight-up carry drops onto MON1");
+
+    // Non-adjacent monitor exclusion: in three_monitor_rig(), MON2 (-1440..0) and MON1 (1920..4480)
+    // do not touch; monitor_rays from MON2 only offers MON0 (1 ray), never MON1.
+    let rig = three_monitor_rig();
+    let bounds: Vec<Rect> = rig.iter().map(|m| m.2).collect();
+    let mon2_rays = planor::monitor_rays(bounds[2], &bounds, false);
+    assert_eq!(mon2_rays.len(), 1, "MON2 only touches MON0, not MON1: {mon2_rays:?}");
+}

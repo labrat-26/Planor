@@ -573,6 +573,10 @@ pub struct Gesture {
     pub cross_ok: (bool, bool),
     /// The running drag started across the lock axis towards a monitor: the caller starts it unlocked.
     pub started_cross: bool,
+    /// Unit rays toward neighbouring monitors (including diagonal ones) that lie off the strip axis (#102).
+    pub monitor_rays: Vec<(f64, f64)>,
+    /// The neighbouring-monitor ray that won when a four-finger drag started off the strip axis (#102).
+    pub started_ray: Option<(f64, f64)>,
     /// A locked drag started across the axis: ignored until the fingers lift (the window is not picked up).
     rejected: bool,
 }
@@ -664,14 +668,23 @@ impl Gesture {
                     return Swipe::None;
                 }
                 if let Some(h) = lock {
-                    // Only a start along the strip axis picks the window up (same 1.5x lead rule as the
-                    // three-finger scroll). A cross-axis start is ignored until the fingers lift.
+                    // Pick the nearest offered ray (strip axis or a neighbouring monitor ray, #102)
+                    // using the same 1.5x lead rule as the three-finger scroll.
                     let (along, cross) = if h { (dx.abs(), dy.abs()) } else { (dy.abs(), dx.abs()) };
-                    if along < 1.5 * cross {
+                    let strip_ok = along >= 1.5 * cross;
+                    let mon_ray = best_ray(dx, dy, &self.monitor_rays);
+                    let mon_proj = mon_ray.map(|(rx, ry)| dx * rx + dy * ry);
+                    if let (Some(ray), Some(proj)) = (mon_ray, mon_proj)
+                        && (!strip_ok || proj > along)
+                    {
+                        self.started_cross = true;
+                        self.started_ray = Some(ray);
+                    } else if !strip_ok {
                         let across = if h { dy } else { dx };
                         let allowed = if across > 0. { self.cross_ok.1 } else { self.cross_ok.0 };
                         if cross >= 1.5 * along && allowed {
                             self.started_cross = true;
+                            self.started_ray = None;
                         } else {
                             if cross >= 1.5 * along || dx.hypot(dy) >= 2. * deadzone {
                                 self.rejected = true;
@@ -769,6 +782,56 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
         })
         .min()
         .map(|(_, i)| i)
+}
+/// Unit direction vectors from `home`'s centre to every neighbouring monitor's centre (monitors whose
+/// bounds touch `home` along an edge or corner, within 2 px), excluding rays nearly collinear with
+/// `home`'s strip axis (`|cross| < 0.25`) since the strip axis already reaches those monitors (#102).
+pub fn monitor_rays(home: Rect, others: &[Rect], horizontal: bool) -> Vec<(f64, f64)> {
+    let hx = home.x as f64 + home.w as f64 * 0.5;
+    let hy = home.y as f64 + home.h as f64 * 0.5;
+    let mut rays = Vec::new();
+    for &b in others {
+        if b == home {
+            continue;
+        }
+        let gap_x = (b.x - (home.x + home.w)).max(home.x - (b.x + b.w)).max(0);
+        let gap_y = (b.y - (home.y + home.h)).max(home.y - (b.y + b.h)).max(0);
+        if gap_x > 2 || gap_y > 2 {
+            continue;
+        }
+        let dx = (b.x as f64 + b.w as f64 * 0.5) - hx;
+        let dy = (b.y as f64 + b.h as f64 * 0.5) - hy;
+        let len = dx.hypot(dy);
+        if len < 1.0 {
+            continue;
+        }
+        let (rx, ry) = (dx / len, dy / len);
+        let cross = if horizontal { ry.abs() } else { rx.abs() };
+        let covers_strip_edge = if horizontal {
+            b.y <= home.y && b.y + b.h >= home.y + home.h
+        } else {
+            b.x <= home.x && b.x + b.w >= home.x + home.w
+        };
+        if cross < 0.25 || covers_strip_edge {
+            continue;
+        }
+        rays.push((rx, ry));
+    }
+    rays
+}
+
+/// Nearest unit ray in `rays` that `(dx, dy)` leads toward with the 1.5x lead rule (`proj > 0` and
+/// `proj >= 1.5 * perp`), or `None` if no ray lies within that cone (#102).
+pub fn best_ray(dx: f64, dy: f64, rays: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, (f64, f64))> = None;
+    for &(rx, ry) in rays {
+        let proj = dx * rx + dy * ry;
+        let perp = (dx * ry - dy * rx).abs();
+        if proj > 0. && proj >= 1.5 * perp && best.is_none_or(|(bp, _)| proj > bp) {
+            best = Some((proj, (rx, ry)));
+        }
+    }
+    best.map(|(_, r)| r)
 }
 #[derive(Default)]
 pub struct ContactFrame {
