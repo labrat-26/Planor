@@ -395,6 +395,8 @@ pub(crate) struct DragSession {
     pub pad_drag: bool,
     pub edge_scroll_at: Option<Instant>,
     pub edge_scroll_since: Option<Instant>,
+    /// Signed edge-scroll velocity (px/s): accelerates toward the zone target and decelerates smoothly.
+    pub edge_scroll_vel: f64,
     pub edge_scroll_frac: f64,
     pub edge_scroll_dir: i32,
     pub saw_lbutton_down: bool,
@@ -2454,6 +2456,7 @@ impl<B: WindowBackend> Engine<B> {
                 resizing: false,
                 edge_scroll_at: None,
                 edge_scroll_since: None,
+                edge_scroll_vel: 0.0,
                 edge_scroll_frac: 0.0,
                 edge_scroll_dir: 0,
                 moved: pad_drag,
@@ -3022,6 +3025,7 @@ impl<B: WindowBackend> Engine<B> {
                         d.edge_scroll_frac = 0.0;
                         d.edge_scroll_dir = 0;
                         d.edge_scroll_since = None;
+                        d.edge_scroll_vel = 0.0;
                         perp_triggered = true;
                         // Keep the cursor anchored while committing the perpendicular push.
                         dx = 0.;
@@ -3267,6 +3271,7 @@ impl<B: WindowBackend> Engine<B> {
                 d.edge_scroll_frac = 0.0;
                 d.edge_scroll_dir = 0;
                 d.edge_scroll_since = None;
+                d.edge_scroll_vel = 0.0;
                 self.dirty = true;
             }
             return;
@@ -3339,6 +3344,7 @@ impl<B: WindowBackend> Engine<B> {
                     d.edge_scroll_frac = 0.0;
                     d.edge_scroll_dir = 0;
                     d.edge_scroll_since = None;
+                    d.edge_scroll_vel = 0.0;
                     self.dirty = true;
                     return;
                 };
@@ -3352,6 +3358,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
             d.edge_scroll_since = None;
+            d.edge_scroll_vel = 0.0;
             d.target = None;
             d.entry_edge = None;
             d.target_rect = None;
@@ -3411,6 +3418,17 @@ impl<B: WindowBackend> Engine<B> {
                         .edge_scroll_at
                         .map(|t| t.elapsed().as_secs_f64())
                         .unwrap_or(1.0 / hz);
+                    // Smoothed velocity (review of owner note "way smoother, nearly there"): the target speed
+                    // follows the pointer depth, but the actual speed only approaches it exponentially, so a
+                    // sudden change in depth never jumps the strip from 1300 to 280 px/s.
+                    let target = speed * dir as f64;
+                    if d.edge_scroll_vel == 0.0 || d.edge_scroll_vel.signum() != target.signum() {
+                        // Start (or reverse) at the target: the hold-time ramp already eases the start in.
+                        d.edge_scroll_vel = target;
+                    }
+                    let blend = 1.0 - (-elapsed_s / 0.09).exp();
+                    d.edge_scroll_vel += (target - d.edge_scroll_vel) * blend;
+                    let speed = d.edge_scroll_vel.abs();
                     if let Some((px, rem)) =
                         edge_scroll_step_at(elapsed_s, hz, dir, d.edge_scroll_frac, speed)
                     {
@@ -3440,6 +3458,7 @@ impl<B: WindowBackend> Engine<B> {
                     d.edge_scroll_frac = 0.0;
                     d.edge_scroll_dir = 0;
                     d.edge_scroll_since = None;
+                    d.edge_scroll_vel = 0.0;
                 }
             }
         } else {
@@ -3447,6 +3466,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
             d.edge_scroll_since = None;
+            d.edge_scroll_vel = 0.0;
         }
         if edge_scrolled {
             // Strip moved underneath the pointer: never spuriously complete dwell/grouping while scrolling.
@@ -3761,6 +3781,7 @@ impl<B: WindowBackend> Engine<B> {
             d.edge_scroll_frac = 0.0;
             d.edge_scroll_dir = 0;
             d.edge_scroll_since = None;
+            d.edge_scroll_vel = 0.0;
         }
 
         let is_preview_or_group = |ph: DragPhase| {
