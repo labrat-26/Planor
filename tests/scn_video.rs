@@ -3,6 +3,13 @@ include!("common/helpers.rs");
 
 // #106: Live real-window tests for scrolling D3D11 flip-model video windows (normal and
 // borderless fullscreen) and Picture-in-Picture (WS_EX_TOPMOST | WS_EX_TOOLWINDOW) windows.
+//
+// Flake note: these tests read the primary output through DXGI desktop duplication and judge exact pixel colours
+// (FOCUS_RGB, PIP_RGB, the video's two clear colours). Any other window, toast or cursor over the sampled rects
+// breaks them, so they run serial (not in verify.ps1's parallel allowlist) and only under the desktop lock.
+// Duplication delivers no frame while nothing changes, so every check repaints/presents and counts frames before
+// it judges. The one recorded FAIL (verify 20261126-215337) was the intended negative control (PiP class not
+// named in PLANOR_HOLES), not a flake.
 
 use std::sync::{
     Arc, Mutex, OnceLock,
@@ -41,6 +48,53 @@ fn video_registry() -> &'static Mutex<std::collections::HashMap<isize, Arc<Video
     VIDEO_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
+/// The video window's own class. It must not be the sentinel class: `RegisterClassW` keeps whichever
+/// registration came first, so sharing it made the wndproc (and the sentinels' painting) depend on
+/// creation order. The `PlanorSentinel` prefix keeps the user's real daemon off it
+/// (`never_tiled_class`); the isolated test daemon tiles it through `tile_video_class`.
+fn video_class() -> String {
+    format!("PlanorSentinelVideo_p{}", std::process::id())
+}
+
+/// Add a tile rule for `video_class()` to the isolated daemon's config (before its catch-all ignore
+/// rule). Call before `Daemon::start`.
+fn tile_video_class(d: &Daemon) {
+    let path = d.dir.join("planor/planor.toml");
+    let cfg = fs::read_to_string(&path).unwrap();
+    let catch_all = "[[rules]]\nclass=\"*\"\naction=\"ignore\"\n";
+    assert!(cfg.contains(catch_all), "test config has no catch-all ignore rule");
+    let rule = format!("[[rules]]\nclass={:?}\naction=\"tile\"\n", video_class());
+    fs::write(&path, cfg.replacen(catch_all, &(rule + catch_all), 1)).unwrap();
+}
+
+/// Set an environment variable for the rest of the scope, removed again on drop (also when the test
+/// panics), so a failing test cannot leak it into the next one in the same process.
+struct EnvGuard(&'static str);
+impl EnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        // SAFETY: live tests run with --test-threads=1; nothing else reads the environment concurrently.
+        unsafe { std::env::set_var(key, value) };
+        Self(key)
+    }
+}
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        // SAFETY: as in `set`.
+        unsafe { std::env::remove_var(self.0) };
+    }
+}
+
+/// Join a test window's thread and re-raise a panic from it (a failed `CreateWindowExW`, D3D11 device or
+/// swapchain), unless the test is already unwinding.
+fn join_window_thread(join: Option<thread::JoinHandle<()>>) {
+    if let Some(j) = join
+        && let Err(payload) = j.join()
+        && !thread::panicking()
+    {
+        std::panic::resume_unwind(payload);
+    }
+}
+
 unsafe extern "system" fn video_wndproc(h: HWND, m: u32, w: usize, l: isize) -> isize {
     if m == WM_SIZE {
         let cw = (l & 0xFFFF) as u32;
@@ -48,6 +102,10 @@ unsafe extern "system" fn video_wndproc(h: HWND, m: u32, w: usize, l: isize) -> 
         if let Some(stats) = video_registry().lock().unwrap().get(&(h as isize)).cloned() {
             stats.wm_sizes.lock().unwrap().push((cw, ch));
         }
+    } else if m == WM_CLOSE {
+        // The render thread owns teardown: the swapchain must be released before its window is
+        // destroyed, so a close never runs DefWindowProc's DestroyWindow here.
+        return 0;
     } else if m == WM_DESTROY {
         video_registry().lock().unwrap().remove(&(h as isize));
         unsafe { PostQuitMessage(0) };
@@ -79,8 +137,7 @@ impl VideoWindow {
 
         let join = thread::spawn(move || unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-            // Uses the PID-scoped sentinel class so the isolated test daemon tiles this window.
-            let class_name = wide(&format!("PlanorSentinel_p{}", std::process::id()));
+            let class_name = wide(&video_class());
             let inst = GetModuleHandleW(null());
             RegisterClassW(&WNDCLASSW {
                 lpfnWndProc: Some(video_wndproc),
@@ -103,8 +160,6 @@ impl VideoWindow {
                 null(),
             );
             assert!(!hwnd.is_null(), "CreateWindowExW failed for VideoWindow");
-            // Override wndproc in case PlanorSentinel_p<pid> was already registered by Sentinel.
-            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, video_wndproc as *const () as isize);
             video_registry()
                 .lock()
                 .unwrap()
@@ -213,12 +268,23 @@ impl VideoWindow {
                 }
                 thread::sleep(Duration::from_millis(16));
             }
+            // Teardown in dependency order: unbind and flush the device context, release the render
+            // target and swapchain, then destroy the window they were bound to, then its class.
+            ctx.ClearState();
+            ctx.Flush();
             drop(rtv);
             drop(swapchain);
+            drop(ctx);
+            drop(device);
             let _ = DestroyWindow(hwnd);
+            UnregisterClassW(class_name.as_ptr(), inst);
         });
 
-        let hwnd = rx.recv().unwrap();
+        let Ok(hwnd) = rx.recv() else {
+            // The thread died before sending its window: surface its panic, not a RecvError.
+            join_window_thread(Some(join));
+            unreachable!("VideoWindow thread exited without a window or a panic");
+        };
         Self {
             hwnd,
             stats,
@@ -268,10 +334,9 @@ impl VideoWindow {
 impl Drop for VideoWindow {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
-        unsafe { PostMessageW(self.hwnd as _, WM_CLOSE, 0, 0) };
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
+        // Wake the render loop; it releases the swapchain and destroys the window itself.
+        unsafe { PostMessageW(self.hwnd as _, WM_NULL, 0, 0) };
+        join_window_thread(self.join.take());
     }
 }
 // ---- Pixel checks -------------------------------------------------------------------------------------------
@@ -426,7 +491,10 @@ impl PipWindow {
             UnregisterClassW(class_name.as_ptr(), inst);
             DeleteObject(brush as _);
         });
-        let hwnd = rx.recv().unwrap();
+        let Ok(hwnd) = rx.recv() else {
+            join_window_thread(Some(join));
+            unreachable!("PipWindow thread exited without a window or a panic");
+        };
         Self { hwnd, join: Some(join) }
     }
 
@@ -448,9 +516,7 @@ impl PipWindow {
 impl Drop for PipWindow {
     fn drop(&mut self) {
         unsafe { PostMessageW(self.hwnd as _, WM_CLOSE, 0, 0) };
-        if let Some(j) = self.join.take() {
-            let _ = j.join();
-        }
+        join_window_thread(self.join.take());
     }
 }
 
@@ -566,6 +632,7 @@ fn d3d11_flip_video_window_scroll_no_resize_or_cover() {
     let s4 = Sentinel::at(4, 0, 360, 120);
 
     let mut d = Daemon::new_animated("video-scroll");
+    tile_video_class(&d);
     d.start();
     assert!(wait_settled(&d, 5, Duration::from_secs(6)), "the five windows did not settle");
     let st = daemon_state(&d);
@@ -657,6 +724,7 @@ fn fullscreen_borderless_d3d11_video_window_scroll_preserves_frame() {
     let s2 = Sentinel::at(2, 0, 200, 120);
 
     let mut d = Daemon::new_animated("video-fs");
+    tile_video_class(&d);
     d.start();
     assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
     claim_fg(video.hwnd);
@@ -770,10 +838,11 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
     let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::at(i, 0, 40 + 80 * i as i32, 60)).collect();
     let mut d = Daemon::new_animated("video-pip");
     // Isolated daemons carve overlay holes only for the class a test names (they share the desktop with the
-    // developer's own windows); the real daemon carves them for every occluder.
-    // SAFETY: single-threaded test setup; the daemon child inherits the variable.
-    unsafe { std::env::set_var("PLANOR_HOLES", pip_class()) };
+    // developer's own windows); the real daemon carves them for every occluder. The daemon child inherits the
+    // variable at spawn; the guard removes it from this process again even if the test panics.
+    let holes = EnvGuard::set("PLANOR_HOLES", &pip_class());
     d.start();
+    drop(holes);
     assert!(wait_settled(&d, 3, Duration::from_secs(6)), "the three windows did not settle");
     claim_fg(ws[0].hwnd);
     assert!(wait_settled(&d, 3, Duration::from_secs(4)), "layout did not settle after focusing the first window");
@@ -909,5 +978,4 @@ fn pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll() {
         worst_cover.get() * 100.
     );
     d.stop();
-    unsafe { std::env::remove_var("PLANOR_HOLES") };
 }
