@@ -2,6 +2,20 @@
 
 All notable changes to Planor and its developer tooling harness are documented here.
 
+## [0.10.0] - 2026-11-26
+
+### Fixed
+- **Tile borders stay off the taskbar (#36)**: borders are clipped to the strip work area (the whole monitor for fullscreen tiles, the window's own frame for pinned ones), so nothing Planor draws can cover the taskbar.
+- **Drop point from the mouse hook (#67)**: a drag's drop point is the button-up position recorded by the low-level hook, not the cursor at the next tick, so movement between release and the first tick no longer changes where a window lands. A release from before the drag is ignored.
+- **Overlay holes refresh (#67)**: a move of an unmanaged window refreshes the overlay holes on the next tick instead of up to 200 ms later.
+- **GPU recovery (#67)**: capture pictures are rebuilt right after a device loss instead of waiting for the next scene.
+
+### Diagnostics
+- Trace lines for why a tile leaves the layout and what took focus, and a longer bundle trace tail (#56, window over the taskbar and everything disappearing on a taskbar click). The cause is not established, so the issue stays open.
+
+### Notes
+- #53 (unexplained resize) is not a bug: a second window opened and the app's own minimum width (1127) won the placement. See `docs/MILESTONE5_TASKBAR_ZORDER.md`.
+
 ## [0.9.1] - 2026-11-26
 
 ### Fixed
