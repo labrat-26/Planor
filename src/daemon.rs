@@ -3674,7 +3674,9 @@ pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec
             *id != dragged
                 && s.locate(*id).is_some_and(|(i, j)| Some(i) != own && s.columns[i].active == j)
         })
-        .filter_map(|(id, r)| clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side))))
+        .filter_map(|(id, r)| {
+            clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side, s.area.horizontal())))
+        })
         .collect()
 }
 /// #80: true when another monitor lies beyond this strip edge (`trailing` = right/bottom): a drag there is

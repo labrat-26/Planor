@@ -2315,8 +2315,8 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         let h = (r.y + r.h).min(1140) - y;
         Rect { x, y, w, h }
     };
-    let expected_left_zone = planor::stack_zone(clip_to_work(tile_rect(1376768)), 50);
-    let expected_right_zone = planor::stack_zone(clip_to_work(tile_rect(11339466)), 50);
+    let expected_left_zone = planor::stack_zone(clip_to_work(tile_rect(1376768)), 50, true);
+    let expected_right_zone = planor::stack_zone(clip_to_work(tile_rect(11339466)), 50, true);
     assert_eq!(tile_rect(1376768), Rect { x: -1455, y: 0, w: 1920, h: 1140 });
     assert_eq!(tile_rect(11339466), Rect { x: 471, y: 0, w: 1920, h: 1140 });
     assert_eq!(
@@ -6053,4 +6053,73 @@ fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
     let bounds: Vec<Rect> = rig.iter().map(|m| m.2).collect();
     let mon2_rays = planor::monitor_rays(bounds[2], &bounds, false);
     assert_eq!(mon2_rays.len(), 1, "MON2 only touches MON0, not MON1: {mon2_rays:?}");
+}
+
+#[test]
+fn merge_and_leave_zones_span_full_cross_axis_both_orientations() {
+    // (#103) Merge (stack) zones and leave (ungroup) edge zones span the full window height on
+    // landscape and full window width on portrait, and render + hit-test agree on the exact rect.
+    for (mon, ids, horizontal) in [("MON0", [101, 102, 103], true), ("MON2", [301, 302, 303], false)] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        make_group(&mut h, mon, &[ids[0], ids[1]]);
+        let key = (1, mon.to_string());
+        let dragged = ids[0];
+        let neighbour = ids[2];
+        // Start a mouse drag on `dragged` (grouped) and move it slightly so zones appear.
+        let orig = h.rect(dragged);
+        let target_rect = h.rect(neighbour);
+        let col_rect = crate::daemon::group_column_rect(&h.engine.strips[&key], dragged, 96);
+        let (lead_band, trail_band) =
+            crate::daemon::ungroup_bands(&h.engine.displays, mon, h.engine.strips[&key].area, col_rect);
+        let expected_merge = planor::stack_zone(target_rect, 50, horizontal);
+
+        if horizontal {
+            assert_eq!((expected_merge.y, expected_merge.h), (target_rect.y, target_rect.h), "landscape merge full height");
+            assert_eq!(expected_merge.w, target_rect.w / 2, "landscape merge middle half width");
+            for band in [lead_band, trail_band].into_iter().flatten() {
+                assert_eq!((band.y, band.h), (col_rect.y, col_rect.h), "landscape leave band full height");
+            }
+        } else {
+            assert_eq!((expected_merge.x, expected_merge.w), (target_rect.x, target_rect.w), "portrait merge full width");
+            assert_eq!(expected_merge.h, target_rect.h / 2, "portrait merge middle half height");
+            for band in [lead_band, trail_band].into_iter().flatten() {
+                assert_eq!((band.x, band.w), (col_rect.x, col_rect.w), "portrait leave band full width");
+            }
+        }
+
+        // Hover near the cross-axis extreme (5 px from top edge on landscape, 5 px from left edge on portrait)
+        // inside the middle 50% along the strip axis: must hit Stack!
+        let probe = if horizontal {
+            (expected_merge.x + expected_merge.w / 2, expected_merge.y + 5)
+        } else {
+            (expected_merge.x + 5, expected_merge.y + expected_merge.h / 2)
+        };
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, dragged));
+        {
+            let mut sim = h.desktop.0.lock().unwrap();
+            sim.cursor = probe;
+            sim.windows.get_mut(&dragged).unwrap().rect = Rect { x: orig.x + 20, y: orig.y + 20, ..orig };
+        }
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(
+            h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
+            Some((Some(neighbour), planor::Drag::Stack)),
+            "{mon}: cross-axis edge probe {probe:?} inside full-extent merge zone must hit Stack"
+        );
+        let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
+        assert!(
+            scene.zones.iter().any(|z| z.rect == expected_merge),
+            "{mon}: rendered zones {:?} must include full-extent merge zone {expected_merge:?}",
+            scene.zones.iter().map(|z| z.rect).collect::<Vec<_>>()
+        );
+        for band in [lead_band, trail_band].into_iter().flatten() {
+            assert!(
+                scene.zones.iter().any(|z| z.rect == band),
+                "{mon}: rendered zones must include full-extent leave zone {band:?}"
+            );
+        }
+        h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, dragged));
+        h.settle();
+    }
 }

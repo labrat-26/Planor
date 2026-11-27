@@ -522,14 +522,19 @@ pub enum Drag {
     /// Exchange places with the target.
     Swap,
 }
-/// The stack zone: a box in the middle of a window covering `percent` of its width and of its height (owner's
-/// choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger drops). Shown filled
-/// while a window is being dragged.
-pub fn stack_zone(r: Rect, percent: i32) -> Rect {
+/// The stack (merge) zone: spans the full cross-axis extent of the window (full height on
+/// landscape, full width on portrait, #103) and the middle `percent` along the strip axis
+/// (owner's choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger
+/// drops). Shown filled while a window is being dragged.
+pub fn stack_zone(r: Rect, percent: i32, horizontal: bool) -> Rect {
     let p = percent.clamp(5, 95);
-    let w = (r.w * p / 100).max(1);
-    let h = (r.h * p / 100).max(1);
-    Rect { x: r.x + (r.w - w) / 2, y: r.y + (r.h - h) / 2, w, h }
+    if horizontal {
+        let w = (r.w * p / 100).max(1);
+        Rect { x: r.x + (r.w - w) / 2, y: r.y, w, h: r.h }
+    } else {
+        let h = (r.h * p / 100).max(1);
+        Rect { x: r.x, y: r.y + (r.h - h) / 2, w: r.w, h }
+    }
 }
 /// What a drop does. Purely positional (no speed or dwell), so it never flickers:
 /// in the stack zone it groups; elsewhere over a window on the same monitor a lone window swaps places

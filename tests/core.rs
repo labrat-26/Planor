@@ -749,12 +749,19 @@ fn drop_zone_is_the_middle_half_of_the_window_owner_decision() {
     // after a 120 px box was hit by only 5 of 12 real four-finger drops, the owner chose "way bigger, like 50 %
     // of the window in the center". Everything else on a window swaps.
     let r = Rect { x: 100, y: 50, w: 1200, h: 900 };
-    assert_eq!(stack_zone(r, 50), Rect { x: 400, y: 275, w: 600, h: 450 });
-    let z = stack_zone(r, 50);
-    assert_eq!((z.x + z.w / 2, z.y + z.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "centred");
-    let quarter = (z.w * z.h) as f64 / (r.w * r.h) as f64;
-    assert!((quarter - 0.25).abs() < 0.01, "half the width and half the height: a quarter of the area");
-    assert_eq!(stack_zone(r, 500), stack_zone(r, 95), "never the whole window: there must be room to swap");
+    // #103: merge zones span full window height on landscape and full window width on portrait,
+    // keeping the middle 50 % along the strip axis (half of the area).
+    assert_eq!(stack_zone(r, 50, true), Rect { x: 400, y: 50, w: 600, h: 900 });
+    let zl = stack_zone(r, 50, true);
+    assert_eq!((zl.x + zl.w / 2, zl.y + zl.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "landscape centred");
+    assert_eq!((zl.y, zl.h), (r.y, r.h), "landscape spans full window height");
+    let half_l = (zl.w * zl.h) as f64 / (r.w * r.h) as f64;
+    assert!((half_l - 0.50).abs() < 0.01, "landscape: middle half width x full height = half area");
+    assert_eq!(stack_zone(r, 50, false), Rect { x: 100, y: 275, w: 1200, h: 450 });
+    let zp = stack_zone(r, 50, false);
+    assert_eq!((zp.x + zp.w / 2, zp.y + zp.h / 2), (r.x + r.w / 2, r.y + r.h / 2), "portrait centred");
+    assert_eq!((zp.x, zp.w), (r.x, r.w), "portrait spans full window width");
+    assert_eq!(stack_zone(r, 500, true), stack_zone(r, 95, true), "never the whole window: there must be room to swap");
 }#[test]
 fn replay_three_finger_scroll_pad_trace_matches_within_tolerance() {
     let raw = include_str!("fixtures/gestures/three_finger_scroll_right.pad.log");
