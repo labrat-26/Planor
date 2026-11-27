@@ -10680,3 +10680,305 @@ fn pad_perpendicular_swipe_commits_group_mode_and_reverse_reverts() {
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
 }
+
+/// The group key is the one chosen in settings: Ctrl and Alt work through the daemon, Shift does not
+/// activate it then (#113, #112 modifier cue).
+#[test]
+fn configured_group_modifier_ctrl_and_alt_activate_group_mode_and_shift_does_not() {
+    for (name, vk, other) in [("Ctrl", 0x11, 0x10), ("Alt", 0x12, 0x10)] {
+        let mut cfg = note_cfg();
+        cfg["layout"]["drag_stack_modifier"] = toml::Value::String(name.into());
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        focus(&mut h, 101);
+        let s = &h.engine.strips[&(1, "MON0".to_string())];
+        let rb = crate::daemon::clip(
+            s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+            s.area,
+        )
+        .unwrap();
+        mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+        h.engine.tick().unwrap();
+        assert!(matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ));
+        h.settle_quiet();
+        let cue = zones(&h).pop().expect("preview cue");
+        assert!(
+            matches!(cue.input, crate::cue::CueInput::Mouse { modifier } if modifier == name),
+            "{name}: cue shows the configured key: {:?}",
+            cue.input
+        );
+        h.desktop.0.lock().unwrap().keys_down.insert(other);
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddlePreview { .. })
+            ),
+            "{name}: the other modifier does nothing"
+        );
+        h.desktop.0.lock().unwrap().keys_down.insert(vk);
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ),
+            "{name}: configured key activates group mode"
+        );
+        h.desktop.0.lock().unwrap().keys_down.clear();
+        h.stop_clean();
+    }
+}
+
+/// A modifier already held when the dwell completes still shows the preview first (review #21): group
+/// mode needs a press seen after the preview started.
+#[test]
+fn modifier_held_before_the_dwell_still_previews_first() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&(1, "MON0".to_string())];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+    mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+    h.engine
+        .advance_drag_timers_for_test(Duration::from_millis(300));
+    h.engine.tick().unwrap();
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ),
+        "{:?}",
+        phase(&h)
+    );
+    h.engine.tick().unwrap();
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddleGroup { .. })
+    ));
+    h.desktop.0.lock().unwrap().keys_down.clear();
+    h.stop_clean();
+}
+
+/// Pulling a stack member toward the leading side exits to the leading side (#115, both directions).
+#[test]
+fn stack_exit_toward_the_leading_side_places_the_member_before_the_stack() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 102);
+    h.cmd(Command::Key {
+        name: "stack_toggle".into(),
+    });
+    h.settle();
+    let s = &h.engine.strips[&key];
+    let active = s.active().unwrap();
+    let col = s.locate(active).unwrap().0;
+    assert_eq!(s.columns[col].members.len(), 2);
+    let r = h.rect(active);
+    // Grab at the member's centre so a leftward pull stays on screen; pull 40% of the window width.
+    let start = (r.x + r.w / 2, r.y + 10);
+    let pull = -(r.w * 4 / 10);
+    mouse_hold(&mut h, active, start);
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&active).unwrap().rect.x += pull;
+        g.cursor = (start.0 + pull, start.1);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::StackExit { trailing: false })
+        ),
+        "pull left is a leading exit: {:?}",
+        phase(&h)
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, active);
+    let s = &h.engine.strips[&key];
+    let (i, _) = s.locate(active).expect("member still managed");
+    assert_eq!(s.columns[i].members.len(), 1, "left the stack");
+    let rest = s.columns.iter().position(|c| c.members.len() > 1);
+    if let Some(o) = rest {
+        assert!(
+            i < o,
+            "pulled left: the member sits before the remaining stack"
+        );
+    }
+    h.stop_clean();
+}
+
+/// Settings: the three new keys are listed, validated against their bounds and clamped when stepped.
+#[test]
+fn new_drag_settings_are_validated_with_documented_bounds() {
+    let int = toml::Value::Integer;
+    for (k, ok, bad) in [
+        ("drag_dwell_ms", 5000, 5001),
+        ("drag_vacancy_delay_ms", 10000, 10001),
+        ("drag_edge_scroll_percent", 40, 41),
+    ] {
+        assert!(crate::valid_value(k, &int(1), &int(0)), "{k}: 0 is valid");
+        assert!(crate::valid_value(k, &int(1), &int(ok)), "{k}: max valid");
+        assert!(!crate::valid_value(k, &int(1), &int(bad)), "{k}: over max");
+        assert!(!crate::valid_value(k, &int(1), &int(-1)), "{k}: negative");
+    }
+    let m = crate::settings_model::Model::from_text(std::path::Path::new("p.toml"), crate::EXAMPLE)
+        .unwrap();
+    for k in [
+        "drag_dwell_ms",
+        "drag_vacancy_delay_ms",
+        "drag_edge_scroll_percent",
+    ] {
+        assert!(
+            m.entries.iter().any(|e| e.key == k),
+            "{k} appears in the settings window"
+        );
+    }
+    // Removed keys never warn and never become entries.
+    assert!(crate::REMOVED_KEYS.contains(&"stack_zone_percent"));
+    assert!(!m.entries.iter().any(|e| e.key == "stack_zone_percent"));
+}
+
+/// A pad drag cancelled mid-preview restores everything at once: no session, no pad carry, no cue (#113/#114).
+#[test]
+fn pad_drag_cancel_during_preview_clears_session_cue_and_layout() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    let before: Vec<_> = h.engine.strips[&key]
+        .columns
+        .iter()
+        .map(|c| c.members.clone())
+        .collect();
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let mut x = 500.;
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { .. })
+    ));
+    // A fifth finger / lift mid-gesture is the recogniser's cancel.
+    h.engine.event(Event::Contacts(five(x, 500.)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert!(h.engine.drag.is_none() && h.engine.pad.is_none());
+    assert!(zones(&h).is_empty(), "no cue left behind");
+    let after: Vec<_> = h.engine.strips[&key]
+        .columns
+        .iter()
+        .map(|c| c.members.clone())
+        .collect();
+    assert_eq!(before, after, "layout untouched by a cancelled gesture");
+    h.stop_clean();
+}
+
+fn five(x: f64, y: f64) -> Vec<(f64, f64)> {
+    (0..5).map(|i| (x + 20. * i as f64, y)).collect()
+}
+
+/// A mouse drag whose window vanishes mid-gesture ends cleanly: no session, no cue, no stale vacancy (#113).
+#[test]
+fn closing_the_dragged_window_mid_preview_clears_the_gesture() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&(1, "MON0".to_string())];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+    h.desktop.0.lock().unwrap().windows.remove(&101);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(h.engine.drag.is_none(), "session ended with its window");
+    assert!(zones(&h).is_empty(), "no cue for a window that is gone");
+    h.desktop.0.lock().unwrap().keys_down.clear();
+    h.stop_clean();
+}
+
+/// Mouse group entry onto a neighbour of another monitor: the modifier groups there and the window
+/// transfers with it; without the modifier it tiles beside the target (#113 + monitor hopping).
+#[test]
+fn mouse_group_across_monitors_transfers_and_stacks_only_with_the_modifier() {
+    for with_modifier in [false, true] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        to_start(&mut h, "MON1");
+        focus(&mut h, 101);
+        let s = &h.engine.strips[&(1, "MON1".to_string())];
+        let rb = crate::daemon::clip(
+            s.rects(96).into_iter().find(|x| x.0 == 201).unwrap().1,
+            s.area,
+        )
+        .unwrap();
+        mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+        h.engine.tick().unwrap();
+        if with_modifier {
+            h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+            h.engine.tick().unwrap();
+        }
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+        drop_now(&mut h, 101);
+        h.desktop.0.lock().unwrap().keys_down.clear();
+        let s1 = &h.engine.strips[&(1, "MON1".to_string())];
+        let (i, _) = s1.locate(101).expect("transferred to MON1");
+        assert_eq!(
+            s1.columns[i].members.contains(&201),
+            with_modifier,
+            "modifier={with_modifier}"
+        );
+        assert!(
+            h.engine.strips[&(1, "MON0".to_string())]
+                .locate(101)
+                .is_none()
+        );
+        h.stop_clean();
+    }
+}
+
+/// Edge scroll must not be starved or doubled by a changed setting during a live drag (#116 live reload).
+#[test]
+fn edge_scroll_percent_changes_apply_to_the_running_drag() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    let off0 = h.engine.strips[&key].offset;
+    mouse_hold(&mut h, 103, (300, 600)); // 15.6%: outside the default 10%
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(h.engine.strips[&key].offset, off0);
+    h.engine.hot.drag_edge_scroll_percent = 20; // now inside
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert!(
+        h.engine.strips[&key].offset < off0,
+        "the larger zone applies at once"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}

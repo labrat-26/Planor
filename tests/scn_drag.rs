@@ -728,7 +728,15 @@ fn drag_out_of_stack() {
     });
     // #115: pull the active member sideways by more than 1/4 of the neighbour span: it leaves the stack.
     let r = vis(&ws[active]);
-    let pull = ((r[2] - r[0]) * 2 / 5).max(1);
+    // Threshold is 1/4 of the neighbour's visible span: pull 60% of the widest visible window (never marginal).
+    let widest = (0..3)
+        .map(|i| {
+            let v = vis(&ws[i]);
+            v[2] - v[0]
+        })
+        .max()
+        .unwrap_or(r[2] - r[0]);
+    let pull = (widest * 3 / 5).max(1);
     let to = (from.0 + pull, from.1);
     assert!(
         on_any_monitor(to),
