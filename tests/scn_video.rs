@@ -254,9 +254,13 @@ impl VideoWindow {
                     }
                 }
                 if let Some(ref view) = rtv {
-                    // Two alternating colours, so every present changes the screen and the test can find
-                    // the video's pixels (`is_video_px`): RGB (217, 64, 89) and (89, 64, 217).
-                    let color = if frame_idx % 2 == 0 { [0.85, 0.25, 0.35, 1.0] } else { [0.35, 0.25, 0.85, 1.0] };
+                    // A steady red, so the window does not strobe on screen. Its red channel drifts 205..225
+                    // and back over about 0.6 s, a change too small to see. That keeps every present changing
+                    // the pixels (desktop duplication delivers no frame for an unchanged screen), and the test
+                    // still finds the video's pixels with `is_video_px`: RGB (205..=225, 64, 89).
+                    let t = frame_idx % 40;
+                    let red = 205 + if t < 20 { t } else { 40 - t };
+                    let color = [red as f32 / 255.0, 64.0 / 255.0, 89.0 / 255.0, 1.0];
                     ctx.ClearRenderTargetView(view, &color);
                     let hr = swapchain.Present(0, DXGI_PRESENT(0));
                     if hr.is_ok() {
@@ -346,7 +350,8 @@ const FOCUS_RGB: u32 = 0x003b82f6;
 /// The PiP window's colour on screen (0x00RRGGBB); its brush is the COLORREF 0x0034AB12.
 const PIP_RGB: u32 = 0x0012ab34;
 
-/// The video window clears to RGB (217, 64, 89) and (89, 64, 217) on alternate frames (see `VideoWindow`).
+/// The video window clears to a steady RGB (205..=225, 64, 89) (see `VideoWindow`); the range below also takes
+/// small colour-conversion error.
 fn is_video_px(px: u32) -> bool {
     let (r, g, b) = ((px >> 16) & 0xff, (px >> 8) & 0xff, px & 0xff);
     (54..=74).contains(&g) && r.max(b) >= 200 && (70..=110).contains(&r.min(b))
