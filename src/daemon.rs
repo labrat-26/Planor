@@ -3318,10 +3318,6 @@ impl<B: WindowBackend> Engine<B> {
         let prev_point = d.point;
         let point_moved = p != d.point;
         d.point = p;
-        if point_moved && d.moved && !d.resizing {
-            // The overlay hole over the dragged window must follow it between scenes (it went behind passing tiles).
-            self.dirty = true;
-        }
 
         // #111: four-finger pad drags stay bound to their starting monitor (only fling transfers).
         // Mouse drags resolve the monitor currently under the cursor; disconnected gaps yield None.
