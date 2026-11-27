@@ -703,8 +703,12 @@ impl Surface {
                         }),
                     )
                 }
-                let dark = crate::theme::system_is_dark();
-                let icon_color = crate::theme::zone_icon_color(dark);
+                // The theme is a registry read: only while drop zones are drawn, not on every frame.
+                let icon_color = if fills.is_empty() {
+                    0
+                } else {
+                    crate::theme::zone_icon_color(crate::theme::system_is_dark())
+                };
                 let pt = |px: f32, py: f32| {
                     let mut p = D2D1_ELLIPSE::default().point;
                     p.X = px;
