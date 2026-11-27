@@ -947,6 +947,48 @@ fn a_swipe_that_hops_monitors_still_ends_with_a_non_live_scene() {
     h.stop_clean();
 }
 
+/// #108 re-review N1: an ordinary slow lift queues a settle, and that settle sends the gesture's final scene.
+/// The lift must not send an extra non-live scene first: it would put the real windows at the mid-scroll
+/// position (`live` off, the scene finished) only for the snap to move them again a moment later.
+#[test]
+fn an_ordinary_slow_lift_sends_no_scene_before_its_settle() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    assert_eq!(h.engine.active, "MON0");
+    // Move along the strip, then rest the fingers long enough that no recent motion is left (no fling).
+    let mut x = 900.0;
+    for _ in 0..12 {
+        x -= 15.0;
+        h.engine.event(Event::Contacts(vec![(x, 300.0); 3]));
+        h.settle();
+    }
+    thread::sleep(Duration::from_millis(130));
+    for _ in 0..3 {
+        h.engine.event(Event::Contacts(vec![(x, 300.0); 3]));
+        h.settle();
+    }
+    let before_lift = h.desktop.0.lock().unwrap().scenes.len();
+    assert!(h.desktop.0.lock().unwrap().scenes.last().unwrap().live, "the resting gesture is live");
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    h.tick_now();
+    h.settle();
+    assert!(h.engine.settle.is_some() && h.engine.inertia.is_none(), "a slow lift queues a settle, no momentum");
+    {
+        let g = h.desktop.0.lock().unwrap();
+        let extra: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.epoch, s.action.clone(), s.live)).collect();
+        assert!(extra.is_empty(), "no scene between the lift and its settle, got {extra:?}");
+    }
+    settle_now(&mut h);
+    h.settle();
+    let g = h.desktop.0.lock().unwrap();
+    let after: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.action.clone(), s.live)).collect();
+    assert!(!after.is_empty() && after.iter().all(|s| !s.1), "the settle ends the gesture non-live: {after:?}");
+    drop(g);
+    assert!(!h.engine.last_scene_live, "the renderer left the live state");
+    h.stop_clean();
+}
+
 #[test]
 fn n023_win_wheel_scrolls_the_strip_under_the_cursor_on_both_orientations() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);

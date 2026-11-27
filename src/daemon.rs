@@ -1537,8 +1537,11 @@ impl<B: WindowBackend> Engine<B> {
     }
     pub(crate) fn layout(&mut self) -> Result<()> {
         // Safety net for #108 L1 (the daemon loop calls `layout` every pass): any other way out of a live gesture
-        // that sends no scene (momentum cancelled by a focus change, a blocked desktop) still ends it.
-        if self.last_scene_live && !self.pad_scrolling && self.inertia.is_none() {
+        // that sends no scene (momentum cancelled by a focus change, a settle that returned early, a blocked
+        // desktop) still ends it. Not while a settle is queued: that settle sends the final scene itself, and a
+        // non-live scene before it would put the real windows at the mid-scroll position only to move them
+        // again at the snap (#108 re-review N1).
+        if self.last_scene_live && !self.pad_scrolling && self.inertia.is_none() && self.settle.is_none() {
             self.dirty = true;
         }
         if self.blocked() || !self.dirty {
@@ -1767,12 +1770,14 @@ impl<B: WindowBackend> Engine<B> {
         // A holes/colour-only refresh with unchanged tile geometry must NEVER supersede an active
         // animation or open/close handoff with a new scene epoch; patch holes and tile colours
         // directly on the renderer instead.
-        // Never right after a live scene: an `OverlayUpdate` patches the renderer's settled scene in place and
-        // keeps its `live` flag, so the live stand-in polling would never end (#108 review L1).
+        // Never right after a live scene with nothing pending: an `OverlayUpdate` patches the renderer's settled
+        // scene in place and keeps its `live` flag, so the live stand-in polling would never end (#108 review
+        // L1). While a settle is queued it is fine (and avoids a mid-scroll placement pass, N1): the settle
+        // sends the final non-live scene.
         let overlay_only = action == "idle"
             && !force_place
             && !live
-            && !self.last_scene_live
+            && !(self.last_scene_live && self.settle.is_none())
             && zones.is_empty()
             && !had_zones
             && !self.instant
@@ -2357,14 +2362,15 @@ impl<B: WindowBackend> Engine<B> {
         if !std::mem::take(&mut self.pad_scrolling) {
             return;
         }
-        // The lift itself must reach the renderer as a non-live scene even when it changes no layout (a
-        // swipe that hopped monitors ignores the rest of the gesture), or live stand-ins poll forever (#108 L1).
-        if self.last_scene_live {
-            self.dirty = true;
-        }
         self.scroll_frac = 0.;
         let scroll_dpi = self.scroll_dpi.take();
         if self.hopped {
+            // A swipe that hopped monitors ignores the rest of the gesture and queues no settle or momentum, so
+            // the lift itself must reach the renderer as a non-live scene even though it changes no layout, or
+            // live stand-ins poll forever (#108 L1). Every other lift ends with its settle or momentum scene.
+            if self.last_scene_live {
+                self.dirty = true;
+            }
             self.scroll_samples.clear();
             self.clear_scroll_state();
             return;
