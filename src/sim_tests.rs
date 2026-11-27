@@ -3141,6 +3141,13 @@ fn tile_color(h: &SimHarness, id: isize) -> Option<u32> {
         .and_then(|s| s.tile_colors.iter().find(|(tid, _)| *tid == id).and_then(|(_, c)| *c))
 }
 
+/// The border colour `planor state --json` reports for tile `id` (#107 parity with the drawn border).
+fn state_color(h: &SimHarness, id: isize) -> Option<u32> {
+    let snap = h.state();
+    let tile = snap["tiles"].as_array()?.iter().find(|t| t["id"].as_i64() == Some(id as i64))?;
+    tile["color"].as_str().and_then(|c| u32::from_str_radix(c.trim_start_matches('#'), 16).ok())
+}
+
 #[test]
 fn issue_48_focus_highlight_removed_when_focus_on_unmanaged_app_dialog_or_system_ui() {
     let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
@@ -3398,6 +3405,8 @@ fn issue_107_group_border_only_while_group_is_focused() {
         focus(&mut h, elsewhere);
         assert_eq!(tile_color(&h, active), None, "{mon}: group border hidden while {elsewhere} is focused");
         assert_eq!(tile_color(&h, elsewhere), Some(FOCUS), "{mon}: ungrouped focused window keeps its focus border");
+        assert_eq!(state_color(&h, active), None, "{mon}: state --json agrees: no group border");
+        assert_eq!(state_color(&h, elsewhere), Some(FOCUS), "{mon}: state --json agrees: focus border");
 
         // Focus on an unmanaged window: hidden.
         focus(&mut h, 901);
@@ -3411,10 +3420,13 @@ fn issue_107_group_border_only_while_group_is_focused() {
         h.engine.tick().unwrap();
         h.settle_quiet();
         assert_eq!(tile_color(&h, active), Some(GROUP), "{mon}: one NULL-foreground tick keeps the border");
+        // state --json uses the same debounced foreground: a raw read would see NULL and drop the border.
+        assert_eq!(state_color(&h, active), Some(GROUP), "{mon}: state --json keeps the border over one NULL tick");
         h.engine.expire_timers_for_test();
         h.engine.tick().unwrap();
         h.settle_quiet();
         assert_eq!(tile_color(&h, active), None, "{mon}: two NULL-foreground ticks hide the group border");
+        assert_eq!(state_color(&h, active), None, "{mon}: state --json drops the border after two NULL ticks");
 
         // Rolling between members keeps the border on the new active member.
         focus(&mut h, active);
