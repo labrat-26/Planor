@@ -258,17 +258,33 @@ impl Source {
                 }
             }
             let Some(frame) = newest else { return Ok(false) };
+            // The pool's buffers keep the size the pool was created with: after the window resizes, the
+            // frame texture still matches the picture while only `ContentSize` tells the content changed,
+            // so comparing textures alone would copy a cropped picture or one with a blank band (#108
+            // review M1). Resize the pool like `update` and keep the current picture until the settled
+            // path stores a frame of the new size.
+            let content = frame.ContentSize()?;
             let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
             let tex: ID3D11Texture2D = access.GetInterface()?;
             let (mut got, mut have) = (D3D11_TEXTURE2D_DESC::default(), D3D11_TEXTURE2D_DESC::default());
             tex.GetDesc(&mut got);
             copy.GetDesc(&mut have);
-            let same = got.Width == have.Width && got.Height == have.Height && got.Format == have.Format;
-            if same {
+            let action = live_frame_action(
+                (content.Width, content.Height),
+                (self.size.Width, self.size.Height),
+                (got.Width, got.Height),
+                (have.Width, have.Height),
+                got.Format == have.Format,
+            );
+            if action == LiveFrame::Copy {
                 surface.gpu.GetImmediateContext()?.CopyResource(copy, &tex);
             }
             frame.Close()?;
-            Ok(same)
+            if action == LiveFrame::Resize {
+                self.pool.Recreate(&self.winrt, DirectXPixelFormat::B8G8R8A8UIntNormalized, 2, content)?;
+                self.size = content;
+            }
+            Ok(action == LiveFrame::Copy)
         }
     }
     unsafe fn store(&mut self, surface: &Surface, frame: Direct3D11CaptureFrame) -> windows::core::Result<()> {
@@ -1406,6 +1422,31 @@ pub(crate) fn choose_proxy_backing(
     Some((src_r, dst_r))
 }
 
+/// What a live stand-in does with a newly captured frame (see `Source::update_live`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LiveFrame {
+    /// Same content size as the pool and the picture: copy it into the picture in place.
+    Copy,
+    /// The window's content changed size: resize the pool and keep the current picture.
+    Resize,
+    /// Nothing usable (an empty content size, or a frame that does not match the picture yet).
+    Skip,
+}
+/// Decide from sizes alone, so the resize-mid-motion case is unit tested without a GPU: `content` is the
+/// frame's `ContentSize`, `pool` the size the frame pool was created with, `frame_tex` and `picture`
+/// the frame texture and the stand-in picture's texture.
+pub(crate) fn live_frame_action(
+    content: (i32, i32),
+    pool: (i32, i32),
+    frame_tex: (u32, u32),
+    picture: (u32, u32),
+    same_format: bool,
+) -> LiveFrame {
+    if content != pool {
+        return if content.0 > 0 && content.1 > 0 { LiveFrame::Resize } else { LiveFrame::Skip };
+    }
+    if frame_tex == picture && same_format { LiveFrame::Copy } else { LiveFrame::Skip }
+}
 /// True when a cached WGC capture bitmap should be dropped as stale.
 /// While `in_motion` (`moving || open_handoff`), the stand-in `rs` keeps the window's original
 /// size while the real OS window may already have been resized at `park`: judge the capture
@@ -2673,10 +2714,8 @@ impl RenderState {
                             // and any size change still go through `update`.
                             let live_result = if source.bitmap.is_some() {
                                 source.update_live(surface).map(|_| ())
-                            } else if source.bitmap.is_none() {
-                                source.update(surface, 0)
                             } else {
-                                Ok(())
+                                source.update(surface, 0)
                             };
                             if let Err(e) = live_result {
                                 if is_device_lost_hr(e.code().0)
@@ -3394,8 +3433,11 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             crate::perf::heartbeat_render();
             state.poll_background_work();
             // 1 ms scheduler resolution while an animated scene is in flight: placement retries sleep
-            // 2-8 ms, which the default ~15.6 ms granularity would round up into visible hitches.
-            if state.scene.is_some() {
+            // 2-8 ms, which the default ~15.6 ms granularity would round up into visible hitches. Held for
+            // the whole live gesture too (fingers resting between scenes): every live redraw sets `scene`,
+            // so keying it on `scene` alone toggled timeBeginPeriod/timeEndPeriod at the refresh rate and
+            // left the sub-period `recv_timeout` below at the coarse default granularity (#108 review M2).
+            if state.scene.is_some() || state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
                 if hi_res.is_none() {
                     hi_res = Some(win32::HighResTimer::acquire());
                 }
@@ -3574,6 +3616,26 @@ mod tests {
         assert_eq!(wgc_src, Rect { x: 0, y: 0, w: 1280, h: 1364 });
         assert_eq!(dwm_src, Rect { x: 8, y: 0, w: 1280, h: 1364 });
         assert_eq!(wgc_dst, dwm_dst);
+    }
+
+    /// #108 review M1: a window resized while its stand-in is live. WGC frames keep the pool's buffer size,
+    /// so the frame texture still matches the picture; only `ContentSize` shows the change. The live path
+    /// must resize the pool and keep the old picture instead of copying a cropped or banded one.
+    #[test]
+    fn live_frame_resizes_the_pool_instead_of_copying_when_content_size_changes() {
+        use super::{LiveFrame, live_frame_action};
+        // Unchanged window: copy in place.
+        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), true), LiveFrame::Copy);
+        // Resized mid-gesture, larger or smaller: textures still equal, content differs -> resize, no copy.
+        assert_eq!(live_frame_action((1000, 700), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
+        assert_eq!(live_frame_action((640, 480), (800, 600), (800, 600), (800, 600), true), LiveFrame::Resize);
+        // Minimised / zero-size content: nothing to copy, nothing to recreate.
+        assert_eq!(live_frame_action((0, 0), (800, 600), (800, 600), (800, 600), true), LiveFrame::Skip);
+        // After the pool resize, frames of the new size do not match the old picture: skip until the settled
+        // path stores a picture of the new size (never copy mismatched textures).
+        assert_eq!(live_frame_action((1000, 700), (1000, 700), (1000, 700), (800, 600), true), LiveFrame::Skip);
+        // Format mismatch: skip.
+        assert_eq!(live_frame_action((800, 600), (800, 600), (800, 600), (800, 600), false), LiveFrame::Skip);
     }
 
     #[test]

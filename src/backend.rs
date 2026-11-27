@@ -429,6 +429,8 @@ pub(crate) mod sim {
         pub zoomed: bool,
         pub cloaked: bool,
         pub topmost: bool,
+        /// `WS_EX_TRANSPARENT`: a click-through overlay (game or recording HUD) the overlay may paint over.
+        pub transparent: bool,
         pub toolwindow: bool,
         pub noactivate: bool,
         pub thickframe: bool,
@@ -458,6 +460,7 @@ pub(crate) mod sim {
                 zoomed: false,
                 cloaked: false,
                 topmost: false,
+                transparent: false,
                 toolwindow: false,
                 noactivate: false,
                 thickframe: true,
@@ -477,6 +480,8 @@ pub(crate) mod sim {
         pub tiles_len: usize,
         pub tiles: Vec<(isize, Rect)>,
         pub action: &'static str,
+        /// The scene was live (fingers on the pad or momentum): the renderer keeps polling live stand-ins.
+        pub live: bool,
         pub holes: Vec<Rect>,
         pub zones: Vec<render::Zone>,
         pub zone_icons: Vec<render::ZoneIcon>,
@@ -616,6 +621,7 @@ pub(crate) mod sim {
                 tiles_len: scene.tiles.len(),
                 tiles: scene.tiles.iter().map(|t| (t.id, t.rect)).collect(),
                 action: scene.action,
+                live: scene.live,
                 holes: scene.holes.to_vec(),
                 zones: scene.zones.clone(),
                 zone_icons: {
@@ -843,7 +849,13 @@ pub(crate) mod sim {
             });
             win32::is_overlay_occluder_class(&w.class)
                 || (w.topmost
-                    && win32::topmost_overlay_occluder(&w.class, WS_EX_TOPMOST, fills_monitor))
+                    && win32::topmost_overlay_occluder(
+                        &w.class,
+                        // The real extended style, as `win32::overlay_occluder` reads it, so the click-through
+                        // and tooltip exclusions are covered end to end (#108 review L4).
+                        WS_EX_TOPMOST | if w.transparent { WS_EX_TRANSPARENT } else { 0 },
+                        fills_monitor,
+                    ))
         }
 
         fn class_of(&self, id: isize) -> String {

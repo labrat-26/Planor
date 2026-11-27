@@ -361,6 +361,10 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub backend: B,
     pub pad: Option<PadDrag>,
     pub pad_scrolling: bool,
+    /// The last scene sent to the renderer was live (fingers on the pad or momentum). Once neither holds, a
+    /// final non-live scene must follow, or the renderer keeps polling live stand-ins every refresh period
+    /// (#108 review L1: a swipe that hopped monitors ends without any layout change).
+    pub last_scene_live: bool,
     /// When set, a finished touchpad scroll settles (reveal + focus) at this time unless scrolling resumes.
     pub settle: Option<Instant>,
     pub scroll_frac: f64,
@@ -448,6 +452,7 @@ impl<B: WindowBackend> Engine<B> {
             backend,
             pad: None,
             pad_scrolling: false,
+            last_scene_live: false,
             settle: None,
             scroll_frac: 0.,
             renderer,
@@ -1531,6 +1536,11 @@ impl<B: WindowBackend> Engine<B> {
         }
     }
     pub(crate) fn layout(&mut self) -> Result<()> {
+        // Safety net for #108 L1 (the daemon loop calls `layout` every pass): any other way out of a live gesture
+        // that sends no scene (momentum cancelled by a focus change, a blocked desktop) still ends it.
+        if self.last_scene_live && !self.pad_scrolling && self.inertia.is_none() {
+            self.dirty = true;
+        }
         if self.blocked() || !self.dirty {
             return Ok(());
         }
@@ -1757,9 +1767,12 @@ impl<B: WindowBackend> Engine<B> {
         // A holes/colour-only refresh with unchanged tile geometry must NEVER supersede an active
         // animation or open/close handoff with a new scene epoch; patch holes and tile colours
         // directly on the renderer instead.
+        // Never right after a live scene: an `OverlayUpdate` patches the renderer's settled scene in place and
+        // keeps its `live` flag, so the live stand-in polling would never end (#108 review L1).
         let overlay_only = action == "idle"
             && !force_place
             && !live
+            && !self.last_scene_live
             && zones.is_empty()
             && !had_zones
             && !self.instant
@@ -1852,6 +1865,7 @@ impl<B: WindowBackend> Engine<B> {
             live,
             force_place,
         }))?;
+        self.last_scene_live = live;
         if self.diag.enabled {
             diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, self.last_holes.len()));
         }
@@ -2342,6 +2356,11 @@ impl<B: WindowBackend> Engine<B> {
     fn pad_scroll_end(&mut self) {
         if !std::mem::take(&mut self.pad_scrolling) {
             return;
+        }
+        // The lift itself must reach the renderer as a non-live scene even when it changes no layout (a
+        // swipe that hopped monitors ignores the rest of the gesture), or live stand-ins poll forever (#108 L1).
+        if self.last_scene_live {
+            self.dirty = true;
         }
         self.scroll_frac = 0.;
         let scroll_dpi = self.scroll_dpi.take();
@@ -3828,6 +3847,7 @@ pub fn run() -> Result<()> {
         backend,
         pad: None,
         pad_scrolling: false,
+        last_scene_live: false,
         settle: None,
         scroll_frac: 0.,
         renderer: render::start(),

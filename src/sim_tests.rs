@@ -919,6 +919,34 @@ fn n011_cross_axis_swipe_hops_monitors_both_ways_once_per_gesture() {
     h.stop_clean();
 }
 
+/// #108 review L1: a swipe that hops monitors ignores the rest of the gesture, so lifting changes no layout.
+/// The renderer must still get a final non-live scene, or it keeps polling every live stand-in at the
+/// refresh rate forever (CPU and GPU spent on an idle desktop).
+#[test]
+fn a_swipe_that_hops_monitors_still_ends_with_a_non_live_scene() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 301);
+    assert_eq!(h.engine.active, "MON2");
+    let first = h.desktop.0.lock().unwrap().scenes.len();
+    // Long sideways swipe on the portrait monitor: hops to MON0 once, the rest is ignored, then lift.
+    swipe(&mut h, 3, (900., 200.), (0., 200.), 40);
+    settle_now(&mut h);
+    h.settle();
+    assert_eq!(h.engine.active, "MON0", "the swipe hopped");
+    let g = h.desktop.0.lock().unwrap();
+    let scenes = &g.scenes[first..];
+    assert!(scenes.iter().any(|s| s.live), "the gesture sent live scenes: {}", scenes.len());
+    let last = scenes.last().unwrap();
+    assert!(
+        !last.live,
+        "after the lift the last scene must be non-live (epoch {}, action {}), or live stand-ins poll forever",
+        last.epoch, last.action
+    );
+    drop(g);
+    assert!(!h.engine.last_scene_live, "the engine knows the renderer left the live state");
+    h.stop_clean();
+}
+
 #[test]
 fn n023_win_wheel_scrolls_the_strip_under_the_cursor_on_both_orientations() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
@@ -3370,6 +3398,51 @@ fn issue_106_pip_topmost_window_punches_hole_is_not_tiled_and_scroll_still_works
     h.stop_clean();
 }
 
+/// #108 review L4: the simulated backend now passes the window's real extended style to
+/// `topmost_overlay_occluder`, so the exclusions are covered end to end through the daemon: a click-through
+/// (`WS_EX_TRANSPARENT`) topmost HUD and a topmost tooltip never punch overlay holes, while a PiP window does.
+#[test]
+fn topmost_click_through_hud_and_tooltip_never_punch_holes_but_pip_does() {
+    let pip_rect = Rect { x: 1500, y: 800, w: 400, h: 225 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        for (i, id) in [101, 102, 103].into_iter().enumerate() {
+            sim.add_window(SimWindow::new(id, Rect { x: 100 + 300 * i as i32, y: 100, w: 800, h: 700 }));
+        }
+        let mut hud = SimWindow::new(940, Rect { x: 40, y: 40, w: 600, h: 300 });
+        hud.class = "GameOverlayHud".into();
+        hud.topmost = true;
+        hud.toolwindow = true;
+        hud.transparent = true;
+        sim.add_window(hud);
+        let mut tip = SimWindow::new(941, Rect { x: 700, y: 500, w: 240, h: 60 });
+        tip.class = "tooltips_class32".into();
+        tip.topmost = true;
+        tip.toolwindow = true;
+        sim.add_window(tip);
+        let mut pip = SimWindow::new(930, pip_rect);
+        pip.class = "Chrome_WidgetWin_1".into();
+        pip.topmost = true;
+        pip.toolwindow = true;
+        sim.add_window(pip);
+        sim.foreground = 103;
+    });
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert_eq!(holes, vec![pip_rect], "only the PiP punches a hole: not the click-through HUD, not the tooltip");
+    // The same HUD without WS_EX_TRANSPARENT is an interactive always-on-top window: it must punch a hole.
+    h.desktop.0.lock().unwrap().windows.get_mut(&940).unwrap().transparent = false;
+    h.engine.holes_stale = true;
+    h.engine.dirty = true;
+    h.settle_quiet();
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert!(
+        holes.contains(&Rect { x: 40, y: 40, w: 600, h: 300 }),
+        "without WS_EX_TRANSPARENT the HUD is an occluder: {holes:?}"
+    );
+    h.stop_clean();
+}
 /// #107: a group's border shows only while the group holds the focus. Focus on another monitor, on an unmanaged
 /// window, or on nothing (after the 2-tick NULL debounce) hides it; focus back on a member shows it again; rolling
 /// between members keeps it. A focused ungrouped window keeps its normal focus border. Landscape and portrait.
