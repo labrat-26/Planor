@@ -3363,6 +3363,75 @@ fn issue_106_pip_topmost_window_punches_hole_is_not_tiled_and_scroll_still_works
     h.stop_clean();
 }
 
+/// #107: a group's border shows only while the group holds the focus. Focus on another monitor, on an unmanaged
+/// window, or on nothing (after the 2-tick NULL debounce) hides it; focus back on a member shows it again; rolling
+/// between members keeps it. A focused ungrouped window keeps its normal focus border. Landscape and portrait.
+#[test]
+fn issue_107_group_border_only_while_group_is_focused() {
+    const GROUP: u32 = 0xA855F7;
+    const FOCUS: u32 = 0x3B82F6;
+    let mut h = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
+        three_per_monitor(sim);
+        let mut tm = SimWindow::new(901, Rect { x: 200, y: 200, w: 600, h: 500 });
+        tm.class = "TaskManagerWindow".into();
+        tm.elevated = true;
+        sim.add_window(tm);
+    });
+    let focus = |h: &mut SimHarness, id: isize| {
+        h.desktop.0.lock().unwrap().foreground = id;
+        h.engine.event(Event::Window(EVENT_SYSTEM_FOREGROUND, id));
+        h.settle_quiet();
+    };
+    // (monitor, first member, other monitor's window) for landscape MON0 and portrait MON2.
+    for (mon, first, elsewhere) in [("MON0", 101isize, 201isize), ("MON2", 301, 101)] {
+        focus(&mut h, first);
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+        let key = h.engine.strips.keys().find(|k| k.1 == mon).cloned().unwrap();
+        let col = h.engine.strips[&key].columns.iter().find(|c| c.members.len() > 1).cloned();
+        let col = col.unwrap_or_else(|| panic!("{mon}: stack_toggle made no group"));
+        let active = col.members[col.active];
+        focus(&mut h, active);
+        assert_eq!(tile_color(&h, active), Some(GROUP), "{mon}: focused group shows its border");
+
+        // Focus on another monitor: no group border; that window has its normal focus border.
+        focus(&mut h, elsewhere);
+        assert_eq!(tile_color(&h, active), None, "{mon}: group border hidden while {elsewhere} is focused");
+        assert_eq!(tile_color(&h, elsewhere), Some(FOCUS), "{mon}: ungrouped focused window keeps its focus border");
+
+        // Focus on an unmanaged window: hidden.
+        focus(&mut h, 901);
+        assert_eq!(tile_color(&h, active), None, "{mon}: group border hidden while an unmanaged window is focused");
+
+        // Back in the group, then NULL foreground: kept for one tick (debounce), hidden after two.
+        focus(&mut h, active);
+        assert_eq!(tile_color(&h, active), Some(GROUP), "{mon}: group border back when the group is focused");
+        h.desktop.0.lock().unwrap().foreground = 0;
+        h.engine.expire_timers_for_test();
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(tile_color(&h, active), Some(GROUP), "{mon}: one NULL-foreground tick keeps the border");
+        h.engine.expire_timers_for_test();
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(tile_color(&h, active), None, "{mon}: two NULL-foreground ticks hide the group border");
+
+        // Rolling between members keeps the border on the new active member.
+        focus(&mut h, active);
+        let roll = if h.engine.strips[&key].area.horizontal() { "focus_down" } else { "focus_right" };
+        h.cmd(Command::Key { name: roll.into() });
+        h.settle();
+        let c = h.engine.strips[&key].columns.iter().find(|c| c.members.contains(&active)).unwrap().clone();
+        let now = c.members[c.active];
+        assert_ne!(now, active, "{mon}: {roll} rolled the group");
+        assert_eq!(h.desktop.foreground(), now, "{mon}: the roll focused the new member");
+        assert_eq!(tile_color(&h, now), Some(GROUP), "{mon}: border follows the roll");
+        h.cmd(Command::Key { name: "stack_toggle".into() });
+        h.settle();
+    }
+    h.stop_clean();
+}
+
 #[test]
 fn issue_17_edge_resize_does_not_show_green_drop_target_border_or_zones() {
     let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {

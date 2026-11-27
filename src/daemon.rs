@@ -984,7 +984,10 @@ impl<B: WindowBackend> Engine<B> {
                 let focused_id = self.managed_foreground_id(foreground);
                 let color = if fullscreen {
                     None
-                } else if strip.columns[ci].members.len() > 1 && !preview {
+                } else if strip.columns[ci].members.len() > 1
+                    && !preview
+                    && focused_id.is_some_and(|f| strip.columns[ci].members.contains(&f))
+                {
                     self.cfg["borders"]["stacked_color"].as_str()
                 } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                     self.cfg["borders"]["focused_color"].as_str()
@@ -1669,7 +1672,10 @@ impl<B: WindowBackend> Engine<B> {
                         hot.group_hover_color
                     } else if strip.columns[i].members.len() > 1
                         && strip.columns[i].members[strip.columns[i].active] == id
+                        && focused_id.is_some_and(|f| strip.columns[i].members.contains(&f))
                     {
+                        // #107: a group's border shows only while the group holds the focus. Any member
+                        // counts, so a roll that moves `active` before the foreground follows keeps it.
                         hot.stacked_color
                     } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
                         hot.focused_color
