@@ -40,6 +40,11 @@ fn centre(r: [i32; 4]) -> (i32, i32) {
 fn inside(p: (i32, i32), r: &RECT) -> bool {
     p.0 >= r.left && p.0 < r.right && p.1 >= r.top && p.1 < r.bottom
 }
+/// What `w` answers to WM_NCHITTEST at screen point `p` (HTLEFT, HTCLIENT, ...): which part of it a press grabs.
+fn nc_hit(w: &Sentinel, p: (i32, i32)) -> isize {
+    let l = (((p.1 as u16 as u32) << 16) | p.0 as u16 as u32) as isize;
+    unsafe { SendMessageW(w.hwnd as _, WM_NCHITTEST, 0, l) }
+}
 fn on_any_monitor(p: (i32, i32)) -> bool {
     mons().iter().any(|(m, _)| inside(p, m))
 }
@@ -845,18 +850,27 @@ fn resize_by_edge_drag() {
     );
 
     // Part 2: the leading (left) edge drag on the first column must be ignored. Window 0 is the first column, so its
-    // leading border is the grab point (rect left + 3).
+    // leading border is the grab point. That border is invisible and starts at the window rect's left (8 px left of
+    // the visible edge at 100 %), so `rect left + 3` lies on whatever is left of the window: another monitor on the
+    // three-monitor rig, nothing at all on a single monitor. Take the first column from there that is on a monitor
+    // AND that the window itself answers HTLEFT for (on a single monitor the visible edge column, x = 0), so the
+    // drag provably starts on the leading resize border and "ignored" cannot pass on a plain client-area drag.
     let lead_of = |i: usize| {
         let r = ws[i].rect();
-        (r[0] + 3, (r[1] + r[3]) / 2)
+        let y = (r[1] + r[3]) / 2;
+        (r[0] + 3..=r[0] + 12)
+            .map(|x| (x, y))
+            .find(|&p| on_any_monitor(p) && nc_hit(&ws[i], p) == HTLEFT as isize)
     };
     let l_idx = r_idx;
-    let edge = lead_of(l_idx);
-    assert!(
-        on_any_monitor(edge),
-        "precondition: leading resize edge of window {l_idx} at {edge:?} is off-screen; {}",
-        describe(&ws)
-    );
+    let edge = lead_of(l_idx).unwrap_or_else(|| {
+        panic!(
+            "precondition: no on-screen point hits the leading (HTLEFT) resize border of window {l_idx}; rect {:?}; {}",
+            ws[l_idx].rect(),
+            describe(&ws)
+        )
+    });
+    eprintln!("resize_by_edge_drag: leading-edge grab at {edge:?} (window rect {:?})", ws[l_idx].rect());
     let mid: Vec<[i32; 4]> = (0..2).map(|i| vis(&ws[i])).collect();
     m.drag(edge, (edge.0 + 100, edge.1));
     thread::sleep(SETTLE);
