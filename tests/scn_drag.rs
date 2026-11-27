@@ -165,11 +165,22 @@ impl Mouse {
             self.left = false;
         }
     }
-    /// Press at `from`, glide to `to`, rest there (HOLD), release.
+    /// Press at `from`, glide to `to`, rest there (HOLD), release. Panics before releasing when the cursor is no
+    /// longer at `to`: outside input (a real mouse, another process) moved it, so the drop would land somewhere the
+    /// test never asked for and any assertion about the result would blame Planor for it.
     fn drag(&mut self, from: (i32, i32), to: (i32, i32)) {
         self.down(from);
         self.glide(from, to);
         thread::sleep(HOLD);
+        let mut at = POINT::default();
+        unsafe { GetCursorPos(&mut at) };
+        assert!(
+            (at.x, at.y) == to,
+            "precondition: outside input moved the cursor during the drag (expected it at {to:?} before release, \
+             observed ({}, {})); do not use the mouse while live tests run",
+            at.x,
+            at.y
+        );
         self.up();
     }
     fn shift(&mut self, on: bool) {
