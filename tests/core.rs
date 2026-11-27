@@ -1407,3 +1407,41 @@ fn remove_focuses_right_then_left_then_empty() {
         assert_eq!(s.active(), None, "{area:?}: empty strip has no active window");
     }
 }
+#[test]
+fn monitor_rays_on_owner_layout_reach_each_neighbour() {
+    // (#102 review) Owner layout: landscape laptop primary at the origin, a second landscape above it, a portrait
+    // up-left of the laptop (its bottom part beside the laptop's left edge).
+    let laptop = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+    let above = Rect { x: 0, y: -1440, w: 2560, h: 1440 };
+    let portrait = Rect { x: -1440, y: -1800, w: 1440, h: 2560 };
+    let all = [laptop, above, portrait];
+
+    // From the laptop (landscape strip): up toward the monitor above, up-left toward the portrait. No ray along
+    // the strip axis (the strip itself goes left/right).
+    let rays = monitor_rays(laptop, &all, true);
+    assert_eq!(rays.len(), 2, "laptop: one ray to each neighbour: {rays:?}");
+    for (rx, ry) in &rays {
+        assert!((rx.hypot(*ry) - 1.).abs() < 1e-9, "unit rays: {rays:?}");
+        assert!(*ry < -0.25, "laptop: both neighbours are up: {rays:?}");
+    }
+    assert!(rays.iter().any(|r| r.0 < -0.25), "laptop: a diagonal up-left ray toward the portrait: {rays:?}");
+    assert!(rays.iter().any(|r| r.0 > 0.), "laptop: an up(-right) ray toward the monitor above: {rays:?}");
+    // A finger swipe up-left picks the portrait ray, straight up the monitor-above ray, sideways none.
+    let up_left = best_ray(-300., -260., &rays).expect("up-left swipe picks a ray");
+    assert!(up_left.0 < -0.25, "up-left swipe goes toward the portrait: {up_left:?}");
+    let up = best_ray(40., -300., &rays).expect("up swipe picks a ray");
+    assert!(up.0 > 0., "up swipe goes toward the monitor above: {up:?}");
+    assert_eq!(best_ray(300., 0., &rays), None, "a swipe along the strip picks no monitor ray");
+    assert_eq!(best_ray(0., 300., &rays), None, "nothing below the laptop");
+
+    // From the portrait (vertical strip): right toward the monitor above and down-right toward the laptop.
+    let rays = monitor_rays(portrait, &all, false);
+    assert_eq!(rays.len(), 2, "portrait: one ray to each neighbour: {rays:?}");
+    assert!(rays.iter().all(|r| r.0 > 0.25), "portrait: both neighbours are to the right: {rays:?}");
+    let down_right = best_ray(300., 250., &rays).expect("down-right swipe picks a ray");
+    assert!(down_right.1 > 0., "down-right swipe goes toward the laptop: {down_right:?}");
+
+    // A monitor two hops away (not touching) gets no ray.
+    let far = Rect { x: 5000, y: 0, w: 1920, h: 1080 };
+    assert!(monitor_rays(laptop, &[laptop, far], true).is_empty(), "non-adjacent monitors get no ray");
+}
