@@ -261,7 +261,7 @@ fn record_visible_frame_state(
     last_draw_valid: &mut bool,
     fills: &[(Rect, u32, f32)],
     cards: &[CardDraw],
-    lines: &[(Rect, u32)],
+    lines: &[BorderLine],
     holes: &[Rect],
     width: f32,
     radius: f32,
@@ -283,6 +283,27 @@ fn clear_hidden_frame_state(
     last_draw.clear();
     *last_draw_valid = false;
     desired_rgn_holes.clear();
+}
+/// #67: turn the last settled scene into a static frame again. Windows are already where they belong, so it
+/// repaints (and re-requests the WGC capture sources `Host::invalidate_gpu` dropped) without animating, going
+/// live, or forcing OS placement.
+pub(crate) fn idle_scene_from_settled(mut settled: Scene) -> Scene {
+    settled.action = "idle";
+    settled.duration = 0;
+    settled.live = false;
+    settled.force_place = false;
+    settled.zones.clear();
+    settled
+}
+/// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
+/// device, a scene already queued, or no settled scene means there is nothing to do.
+pub(crate) fn needs_scene_rearm(
+    recovered: bool,
+    dead_gen: Option<u64>,
+    scene_queued: bool,
+    has_settled: bool,
+) -> bool {
+    recovered && dead_gen.is_none() && !scene_queued && has_settled
 }
 fn should_draw_on_recovery(want_visible: bool, last_draw: &DrawSig) -> bool {
     want_visible && !last_draw.is_empty()
@@ -418,11 +439,26 @@ struct CardDraw {
     spinner_alpha: f32,
     spinner_angle_rad: f32,
 }
+/// A tile border: its rectangle, colour, and the area it may paint in (#36), all in host-local pixels. The clip is
+/// the tile's `bound` (the strip's work area): a grouped window's border is drawn around the whole window, which
+/// can reach past the work area into the taskbar while it glides or while its deck is taller than the strip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct BorderLine {
+    pub rect: Rect,
+    pub color: u32,
+    pub clip: Rect,
+}
+/// #36: host-local border for `drawn` (screen) clipped to `bound` (screen): the rectangle is kept whole so the
+/// rounded corners stay where they are, and only the part inside `bound` is painted.
+pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> BorderLine {
+    let local = |r: Rect| Rect { x: r.x - host.x, y: r.y - host.y, ..r };
+    BorderLine { rect: local(drawn), color, clip: local(bound) }
+}
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
     fills: Vec<(Rect, u32, u32)>,
     cards: Vec<(Rect, u32, u32)>,
-    lines: Vec<(Rect, u32)>,
+    lines: Vec<BorderLine>,
     holes: Vec<Rect>,
     width_bits: u32,
     radius_bits: u32,
@@ -433,7 +469,7 @@ impl DrawSig {
         &self,
         fills: &[(Rect, u32, f32)],
         cards: &[CardDraw],
-        lines: &[(Rect, u32)],
+        lines: &[BorderLine],
         holes: &[Rect],
         width: f32,
         radius: f32,
@@ -462,7 +498,7 @@ impl DrawSig {
         &mut self,
         fills: &[(Rect, u32, f32)],
         cards: &[CardDraw],
-        lines: &[(Rect, u32)],
+        lines: &[BorderLine],
         holes: &[Rect],
         width: f32,
         radius: f32,
@@ -502,7 +538,7 @@ struct DrawFrame<'a> {
     pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
     fills: &'a [(Rect, u32, f32)],
     cards: &'a [CardDraw],
-    lines: &'a [(Rect, u32)],
+    lines: &'a [BorderLine],
     holes: &'a [Rect],
     width: f32,
     radius: f32,
@@ -707,7 +743,17 @@ impl Surface {
                         }
                     }
                 }
-                for &(r, c) in *lines {
+                for &BorderLine { rect: r, color: c, clip } in *lines {
+                    // #36: never paint a border outside its strip's work area (over the taskbar).
+                    rt.PushAxisAlignedClip(
+                        &D2D_RECT_F {
+                            left: (clip.x + off.x) as f32,
+                            top: (clip.y + off.y) as f32,
+                            right: (clip.x + clip.w + off.x) as f32,
+                            bottom: (clip.y + clip.h + off.y) as f32,
+                        },
+                        D2D1_ANTIALIAS_MODE_ALIASED,
+                    );
                     let brush = Self::brush_for(&mut self.brushes, rt, c)?;
                     let x = (r.x + off.x) as f32;
                     let y = (r.y + off.y) as f32;
@@ -727,7 +773,8 @@ impl Surface {
                         brush,
                         width,
                         None,
-                    )
+                    );
+                    rt.PopAxisAlignedClip();
                 }
                 if !holes.is_empty() {
                     // Punch holes for unmanaged windows / system flyouts directly in Direct2D
@@ -1643,7 +1690,7 @@ struct FrameScratch {
     rejected: Vec<Placement>,
     actuals: Vec<Placement>,
     verify_items: Vec<Placement>,
-    lines: Vec<(Rect, u32)>,
+    lines: Vec<BorderLine>,
     backing: Vec<(Rect, Rect, ID2D1Bitmap1)>,
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
@@ -1794,6 +1841,7 @@ impl RenderState {
     unsafe fn try_recover_surfaces(&mut self) {
         let now = Instant::now();
         let mut dead_gen: Option<u64> = None;
+        let mut recovered = false;
         for host in self.hosts.values_mut() {
             if host.surface.is_some() || !host.recovery.can_try(now) {
                 continue;
@@ -1842,6 +1890,7 @@ impl RenderState {
                                 }
                                 host.last_draw_valid = true;
                                 host.surface = Some(s);
+                                recovered = true;
                                 if was_outage {
                                     diag::trace("overlay GPU surface recovered");
                                 }
@@ -1860,6 +1909,7 @@ impl RenderState {
                         // Do not reset backoff until a full normal draw succeeds, and never show
                         // a hidden host (e.g. fullscreen or #48 unfocused) during idle recovery.
                         host.surface = Some(s);
+                        recovered = true;
                     }
                 }
                 Err(e) => {
@@ -1868,6 +1918,15 @@ impl RenderState {
                     }
                 }
             }
+        }
+        if needs_scene_rearm(recovered, dead_gen, self.scene.is_some(), self.last_settled_scene.is_some())
+            && let Some(settled) = self.last_settled_scene.take()
+        {
+            // #67: the static frame above is drawn with `pictures: &[]`, so a settled peek stays blank after a
+            // device loss until some new scene arrives — an idle desktop may never send one. Re-arm the settled
+            // scene so `build_all_hosts` re-requests the capture sources for its tiles.
+            diag::trace("overlay recovery: re-arming settled scene to rebuild WGC pictures");
+            self.scene = Some(idle_scene_from_settled(settled));
         }
         if let Some(dg) = dead_gen {
             self.invalidate_device_generation(dg);
@@ -2286,14 +2345,7 @@ impl RenderState {
                                     spinner_angle_rad: vis.spinner_angle_rad,
                                 });
                                 if let Some(color) = tile.color {
-                                    scratch.lines.push((
-                                        Rect {
-                                            x: tile.rect.x - host.b.x,
-                                            y: tile.rect.y - host.b.y,
-                                            ..tile.rect
-                                        },
-                                        color,
-                                    ));
+                                    scratch.lines.push(border_line(tile.rect, color, bound, host.b));
                                 }
                                 scratch.cover_placements.push((tile.id, tile.rect));
                                 if t >= 1. && !s.live {
@@ -2432,14 +2484,7 @@ impl RenderState {
                             // the window's real size gliding), not the in-between rectangle, which grew or
                             // shrank ahead of the picture ("border grows faster than the animation").
                             let b = if proxy { rs } else { r };
-                            scratch.lines.push((
-                                Rect {
-                                    x: b.x - host.b.x,
-                                    y: b.y - host.b.y,
-                                    ..b
-                                },
-                                color,
-                            ))
+                            scratch.lines.push(border_line(b, color, bound, host.b))
                         }
                     }
                     let effective_rect = fullscreen_preserved_rect(
@@ -3133,12 +3178,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         apply_overlay_update(active, holes, &colors);
                     } else if let Some(mut settled) = state.last_settled_scene.take().filter(|s| s.epoch == seq) {
                         apply_overlay_update(&mut settled, holes, &colors);
-                        settled.action = "idle";
-                        settled.duration = 0;
-                        settled.live = false;
-                        settled.force_place = false;
-                        settled.zones.clear();
-                        state.scene = Some(settled);
+                        state.scene = Some(idle_scene_from_settled(settled));
                     }
                 }
                 Ok(Message::Scene(mut s)) => {
@@ -3536,7 +3576,7 @@ mod tests {
     #[test]
     fn draw_sig_detects_hole_changes() {
         let mut sig = DrawSig::default();
-        let lines = vec![(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6)];
+        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
         let holes_a = vec![Rect { x: 100, y: 100, w: 400, h: 400 }];
         let holes_b = vec![Rect { x: 150, y: 120, w: 400, h: 400 }];
         sig.set_from(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0);
@@ -3571,7 +3611,7 @@ mod tests {
         let mut want_visible = false;
         let mut valid = false;
         let mut rgn_holes = vec![Rect { x: 10, y: 10, w: 100, h: 100 }];
-        let lines = vec![(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6)];
+        let lines = vec![border_line(Rect { x: 0, y: 0, w: 900, h: 1000 }, 0x3B82F6, Rect { x: 0, y: 0, w: 1920, h: 1040 }, Rect { x: 0, y: 0, w: 1920, h: 1080 })];
 
         // Scene with pictures (settled peek/clipped proxy) updates `last_draw` even while keeping
         // `last_draw_valid == false`, so idle recovery restores the latest border.
@@ -3714,6 +3754,57 @@ mod tests {
         );
         assert_eq!(p_grow_rs, p_grow_f, "portrait parked tile at t>=1 must draw at final rect");
         assert!(p_grow_park, "portrait growing tile overflowing bottom bound must park");
+    }
+
+    /// #36 (bundle 000644700 "in groups, the taskbar should remain in the foreground"): a 2-window group on a
+    /// 2560x1440 monitor with a 48 px bottom taskbar (work area h=1392). The bottom peek's tile rect is
+    /// (0,1364,1277,1364). v0.6.0 drew its WGC picture at the whole rect, so 76 px of it (y 1364..1440) covered
+    /// the taskbar. Every drawn part of a peek must stay inside the strip's work area.
+    #[test]
+    fn group_peek_never_draws_over_the_taskbar() {
+        let host = Rect { x: 0, y: 0, w: 2560, h: 1440 };
+        let bound = Rect { x: 0, y: 0, w: 2560, h: 1392 };
+        let peek = Rect { x: 0, y: 1364, w: 1277, h: 1364 };
+        let inside = |r: Rect| r.x >= bound.x && r.y >= bound.y && r.x + r.w <= bound.x + bound.w && r.y + r.h <= bound.y + bound.h;
+        // Settled (t = 1), moving (t = 0.5 from one row lower) and mid-roll from above the strip.
+        for (origin, t, moving) in [(peek, 1.0, false), (Rect { y: 1500, ..peek }, 0.5, true), (Rect { y: 1000, ..peek }, 0.5, true), (Rect { y: -1300, ..peek }, 0.3, true)] {
+            let current = interpolate(origin, peek, t);
+            let (rs, clip, park, proxy) =
+                tile_stand_in_and_park(origin, current, peek, bound, t, false, moving, false, false, true, false);
+            assert!(park && proxy, "a group peek is parked and drawn as a proxy");
+            // A stand-in entirely outside the strip draws nothing; the settled sliver is always visible.
+            let Some(clip) = clip else {
+                assert!(moving, "the settled peek sliver is visible");
+                continue;
+            };
+            assert!(inside(clip), "peek clip {clip:?} (stand-in {rs:?}) must lie inside the work area {bound:?}");
+            // WGC backing (any source size, with or without a live thumbnail) and the DWM thumbnail use the same
+            // 1:1 blit: the destination never leaves the clip.
+            for src in [(1277, 1364), (1293, 1372), (2576, 1400), (600, 400)] {
+                for thumb_ok in [false, true] {
+                    if let Some((_, dst)) = choose_proxy_backing(rs, clip, src, (8, 0), (host.x, host.y), moving, false, false, thumb_ok) {
+                        assert!(inside(dst), "backing dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                    }
+                }
+                if let Some((_, dst)) = proxy_blit_rects(rs, clip, src, (8, 0), (host.x, host.y)) {
+                    assert!(inside(dst), "thumbnail dst {dst:?} for source {src:?} leaves the work area {bound:?}");
+                }
+            }
+        }
+    }
+
+    /// #36: a border is clipped to the tile's bound, so a coloured window gliding past the work area (a group roll,
+    /// a deck taller than the strip) never strokes over the taskbar; host-local coordinates on a negative-origin host.
+    #[test]
+    fn border_lines_carry_the_work_area_clip() {
+        let host = Rect { x: -1440, y: -419, w: 1440, h: 2560 };
+        let bound = Rect { x: -1440, y: -419, w: 1440, h: 2512 };
+        let drawn = Rect { x: -1440, y: 2000, w: 1440, h: 1200 };
+        let l = border_line(drawn, 0xA855F7, bound, host);
+        assert_eq!(l.rect, Rect { x: 0, y: 2419, w: 1440, h: 1200 });
+        assert_eq!(l.clip, Rect { x: 0, y: 0, w: 1440, h: 2512 });
+        assert_eq!(l.color, 0xA855F7);
+        assert!(l.clip.y + l.clip.h <= host.h - 48, "the clip stops at the taskbar");
     }
 
     #[test]
@@ -3890,6 +3981,65 @@ mod tests {
         assert_eq!(scene.tiles[0].color, None);
     }
 
+
+    /// #67: after a GPU device loss the settled scene is re-armed so the WGC pictures the device took with it are
+    /// rebuilt; it must come back as a static idle frame (no motion, no zones, no forced placement) while keeping
+    /// its epoch, tiles and monitors, so nothing moves and the daemon's epoch accounting still matches.
+    #[test]
+    fn recovery_rearms_the_settled_scene_as_a_static_idle_frame() {
+        let settled = Scene {
+            epoch: 77,
+            input: None,
+            input_qpc_us: None,
+            diagnostics: false,
+            monitors: std::sync::Arc::from([("MON0".to_owned(), Rect { x: 0, y: 0, w: 1920, h: 1140 }, Rect { x: 0, y: 0, w: 1920, h: 1200 })]),
+            tiles: vec![Tile {
+                pinned: false,
+                hidden: false,
+                bound: Rect { x: 0, y: 0, w: 1920, h: 1140 },
+                fullscreen: false,
+                os_frame: None,
+                preview: true,
+                id: 101,
+                rect: Rect { x: 0, y: 0, w: 28, h: 1140 },
+                monitor: "MON0".into(),
+                color: Some(0x3B82F6),
+                cookie: 3,
+                cover: None,
+            }],
+            duration: 180,
+            spring: true,
+            width: 2.0,
+            radius: 8.0,
+            holes: std::sync::Arc::from([]),
+            zones: vec![Zone { rect: Rect { x: 0, y: 0, w: 100, h: 100 }, monitor: "MON0".into(), color: 0xA855F7, alpha: 0.5 }],
+            action: "open_close",
+            live: true,
+            force_place: true,
+        };
+        let idle = idle_scene_from_settled(settled);
+        assert_eq!(idle.action, "idle");
+        assert_eq!(idle.duration, 0, "a re-armed scene must not animate");
+        assert!(!idle.live, "a re-armed scene must not park the real windows");
+        assert!(!idle.force_place, "windows are already placed; no OS move");
+        assert!(idle.zones.is_empty(), "stale drop zones must not be redrawn");
+        assert_eq!(idle.epoch, 77, "the epoch must survive so the daemon's overlay patches still match");
+        assert_eq!(idle.tiles.len(), 1);
+        assert_eq!(idle.tiles[0].id, 101);
+        assert_eq!(idle.tiles[0].cookie, 3, "the capture source key (id, cookie) must survive to be re-requested");
+        assert_eq!(idle.monitors.len(), 1);
+    }
+
+    /// #67: the re-arm only happens once a surface actually came back, the device is not still dead, no scene is
+    /// already queued, and there is a settled scene to replay.
+    #[test]
+    fn scene_rearm_after_recovery_is_gated() {
+        assert!(needs_scene_rearm(true, None, false, true));
+        assert!(!needs_scene_rearm(false, None, false, true), "no surface recovered: nothing was dropped");
+        assert!(!needs_scene_rearm(true, Some(4), false, true), "device still dead: re-arming would just fail again");
+        assert!(!needs_scene_rearm(true, None, true, true), "a newer scene is already queued");
+        assert!(!needs_scene_rearm(true, None, false, false), "nothing settled to replay");
+    }
     #[test]
     fn park_y_for_monitor_keeps_mixed_dpi_stacked_monitor_nearest() {
         // Exact 3-monitor layout from #75 / #77 / #78 Win+W bundles:

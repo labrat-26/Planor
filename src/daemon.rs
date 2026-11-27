@@ -310,6 +310,9 @@ pub(crate) struct DragSession {
     pub lbutton_up_since: Option<Instant>,
     pub visuals_cleared: bool,
     pub movesize_exit_since: Option<Instant>,
+    /// #67: `WindowBackend::last_release` sequence when the drag began. A newer release is this drag's button-up,
+    /// and its hook point is the drop position (the cursor may have moved on before the next tick sampled it).
+    pub release_seq: u64,
 }
 /// A window being carried by a four-finger touchpad swipe. Planor moves it itself (there is no OS move
 /// loop without a mouse button) and moves the cursor with it, so the normal drag logic sees an
@@ -392,6 +395,9 @@ pub(crate) struct Engine<B: WindowBackend> {
     pub last_cursor: Option<(i32, i32)>,
     pub self_activated: Option<(isize, Instant)>,
     pub holes_checked: Instant,
+    /// #67: an unmanaged occluder (Task Manager, a rule-ignored app) moved or resized: re-read holes on the next
+    /// tick instead of waiting for the 200 ms poll, so the overlay stops painting over it sooner.
+    pub holes_stale: bool,
     pub monitors_checked: Instant,
     pub desktop_checked: Instant,
     pub scroll_samples: std::collections::VecDeque<(Instant, f64, bool)>,
@@ -474,6 +480,7 @@ impl<B: WindowBackend> Engine<B> {
             last_cursor: None,
             self_activated: None,
             holes_checked: Instant::now(),
+            holes_stale: false,
             monitors_checked: Instant::now(),
             desktop_checked: Instant::now(),
             scroll_samples: Default::default(),
@@ -1227,7 +1234,7 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         // An unmanaged window appearing, moving or closing changes what the overlay must stay clear of.
-        if self.holes_checked.elapsed() >= Duration::from_millis(200) {
+        if std::mem::take(&mut self.holes_stale) || self.holes_checked.elapsed() >= Duration::from_millis(200) {
             self.holes_checked = Instant::now();
             if self.holes() != self.last_holes {
                 self.dirty = true
@@ -1244,6 +1251,9 @@ impl<B: WindowBackend> Engine<B> {
         }
         if self.deadline.is_some_and(|t| Instant::now() >= t) {
             self.deadline = None;
+            if self.diag.enabled {
+                diag::trace("TOPOLOGY rescan (work areas or monitors changed)");
+            }
             self.topology();
             self.scan()
         }
@@ -1251,6 +1261,10 @@ impl<B: WindowBackend> Engine<B> {
             self.desktop_checked = Instant::now();
             let d = self.backend.current_desktop();
             if d != self.desktop {
+                if self.diag.enabled {
+                    // #56: a virtual-desktop switch (or a failed desktop query, `None`) clears every visual.
+                    diag::trace(format!("CLEAR reason=desktop from={:?} to={d:?}", self.desktop.map(|v| format!("{v:032x}"))));
+                }
                 self.clear()?;
                 self.desktop = d;
                 self.placed.clear();
@@ -2097,6 +2111,7 @@ impl<B: WindowBackend> Engine<B> {
                 lbutton_up_since: None,
                 visuals_cleared: false,
                 movesize_exit_since: None,
+                release_seq: self.backend.last_release().0,
             });
             self.dirty = true
         } else if self.drag.take().is_some() {
@@ -2775,7 +2790,15 @@ impl<B: WindowBackend> Engine<B> {
             }
             return;
         }
-        let p = self.backend.cursor_pos();
+        // #67: once the button is up, the drop point is where the low-level hook saw it come up, not where the
+        // cursor is now (the tick runs up to ~32 ms later, and a flick keeps moving). Without a hook sample (test
+        // mode, missed try_lock) the current cursor is the fallback, as before.
+        let release = self.backend.last_release();
+        let p = if !d.pad_drag && release.0 > d.release_seq && !self.backend.primary_button_down() {
+            release.1
+        } else {
+            self.backend.cursor_pos()
+        };
         let elapsed = d.sampled.elapsed().as_secs_f64().max(0.001);
         let velocity = ((p.0 - d.point.0) as f64).hypot((p.1 - d.point.1) as f64) / elapsed;
         d.point = p;
@@ -3199,6 +3222,9 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Suspend(v) => {
+                if self.diag.enabled {
+                    diag::trace(format!("CLEAR reason=suspend locked={v}"));
+                }
                 self.clear_scroll_state();
                 let _ = self.clear();
                 self.locked = v;
@@ -3207,6 +3233,10 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             Event::Topology => {
+                if self.diag.enabled {
+                    // #56: display change or TaskbarCreated (explorer restart): the overlay is cleared.
+                    diag::trace("CLEAR reason=topology");
+                }
                 self.clear_scroll_state();
                 self.drag = None;
                 let _ = self.clear();
@@ -3254,7 +3284,10 @@ impl<B: WindowBackend> Engine<B> {
                                 && (a == id || target == Some(a))
                         });
                     if self.diag.enabled {
-                        diag::trace(format!("FG {id} managed={} external={} pad={}", target.is_some(), self.backend.external(id), self.pad_scrolling));
+                        // #56: name unmanaged foreground windows (Shell_TrayWnd = a taskbar click, Progman/WorkerW =
+                        // show desktop) so a bundle shows what took focus before tiles went away.
+                        let class = if target.is_none() && id != 0 { format!(" class={}", self.backend.class_of(id)) } else { String::new() };
+                        diag::trace(format!("FG {id} managed={} external={} pad={}{class}", target.is_some(), self.backend.external(id), self.pad_scrolling));
                     }
                     let active_id = self
                         .key()
@@ -3301,7 +3334,19 @@ impl<B: WindowBackend> Engine<B> {
                     if self.backend.is_visible(id)
                         || self.backend.is_iconic(id)
                         || self.owning(id).is_none()
-                        || self.is_parked_by_planor(id) => {}
+                        || self.is_parked_by_planor(id) =>
+                {
+                    if self.diag.enabled && self.owning(id).is_some() {
+                        let why = if self.backend.is_visible(id) {
+                            "visible"
+                        } else if self.backend.is_iconic(id) {
+                            "iconic"
+                        } else {
+                            "parked"
+                        };
+                        diag::trace(format!("HIDE {id} kept reason={why}"));
+                    }
+                }
                 EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART | EVENT_OBJECT_HIDE => {
                     if self.drag.as_ref().is_some_and(|d| d.id == id) {
                         self.drag = None;
@@ -3317,6 +3362,20 @@ impl<B: WindowBackend> Engine<B> {
                                 || self.managed_foreground_id(self.backend.foreground()) == Some(id);
                             self.strips.get_mut(&k).unwrap().remove(id);
                             self.strips.get_mut(&k).unwrap().fill();
+                            if self.diag.enabled {
+                                // #56: why a tile left the layout, and what held focus at that moment.
+                                let why = match e {
+                                    EVENT_OBJECT_DESTROY => "destroy",
+                                    EVENT_SYSTEM_MINIMIZESTART => "minimize",
+                                    _ => "hide",
+                                };
+                                let fg = self.backend.foreground();
+                                let left: usize = self.strips.values().map(|s| s.columns.len()).sum();
+                                diag::trace(format!(
+                                    "REMOVE {id} reason={why} focused={focused} fg={fg} fg_class={} columns_left={left}",
+                                    self.backend.class_of(fg)
+                                ));
+                            }
                             if focused {
                                 if let Some(next) = self.strips[&k].active() {
                                     self.active = k.1.clone();
@@ -3342,7 +3401,16 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 EVENT_SYSTEM_MOVESIZESTART => self.drag_begin(id),
                 EVENT_SYSTEM_MOVESIZEEND => self.drag_end(id),
-                EVENT_OBJECT_LOCATIONCHANGE => self.window_state(id),
+                EVENT_OBJECT_LOCATIONCHANGE => {
+                    if self.owning(id).is_none()
+                        && !self.pinned.contains(&id)
+                        && !self.holes_stale
+                        && self.backend.overlay_occluder(id)
+                    {
+                        self.holes_stale = true;
+                    }
+                    self.window_state(id)
+                }
                 _ => (),
             },
             Event::Wheel { delta, tilt, shift, x, y } => self.wheel(delta, tilt, shift, (x, y)),
@@ -3687,6 +3755,7 @@ pub fn run() -> Result<()> {
         last_cursor: None,
         self_activated: None,
         holes_checked: Instant::now(),
+        holes_stale: false,
         monitors_checked: Instant::now(),
         desktop_checked: Instant::now(),
         scroll_samples: Default::default(),

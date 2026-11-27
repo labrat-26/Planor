@@ -55,12 +55,32 @@ pub fn set_peeks(peeks: Vec<(Rect, isize)>) {
         *p = peeks
     }
 }
+/// #67: where a mouse button was last released, with a sequence number that grows on every release. Written by the
+/// low-level mouse hook from the WM_xBUTTONUP point, read by the drag code so the drop lands where the button came
+/// up, not where the cursor drifted to before the next tick (up to ~32 ms later). Left and right share one slot: a
+/// low-level hook's button naming under swapped buttons is not worth depending on, and the OS move loop ends on the
+/// first primary release anyway.
+static RELEASE: std::sync::Mutex<(u64, (i32, i32))> = std::sync::Mutex::new((0, (0, 0)));
+fn record_release(p: (i32, i32)) {
+    // try_lock: a low-level hook must never block; a missed sample only falls back to the tick's cursor.
+    if let Ok(mut r) = RELEASE.try_lock() {
+        *r = (r.0 + 1, p);
+    }
+}
+/// Last button release as `(sequence, point)`; sequence 0 = none seen (hooks off, e.g. test mode).
+pub fn last_release() -> (u64, (i32, i32)) {
+    RELEASE.lock().map(|r| *r).unwrap_or((0, (0, 0)))
+}
 /// The overlay is click-through, so a click on a peek never reaches it. This hook sees every left
 /// click first; one that lands on a peek is consumed and turned into a Peek event.
 unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
     let _span = crate::perf::SpanGuard::new(crate::perf::SpanKind::HookMouse);
     use std::sync::atomic::Ordering::*;
     if code >= 0 {
+        if w == WM_LBUTTONUP as usize || w == WM_RBUTTONUP as usize {
+            let p = unsafe { (*(l as *const MSLLHOOKSTRUCT)).pt };
+            record_release((p.x, p.y));
+        }
         if crate::input::RECORD_ALL.load(Relaxed) {
             let button = match w as u32 {
                 WM_LBUTTONDOWN | WM_LBUTTONUP => Some("left"),

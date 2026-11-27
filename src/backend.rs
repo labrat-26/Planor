@@ -71,6 +71,11 @@ pub(crate) trait WindowBackend {
     fn move_window_async(&self, id: isize, x: i32, y: i32);
 
     fn cursor_pos(&self) -> (i32, i32);
+    /// #67: the last mouse-button release seen by the low-level hook, as `(sequence, point)`; the sequence grows
+    /// on every release and 0 means none was seen (hooks not installed).
+    fn last_release(&self) -> (u64, (i32, i32)) {
+        (0, (0, 0))
+    }
     fn set_cursor_pos(&self, x: i32, y: i32);
     fn key_down(&self, vk: i32) -> bool;
     fn primary_button_down(&self) -> bool {
@@ -350,6 +355,10 @@ impl WindowBackend for Win32Backend {
         }
     }
 
+    fn last_release(&self) -> (u64, (i32, i32)) {
+        win32::last_release()
+    }
+
     fn cursor_pos(&self) -> (i32, i32) {
         let mut p = POINT::default();
         unsafe { GetCursorPos(&mut p) };
@@ -485,6 +494,8 @@ pub(crate) mod sim {
         pub z_order: Vec<isize>,
         pub foreground: isize,
         pub cursor: (i32, i32),
+        /// Simulated low-level-hook button release `(sequence, point)` (see `WindowBackend::last_release`).
+        pub release: (u64, (i32, i32)),
         pub keys_down: HashSet<i32>,
         pub config: toml::Value,
         pub holes_filter: Option<Option<String>>,
@@ -505,6 +516,7 @@ pub(crate) mod sim {
                 z_order: Vec::new(),
                 foreground: 0,
                 cursor: (100, 100),
+                release: (0, (0, 0)),
                 keys_down: HashSet::new(),
                 config,
                 holes_filter: Some(None),
@@ -1000,6 +1012,10 @@ pub(crate) mod sim {
                 w.rect.x = x;
                 w.rect.y = y;
             }
+        }
+
+        fn last_release(&self) -> (u64, (i32, i32)) {
+            self.0.lock().unwrap().release
         }
 
         fn cursor_pos(&self) -> (i32, i32) {
