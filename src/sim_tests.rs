@@ -976,19 +976,64 @@ fn an_ordinary_slow_lift_sends_no_scene_before_its_settle() {
     assert!(h.engine.settle.is_some() && h.engine.inertia.is_none(), "a slow lift queues a settle, no momentum");
     {
         let g = h.desktop.0.lock().unwrap();
-        let extra: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.epoch, s.action.clone(), s.live)).collect();
+        let extra: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.epoch, s.action, s.live)).collect();
         assert!(extra.is_empty(), "no scene between the lift and its settle, got {extra:?}");
     }
     settle_now(&mut h);
     h.settle();
     let g = h.desktop.0.lock().unwrap();
-    let after: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.action.clone(), s.live)).collect();
+    let after: Vec<_> = g.scenes[before_lift..].iter().map(|s| (s.action, s.live)).collect();
     assert!(!after.is_empty() && after.iter().all(|s| !s.1), "the settle ends the gesture non-live: {after:?}");
     drop(g);
     assert!(!h.engine.last_scene_live, "the renderer left the live state");
     h.stop_clean();
 }
 
+/// #108 re-review F1: the scenario is reachable. Between a slow lift and its queued settle the daemon sends a
+/// holes change as an `OverlayUpdate` on the live scene's epoch (no new scene, the settle is still pending), so
+/// the renderer must re-arm that patch without leaving the live state (`render::overlay_patched_settled_scene`).
+#[test]
+fn a_holes_change_between_a_slow_lift_and_its_settle_is_an_overlay_patch_on_the_live_scene() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), |sim| {
+        three_per_monitor(sim);
+        let mut pip = SimWindow::new(930, Rect { x: 1400, y: 700, w: 400, h: 225 });
+        pip.class = "Chrome_WidgetWin_1".into();
+        pip.topmost = true;
+        pip.toolwindow = true;
+        sim.add_window(pip);
+    });
+    focus(&mut h, 101);
+    let mut x = 900.0;
+    for _ in 0..12 {
+        x -= 15.0;
+        h.engine.event(Event::Contacts(vec![(x, 300.0); 3]));
+        h.settle();
+    }
+    thread::sleep(Duration::from_millis(130));
+    for _ in 0..3 {
+        h.engine.event(Event::Contacts(vec![(x, 300.0); 3]));
+        h.settle();
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert!(h.engine.settle.is_some() && h.engine.last_scene_live, "lifted, settle queued, renderer still live");
+    let (scenes, ov) = { let g = h.desktop.0.lock().unwrap(); (g.scenes.len(), g.overlay_updates) };
+    let seq = h.engine.seq;
+    h.desktop.0.lock().unwrap().windows.get_mut(&930).unwrap().rect = Rect { x: 1300, y: 600, w: 400, h: 225 };
+    h.engine.holes_stale = true;
+    h.engine.dirty = true;
+    h.settle_quiet();
+    let g = h.desktop.0.lock().unwrap();
+    assert_eq!(g.overlay_updates, ov + 1, "the holes change goes out as an overlay patch");
+    assert_eq!((g.scenes.len(), h.engine.seq), (scenes, seq), "no new scene before the settle (N1)");
+    assert!(g.scenes.last().unwrap().live, "the patch lands on the live scene's epoch");
+    drop(g);
+    assert!(h.engine.settle.is_some(), "the settle is still pending");
+    settle_now(&mut h);
+    h.settle();
+    assert!(!h.desktop.0.lock().unwrap().scenes.last().unwrap().live, "the settle ends the live state");
+    h.stop_clean();
+}
 #[test]
 fn n023_win_wheel_scrolls_the_strip_under_the_cursor_on_both_orientations() {
     let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);

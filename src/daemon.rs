@@ -1770,10 +1770,11 @@ impl<B: WindowBackend> Engine<B> {
         // A holes/colour-only refresh with unchanged tile geometry must NEVER supersede an active
         // animation or open/close handoff with a new scene epoch; patch holes and tile colours
         // directly on the renderer instead.
-        // Never right after a live scene with nothing pending: an `OverlayUpdate` patches the renderer's settled
-        // scene in place and keeps its `live` flag, so the live stand-in polling would never end (#108 review
-        // L1). While a settle is queued it is fine (and avoids a mid-scroll placement pass, N1): the settle
-        // sends the final non-live scene.
+        // Never right after a live scene with nothing pending: the renderer re-arms an `OverlayUpdate` from its
+        // settled scene and keeps that scene's `live` flag (`render::overlay_patched_settled_scene`, #108
+        // re-review F1), so a live gesture whose last word is an overlay patch would poll live stand-ins forever
+        // (#108 review L1). While a settle is queued it is fine (and avoids a mid-scroll placement pass, N1):
+        // the settle sends the final non-live scene.
         let overlay_only = action == "idle"
             && !force_place
             && !live

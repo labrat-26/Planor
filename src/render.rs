@@ -416,6 +416,13 @@ pub(crate) fn live_redraw_scene(mut settled: Scene) -> Scene {
     settled.force_place = false;
     settled
 }
+/// The frame an `OverlayUpdate` (holes or border colours) re-arms from the settled scene. A live scene stays
+/// live: between a slow lift and its queued settle the stand-ins are still what is drawn and the real windows
+/// are still parked, and clearing `live` here would unpark them at the mid-scroll position only for the settle
+/// to move them again (#108 re-review F1). The settle's own scene ends the live state.
+pub(crate) fn overlay_patched_settled_scene(settled: Scene) -> Scene {
+    if settled.live { live_redraw_scene(settled) } else { idle_scene_from_settled(settled) }
+}
 /// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
 /// device, a scene already queued, or no settled scene means there is nothing to do.
 pub(crate) fn needs_scene_rearm(
@@ -3480,7 +3487,7 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         apply_overlay_update(active, holes, &colors);
                     } else if let Some(mut settled) = state.last_settled_scene.take().filter(|s| s.epoch == seq) {
                         apply_overlay_update(&mut settled, holes, &colors);
-                        state.scene = Some(idle_scene_from_settled(settled));
+                        state.scene = Some(overlay_patched_settled_scene(settled));
                     }
                 }
                 Ok(Message::Scene(mut s)) => {
@@ -4363,6 +4370,41 @@ mod tests {
         assert_eq!(idle.tiles[0].id, 101);
         assert_eq!(idle.tiles[0].cookie, 3, "the capture source key (id, cookie) must survive to be re-requested");
         assert_eq!(idle.monitors.len(), 1);
+    }
+
+    /// #108 re-review F1: an `OverlayUpdate` (holes or border colours) that lands between a slow lift and its
+    /// queued settle re-arms the settled scene. A live scene must stay live, or the real windows unpark at the
+    /// mid-scroll position until the settle moves them again; a settled scene still re-arms as a static frame.
+    #[test]
+    fn overlay_patch_keeps_a_live_settled_scene_live_and_a_settled_one_idle() {
+        let scene = |live: bool| Scene {
+            epoch: 9,
+            input: None,
+            input_qpc_us: None,
+            diagnostics: false,
+            monitors: std::sync::Arc::from([]),
+            tiles: Vec::new(),
+            duration: 120,
+            spring: true,
+            width: 2.0,
+            radius: 8.0,
+            holes: std::sync::Arc::from([]),
+            zones: Vec::new(),
+            action: "scroll",
+            live,
+            force_place: true,
+        };
+        let mut live = scene(true);
+        let holes: std::sync::Arc<[Rect]> = std::sync::Arc::from([Rect { x: 10, y: 10, w: 50, h: 40 }]);
+        apply_overlay_update(&mut live, std::sync::Arc::clone(&holes), &[]);
+        let live = overlay_patched_settled_scene(live);
+        assert!(live.live, "a live settled scene stays live: its windows stay parked behind their stand-ins");
+        assert_eq!((live.action, live.duration, live.force_place), ("idle", 0, false), "no motion, no OS placement");
+        assert_eq!(live.epoch, 9, "the epoch survives so later patches still match");
+        assert_eq!(live.holes.as_ref(), holes.as_ref(), "the patch is applied");
+        let idle = overlay_patched_settled_scene(scene(false));
+        assert!(!idle.live);
+        assert_eq!((idle.action, idle.duration, idle.force_place), ("idle", 0, false));
     }
 
     /// #67: the re-arm only happens once a surface actually came back, the device is not still dead, no scene is
