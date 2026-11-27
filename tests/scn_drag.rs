@@ -1132,3 +1132,67 @@ fn resized_window_stays_above_neighbours() {
         "resized_window_stays_above_neighbours: during the resize window 0's colour ({own} px) must exceed window 1's ({other} px)"
     );
 }
+
+/// Jumpiness probe: sample window 5's left edge every ~8 ms while the pointer rests in the edge zone. The
+/// largest single step must stay close to the median step (an even glide, not stutter).
+#[test]
+#[ignore]
+fn edge_scroll_steps_are_even() {
+    aware();
+    let ws: Vec<Sentinel> = (0..7).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-edge-even");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..7 {
+        press(&[ALT], LEFT);
+    }
+    let from = grab_raised(&ws[0]).expect("window 0 caption");
+    let (_, work) = mons()[0];
+    let to = (work.right - 4, from.1);
+    m.down(from);
+    m.glide(from, to);
+    thread::sleep(Duration::from_millis(500)); // past the ease-in
+    let mut xs = vec![];
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(1200) {
+        // Leftmost on-screen window edge: parked windows report the park rect, which would hide the motion.
+        let v = ws
+            .iter()
+            .map(|w| vis(w)[0])
+            .filter(|x| *x > -5000 && *x < 9000)
+            .min()
+            .unwrap_or(0);
+        xs.push(v);
+        thread::sleep(Duration::from_millis(8));
+    }
+    m.escape();
+    m.up();
+    let steps: Vec<i32> = xs
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .filter(|s| *s > 0)
+        .collect();
+    assert!(
+        steps.len() > 20,
+        "strip barely moved: {} steps",
+        steps.len()
+    );
+    let mut sorted = steps.clone();
+    sorted.sort_unstable();
+    let med = sorted[sorted.len() / 2].max(1);
+    let p95 = sorted[sorted.len() * 95 / 100];
+    eprintln!(
+        "edge scroll steps: n={} median={med} p95={p95} max={}",
+        steps.len(),
+        sorted[sorted.len() - 1]
+    );
+    assert!(
+        p95 <= med * 3,
+        "edge_scroll_steps_are_even: stutter, p95 step {p95} px vs median {med} px ({steps:?})"
+    );
+}

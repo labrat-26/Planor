@@ -3318,6 +3318,10 @@ impl<B: WindowBackend> Engine<B> {
         let prev_point = d.point;
         let point_moved = p != d.point;
         d.point = p;
+        if point_moved && d.moved && !d.resizing {
+            // The overlay hole over the dragged window must follow it between scenes (it went behind passing tiles).
+            self.dirty = true;
+        }
 
         // #111: four-finger pad drags stay bound to their starting monitor (only fling transfers).
         // Mouse drags resolve the monitor currently under the cursor; disconnected gaps yield None.
@@ -4392,7 +4396,9 @@ pub(crate) fn edge_scroll_step_at(
         return None;
     }
     let hz = refresh_hz.clamp(30.0, 240.0);
-    let min_dt = 1.0 / hz;
+    // Twice per display frame: stepping every 3rd or 4th fast tick (17 / 23 ms) made the per-frame position
+    // alternate (24 / 31 px) and read as jumpy; half-frame steps let each vsync sample an even position.
+    let min_dt = 0.5 / hz;
     if elapsed_s + 1e-6 < min_dt {
         return None;
     }
