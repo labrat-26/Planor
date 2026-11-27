@@ -4,28 +4,28 @@
 //! named: modifiers, arrows, F-keys, Enter, Backspace, Esc, Tab and Win. Anything else that is not
 //! listed is counted in a `text` event, without its code or the character typed.
 
-use crate::util::{qpc_us, Rect};
+use crate::util::{Rect, qpc_us};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     fs::OpenOptions,
     io::{BufWriter, Write},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
     thread,
     time::Duration,
 };
 use windows_sys::Win32::{
     Foundation::{HWND, POINT, RECT},
-    Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS},
+    Graphics::Dwm::{DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute},
     UI::{
         Input::KeyboardAndMouse::GetAsyncKeyState,
         WindowsAndMessaging::{
-            EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect,
-            IsIconic, IsWindowVisible,
+            EnumWindows, GetClassNameW, GetCursorPos, GetForegroundWindow, GetWindowRect, IsIconic,
+            IsWindowVisible,
         },
     },
 };
@@ -73,7 +73,12 @@ impl EventRing {
         {
             if let Some((old_t, old_ev)) = self.buf.pop_front() {
                 if old_ev.get("kind").and_then(|v| v.as_str()) == Some("os") {
-                    if self.last_os.as_ref().map(|(lt, _)| *lt <= old_t).unwrap_or(true) {
+                    if self
+                        .last_os
+                        .as_ref()
+                        .map(|(lt, _)| *lt <= old_t)
+                        .unwrap_or(true)
+                    {
                         self.last_os = Some((old_t, old_ev));
                     }
                 }
@@ -452,7 +457,9 @@ mod tests {
         for vk in (0x30..=0x5A).chain(0x08..=0xFE) {
             if let Some(name) = named_key(vk) {
                 assert!(
-                    !name.chars().any(|c| c.is_ascii_alphanumeric() && c.is_ascii_uppercase()),
+                    !name
+                        .chars()
+                        .any(|c| c.is_ascii_alphanumeric() && c.is_ascii_uppercase()),
                     "{name}"
                 );
             }

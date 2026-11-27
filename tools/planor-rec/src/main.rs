@@ -5,7 +5,11 @@ use planor_rec::{analyze, capture, pipe, prune, record, review, ring, util};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "planor-rec", version, about = "Planor screen recorder and pixel analyzer")]
+#[command(
+    name = "planor-rec",
+    version,
+    about = "Planor screen recorder and pixel analyzer"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -173,7 +177,10 @@ enum Command {
     },
 }
 
-fn unreachable_recorder(pipe_name: &Option<String>, e: std::io::Error) -> Box<dyn std::error::Error + Send + Sync> {
+fn unreachable_recorder(
+    pipe_name: &Option<String>,
+    e: std::io::Error,
+) -> Box<dyn std::error::Error + Send + Sync> {
     util::fmt_err(format!(
         "could not reach a recorder on {}: {e}",
         pipe::pipe_path(pipe_name.as_deref())
@@ -184,7 +191,12 @@ fn unreachable_recorder(pipe_name: &Option<String>, e: std::io::Error) -> Box<dy
 /// none can be read.
 fn max_refresh_hz() -> u32 {
     use windows_sys::Win32::Graphics::Gdi::*;
-    unsafe extern "system" fn each(m: HMONITOR, _: HDC, _: *mut windows_sys::Win32::Foundation::RECT, data: isize) -> i32 {
+    unsafe extern "system" fn each(
+        m: HMONITOR,
+        _: HDC,
+        _: *mut windows_sys::Win32::Foundation::RECT,
+        data: isize,
+    ) -> i32 {
         unsafe {
             let best = &mut *(data as *mut u32);
             let mut info: MONITORINFOEXW = std::mem::zeroed();
@@ -192,7 +204,10 @@ fn max_refresh_hz() -> u32 {
             if GetMonitorInfoW(m, &mut info.monitorInfo) != 0 {
                 let mut mode: DEVMODEW = std::mem::zeroed();
                 mode.dmSize = std::mem::size_of::<DEVMODEW>() as u16;
-                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0 && mode.dmDisplayFrequency > 1 {
+                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode)
+                    != 0
+                    && mode.dmDisplayFrequency > 1
+                {
                     *best = (*best).max(mode.dmDisplayFrequency);
                 }
             }
@@ -200,7 +215,14 @@ fn max_refresh_hz() -> u32 {
         }
     }
     let mut best = 0u32;
-    unsafe { EnumDisplayMonitors(std::ptr::null_mut(), std::ptr::null(), Some(each), &mut best as *mut u32 as isize) };
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(each),
+            &mut best as *mut u32 as isize,
+        )
+    };
     if best == 0 { 60 } else { best.clamp(10, 360) }
 }
 fn main() {
@@ -258,7 +280,10 @@ fn main() {
             to_ms,
             row,
         } => {
-            let parts: Vec<i32> = rect.split(",").filter_map(|v| v.trim().parse().ok()).collect();
+            let parts: Vec<i32> = rect
+                .split(",")
+                .filter_map(|v| v.trim().parse().ok())
+                .collect();
             if parts.len() != 4 {
                 Err(util::fmt_err("--rect must be x,y,w,h"))
             } else {

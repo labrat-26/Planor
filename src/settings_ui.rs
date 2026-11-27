@@ -1,7 +1,10 @@
 //! `planor settings`: the native settings window. Pages are generated from `settings_model::Model`, so a new
 //! key in `planor.example.toml` shows up without UI work. Every change is validated, saved after a short
 //! quiet period (so typing is not a write per keystroke) and the running daemon is told to reload.
-use crate::{Result, settings_model::{Entry, Model}};
+use crate::{
+    Result,
+    settings_model::{Entry, Model},
+};
 use std::time::{Duration, Instant};
 
 /// Which control edits a setting.
@@ -59,18 +62,27 @@ fn prepare(model: &mut Model) -> std::result::Result<(), String> {
     Ok(())
 }
 /// Set setting `i` to `v` (validated like the daemon does, and hotkeys must be ones it can bind).
-pub fn apply_change(model: &mut Model, i: usize, v: toml::Value) -> std::result::Result<(), String> {
+pub fn apply_change(
+    model: &mut Model,
+    i: usize,
+    v: toml::Value,
+) -> std::result::Result<(), String> {
     if model.entries[i].section == "hotkeys"
         && let Some(s) = v.as_str()
         && !crate::settings_model::hotkey_valid(s)
     {
-        return Err("not a hotkey Planor can bind; press a key combination such as Alt+Left".into());
+        return Err(
+            "not a hotkey Planor can bind; press a key combination such as Alt+Left".into(),
+        );
     }
     prepare(model)?;
     model.set(i, v)
 }
 /// Replace the `[[rules]]` rows.
-pub fn apply_rules(model: &mut Model, rules: &[crate::settings_model::Rule]) -> std::result::Result<(), String> {
+pub fn apply_rules(
+    model: &mut Model,
+    rules: &[crate::settings_model::Rule],
+) -> std::result::Result<(), String> {
     prepare(model)?;
     model.set_rules(rules)
 }
@@ -114,7 +126,9 @@ pub struct InstallView {
 }
 pub fn install_view() -> InstallView {
     InstallView {
-        installed: crate::install::installed_exe().map(|p| p.exists()).unwrap_or(false),
+        installed: crate::install::installed_exe()
+            .map(|p| p.exists())
+            .unwrap_or(false),
         running_installed: crate::install::running_is_installed(),
         autostart: crate::install::autostart_enabled(),
     }
@@ -152,7 +166,11 @@ pub fn button_states(v: &InstallView) -> ButtonStates {
 /// Write the file unless it is currently invalid. When the write cannot happen the unsaved edit is dropped (the
 /// caller shows why), so a later save starts from what is really on disk instead of overwriting hand edits.
 pub fn save_guarded(model: &mut Model) -> std::result::Result<(), String> {
-    let saved = if Model::load_error(&model.path).is_some() { Err(SYNTAX_ERROR.to_string()) } else { model.save().map_err(|e| e.to_string()) };
+    let saved = if Model::load_error(&model.path).is_some() {
+        Err(SYNTAX_ERROR.to_string())
+    } else {
+        model.save().map_err(|e| e.to_string())
+    };
     if saved.is_err() {
         model.dirty = false;
     }
@@ -181,9 +199,15 @@ use windows_sys::Win32::{
     Graphics::{Gdi::*, GdiPlus::*},
     System::{LibraryLoader::GetModuleHandleW, Threading::CreateMutexW},
     UI::{
-        Controls::{Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW}, *},
+        Controls::{
+            Dialogs::{CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW},
+            *,
+        },
         HiDpi::*,
-        Input::KeyboardAndMouse::{EnableWindow, GetFocus, GetKeyState, SetFocus, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent, VK_DOWN, VK_UP},
+        Input::KeyboardAndMouse::{
+            EnableWindow, GetFocus, GetKeyState, SetFocus, TME_LEAVE, TRACKMOUSEEVENT,
+            TrackMouseEvent, VK_CONTROL, VK_DOWN, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_UP,
+        },
         Shell::{DefSubclassProc, SetWindowSubclass},
         WindowsAndMessaging::*,
     },
@@ -277,15 +301,25 @@ fn mul(px: i32, dpi: u32) -> i32 {
     px * dpi as i32 / 96
 }
 fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
-    RECT { left: l, top: t, right: r, bottom: b }
+    RECT {
+        left: l,
+        top: t,
+        right: r,
+        bottom: b,
+    }
 }
 
 /// "gap_px" -> "Gap (px)", "focused_color" -> "Focused color".
 pub fn label_for(key: &str) -> String {
-    let (base, unit) = [("_px", " (px)"), ("_ms", " (ms)"), ("_percent", " (%)"), ("_mb", " (MB)")]
-        .iter()
-        .find_map(|(suffix, unit)| key.strip_suffix(suffix).map(|b| (b, *unit)))
-        .unwrap_or((key, ""));
+    let (base, unit) = [
+        ("_px", " (px)"),
+        ("_ms", " (ms)"),
+        ("_percent", " (%)"),
+        ("_mb", " (MB)"),
+    ]
+    .iter()
+    .find_map(|(suffix, unit)| key.strip_suffix(suffix).map(|b| (b, *unit)))
+    .unwrap_or((key, ""));
     let mut text = base.replace('_', " ");
     if let Some(first) = text.get(..1) {
         text = first.to_uppercase() + &text[1..];
@@ -309,7 +343,22 @@ fn icon_for(page: &str) -> &'static str {
 
 fn make_font(face: &str, dp: i32, weight: i32, dpi: u32) -> HFONT {
     unsafe {
-        CreateFontW(-mul(dp, dpi), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET as u32, 0, 0, CLEARTYPE_QUALITY as u32, 0, wide(face).as_ptr())
+        CreateFontW(
+            -mul(dp, dpi),
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET as u32,
+            0,
+            0,
+            CLEARTYPE_QUALITY as u32,
+            0,
+            wide(face).as_ptr(),
+        )
     }
 }
 fn make_fonts(dpi: u32) -> Fonts {
@@ -329,7 +378,12 @@ fn delete_fonts(f: &Fonts) {
     }
 }
 fn make_brushes(pal: &theme::Palette) -> Brushes {
-    unsafe { Brushes { bg: CreateSolidBrush(pal.bg), field: CreateSolidBrush(pal.field) } }
+    unsafe {
+        Brushes {
+            bg: CreateSolidBrush(pal.bg),
+            field: CreateSolidBrush(pal.field),
+        }
+    }
 }
 /// The accent colour, lightened in dark mode the way Windows does for text and switches.
 fn accent_for(dark: bool) -> u32 {
@@ -364,7 +418,12 @@ impl Canvas {
         }
     }
     fn off(&self, r: RECT) -> RECT {
-        rect(r.left - self.ox, r.top - self.oy, r.right - self.ox, r.bottom - self.oy)
+        rect(
+            r.left - self.ox,
+            r.top - self.oy,
+            r.right - self.ox,
+            r.bottom - self.oy,
+        )
     }
     fn fill(&self, r: RECT, color: u32) {
         unsafe {
@@ -378,7 +437,10 @@ impl Canvas {
             let r = self.off(r);
             let inset = line.map_or(0.0, |(_, w)| w / 2.0);
             let (x, y) = (r.left as f32 + inset, r.top as f32 + inset);
-            let (w, h) = ((r.right - r.left) as f32 - 2.0 * inset, (r.bottom - r.top) as f32 - 2.0 * inset);
+            let (w, h) = (
+                (r.right - r.left) as f32 - 2.0 * inset,
+                (r.bottom - r.top) as f32 - 2.0 * inset,
+            );
             let d = (radius * 2.0).clamp(1.0, w.min(h));
             let mut path = std::ptr::null_mut();
             GdipCreatePath(FillModeAlternate, &mut path);
@@ -406,7 +468,14 @@ impl Canvas {
         unsafe {
             let mut brush = std::ptr::null_mut();
             GdipCreateSolidFill(argb(color), &mut brush);
-            GdipFillEllipse(self.g, brush as *mut GpBrush, (cx - self.ox) as f32 - d as f32 / 2.0, (cy - self.oy) as f32 - d as f32 / 2.0, d as f32, d as f32);
+            GdipFillEllipse(
+                self.g,
+                brush as *mut GpBrush,
+                (cx - self.ox) as f32 - d as f32 / 2.0,
+                (cy - self.oy) as f32 - d as f32 / 2.0,
+                d as f32,
+                d as f32,
+            );
             GdipDeleteBrush(brush as *mut GpBrush);
         }
     }
@@ -463,7 +532,10 @@ pub fn single_instance() -> Option<InstanceGuard> {
             return None;
         }
         if GetLastError() == ERROR_ALREADY_EXISTS {
-            let existing = FindWindowW(wide("PlanorSettings").as_ptr(), wide("Planor Settings").as_ptr());
+            let existing = FindWindowW(
+                wide("PlanorSettings").as_ptr(),
+                wide("Planor Settings").as_ptr(),
+            );
             if !existing.is_null() {
                 if IsIconic(existing) != 0 {
                     ShowWindow(existing, SW_RESTORE);
@@ -508,7 +580,16 @@ fn stamp_of(path: &Path) -> Option<(std::time::SystemTime, u64)> {
 // ---- page layout ---------------------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
-fn child(st: &mut State, class: &str, text: &str, style: u32, ex: u32, r: RECT, id: usize, font: HFONT) -> HWND {
+fn child(
+    st: &mut State,
+    class: &str,
+    text: &str,
+    style: u32,
+    ex: u32,
+    r: RECT,
+    id: usize,
+    font: HFONT,
+) -> HWND {
     unsafe {
         let h = CreateWindowExW(
             ex,
@@ -539,7 +620,13 @@ fn measure_height(st: &State, font: HFONT, text: &str, width: i32) -> i32 {
         let old = SelectObject(hdc, font as HGDIOBJ);
         let mut rc = rect(0, 0, width, 0);
         let w = wide(text);
-        DrawTextW(hdc, w.as_ptr(), -1, &mut rc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            w.as_ptr(),
+            -1,
+            &mut rc,
+            DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX,
+        );
         SelectObject(hdc, old);
         ReleaseDC(st.page, hdc);
         rc.bottom
@@ -559,7 +646,11 @@ fn build_page(st: &mut State) {
     st.quiet = true;
     let focus_id = unsafe {
         let f = GetFocus();
-        if !f.is_null() && GetParent(f) == st.page { GetDlgCtrlID(f) } else { 0 }
+        if !f.is_null() && GetParent(f) == st.page {
+            GetDlgCtrlID(f)
+        } else {
+            0
+        }
     };
     clear_page(st);
     let dpi = st.dpi;
@@ -584,7 +675,11 @@ fn build_page(st: &mut State) {
             let (ctl_w, ctl_h, reset_w) = (if editable { s(220) } else { s(92) }, s(32), s(56));
             let text_w = (card_r - card_l - 2 * pad - ctl_w - reset_w - s(24)).max(s(160));
             let title = label_for(&entry.key);
-            let desc_h = if entry.help.is_empty() { 0 } else { measure_height(st, st.fonts.small, &entry.help, text_w) };
+            let desc_h = if entry.help.is_empty() {
+                0
+            } else {
+                measure_height(st, st.fonts.small, &entry.help, text_w)
+            };
             let desc_h = if editable { desc_h.max(s(16)) } else { desc_h };
             let block = s(20) + if desc_h > 0 { s(2) + desc_h } else { 0 };
             let h = (pad * 2 + block).max(if editable { s(64) } else { s(56) });
@@ -593,16 +688,39 @@ fn build_page(st: &mut State) {
             let card = rect(card_l, y, card_r, y + h);
             let cy = y + (h - ctl_h) / 2;
             let ctl_rc = rect(card_r - pad - ctl_w, cy, card_r - pad, cy + ctl_h);
-            let reset_rc = rect(ctl_rc.left - s(8) - reset_w, cy, ctl_rc.left - s(8), cy + ctl_h);
+            let reset_rc = rect(
+                ctl_rc.left - s(8) - reset_w,
+                cy,
+                ctl_rc.left - s(8),
+                cy + ctl_h,
+            );
             let mut field = None;
             let mut swatch = false;
             let ctl;
             match control {
                 Control::Check => {
-                    ctl = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, ctl_rc, base, body);
+                    ctl = child(
+                        st,
+                        "BUTTON",
+                        "",
+                        BS_OWNERDRAW as u32 | WS_TABSTOP,
+                        0,
+                        ctl_rc,
+                        base,
+                        body,
+                    );
                 }
                 Control::Choice(_) => {
-                    ctl = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, ctl_rc, base, body);
+                    ctl = child(
+                        st,
+                        "BUTTON",
+                        "",
+                        BS_OWNERDRAW as u32 | WS_TABSTOP,
+                        0,
+                        ctl_rc,
+                        base,
+                        body,
+                    );
                     field = Some(ctl_rc);
                 }
                 other => {
@@ -613,7 +731,21 @@ fn build_page(st: &mut State) {
                         toml::Value::String(t) => t.clone(),
                         v => v.to_string(),
                     };
-                    ctl = child(st, "EDIT", &shown, ES_AUTOHSCROLL as u32 | WS_TABSTOP, 0, rect(inner_l, cy + (ctl_h - eh) / 2, ctl_rc.right - s(12), cy + (ctl_h - eh) / 2 + eh), base, body);
+                    ctl = child(
+                        st,
+                        "EDIT",
+                        &shown,
+                        ES_AUTOHSCROLL as u32 | WS_TABSTOP,
+                        0,
+                        rect(
+                            inner_l,
+                            cy + (ctl_h - eh) / 2,
+                            ctl_rc.right - s(12),
+                            cy + (ctl_h - eh) / 2 + eh,
+                        ),
+                        base,
+                        body,
+                    );
                     field = Some(ctl_rc);
                     if matches!(other, Control::Hotkey) {
                         unsafe { SetWindowSubclass(ctl, Some(hotkey_proc), 3, 0) };
@@ -626,10 +758,26 @@ fn build_page(st: &mut State) {
             if matches!(control, Control::Check | Control::Choice(_)) {
                 unsafe { SetWindowSubclass(ctl, Some(hover_proc), 2, 0) };
             }
-            let reset = child(st, "BUTTON", "Reset", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, reset_rc, base + 1, body);
+            let reset = child(
+                st,
+                "BUTTON",
+                "Reset",
+                BS_OWNERDRAW as u32 | WS_TABSTOP,
+                0,
+                reset_rc,
+                base + 1,
+                body,
+            );
             unsafe {
                 SetWindowSubclass(reset, Some(hover_proc), 2, 0);
-                ShowWindow(reset, if value != entry.default { SW_SHOW } else { SW_HIDE });
+                ShowWindow(
+                    reset,
+                    if value != entry.default {
+                        SW_SHOW
+                    } else {
+                        SW_HIDE
+                    },
+                );
             }
             st.rows.push(Row {
                 entry: Some(i),
@@ -638,7 +786,12 @@ fn build_page(st: &mut State) {
                 title,
                 title_rc: rect(card_l + pad, top, card_l + pad + text_w, top + s(20)),
                 desc: entry.help.clone(),
-                desc_rc: rect(card_l + pad, top + s(22), card_l + pad + text_w, top + s(22) + desc_h),
+                desc_rc: rect(
+                    card_l + pad,
+                    top + s(22),
+                    card_l + pad + text_w,
+                    top + s(22) + desc_h,
+                ),
                 field,
                 swatch,
                 ctl,
@@ -674,7 +827,11 @@ fn geo(st: &State, y: i32, desc: &str, ctl_w: i32, reset_w: i32) -> Geo {
     let (margin, pad) = (s(36), s(16));
     let (l, r) = (margin, (st.page_w - margin).max(margin + s(420)));
     let text_w = (r - l - 2 * pad - ctl_w - reset_w - s(24)).max(s(160));
-    let desc_h = if desc.is_empty() { 0 } else { measure_height(st, st.fonts.small, desc, text_w) };
+    let desc_h = if desc.is_empty() {
+        0
+    } else {
+        measure_height(st, st.fonts.small, desc, text_w)
+    };
     let block = s(20) + if desc_h > 0 { s(2) + desc_h } else { 0 };
     let h = (pad * 2 + block).max(s(56));
     let top = y + (h - block) / 2;
@@ -683,7 +840,12 @@ fn geo(st: &State, y: i32, desc: &str, ctl_w: i32, reset_w: i32) -> Geo {
     Geo {
         card: rect(l, y, r, y + h),
         title_rc: rect(l + pad, top, l + pad + text_w, top + s(20)),
-        desc_rc: rect(l + pad, top + s(22), l + pad + text_w, top + s(22) + desc_h.max(s(16))),
+        desc_rc: rect(
+            l + pad,
+            top + s(22),
+            l + pad + text_w,
+            top + s(22) + desc_h.max(s(16)),
+        ),
         reset: rect(ctl.left - s(8) - reset_w, cy, ctl.left - s(8), cy + s(32)),
         ctl,
         h,
@@ -697,7 +859,14 @@ fn build_rules(st: &mut State, mut y: i32) -> i32 {
     let gap = s(6);
     let body = st.fonts.body;
     let hover_button = |h: HWND| unsafe { SetWindowSubclass(h, Some(hover_proc), 2, 0) };
-    let push = |st: &mut State, g: &Geo, title: &str, desc: &str, field: bool, ctl: HWND, reset: HWND, err_key: Option<usize>| {
+    let push = |st: &mut State,
+                g: &Geo,
+                title: &str,
+                desc: &str,
+                field: bool,
+                ctl: HWND,
+                reset: HWND,
+                err_key: Option<usize>| {
         st.rows.push(Row {
             entry: None,
             err_key,
@@ -714,16 +883,49 @@ fn build_rules(st: &mut State, mut y: i32) -> i32 {
     };
     let rules = st.model.rules();
     if rules.is_empty() {
-        let g = geo(st, y, "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.", 0, 0);
-        push(st, &g, "No rules", "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.", false, std::ptr::null_mut(), std::ptr::null_mut(), None);
+        let g = geo(
+            st,
+            y,
+            "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.",
+            0,
+            0,
+        );
+        push(
+            st,
+            &g,
+            "No rules",
+            "No rules yet. Planor tiles every window it can; add a rule to ignore, float or force-tile an app.",
+            false,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            None,
+        );
         y += g.h + gap;
     }
     for (n, r) in rules.iter().enumerate() {
         let desc = format!("Matches by {}", r.matcher.key());
         let g = geo(st, y, &desc, s(120), s(84));
         let base = RULE_BASE + n * 4;
-        let action = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, base, body);
-        let remove = child(st, "BUTTON", "Remove", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.reset, base + 1, body);
+        let action = child(
+            st,
+            "BUTTON",
+            "",
+            BS_OWNERDRAW as u32 | WS_TABSTOP,
+            0,
+            g.ctl,
+            base,
+            body,
+        );
+        let remove = child(
+            st,
+            "BUTTON",
+            "Remove",
+            BS_OWNERDRAW as u32 | WS_TABSTOP,
+            0,
+            g.reset,
+            base + 1,
+            body,
+        );
         hover_button(action);
         hover_button(remove);
         push(st, &g, &r.value, &desc, false, action, remove, None);
@@ -731,29 +933,118 @@ fn build_rules(st: &mut State, mut y: i32) -> i32 {
     }
     y += s(18);
     // Match by
-    let g1 = geo(st, y, "Whether the rule looks at the program's file name or the window's class.", s(160), 0);
-    let b1 = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g1.ctl, ADD_BASE, body);
+    let g1 = geo(
+        st,
+        y,
+        "Whether the rule looks at the program's file name or the window's class.",
+        s(160),
+        0,
+    );
+    let b1 = child(
+        st,
+        "BUTTON",
+        "",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g1.ctl,
+        ADD_BASE,
+        body,
+    );
     hover_button(b1);
-    push(st, &g1, "New rule: match by", "Whether the rule looks at the program's file name or the window's class.", true, b1, std::ptr::null_mut(), None);
+    push(
+        st,
+        &g1,
+        "New rule: match by",
+        "Whether the rule looks at the program's file name or the window's class.",
+        true,
+        b1,
+        std::ptr::null_mut(),
+        None,
+    );
     y += g1.h + gap;
     // Name
     let desc = "For example Taskmgr.exe, or a window class such as Shell_Dialog.";
     let g2 = geo(st, y, desc, s(220), 0);
     let eh = s(20);
-    let edit = child(st, "EDIT", "", ES_AUTOHSCROLL as u32 | WS_TABSTOP, 0, rect(g2.ctl.left + s(12), g2.ctl.top + (s(32) - eh) / 2, g2.ctl.right - s(12), g2.ctl.top + (s(32) - eh) / 2 + eh), ADD_BASE + 1, body);
-    push(st, &g2, "New rule: name", desc, true, edit, std::ptr::null_mut(), Some(ADD_ERR));
+    let edit = child(
+        st,
+        "EDIT",
+        "",
+        ES_AUTOHSCROLL as u32 | WS_TABSTOP,
+        0,
+        rect(
+            g2.ctl.left + s(12),
+            g2.ctl.top + (s(32) - eh) / 2,
+            g2.ctl.right - s(12),
+            g2.ctl.top + (s(32) - eh) / 2 + eh,
+        ),
+        ADD_BASE + 1,
+        body,
+    );
+    push(
+        st,
+        &g2,
+        "New rule: name",
+        desc,
+        true,
+        edit,
+        std::ptr::null_mut(),
+        Some(ADD_ERR),
+    );
     y += g2.h + gap;
     // Action
-    let g3 = geo(st, y, "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.", s(160), 0);
-    let b3 = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g3.ctl, ADD_BASE + 2, body);
+    let g3 = geo(
+        st,
+        y,
+        "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.",
+        s(160),
+        0,
+    );
+    let b3 = child(
+        st,
+        "BUTTON",
+        "",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g3.ctl,
+        ADD_BASE + 2,
+        body,
+    );
     hover_button(b3);
-    push(st, &g3, "New rule: action", "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.", true, b3, std::ptr::null_mut(), None);
+    push(
+        st,
+        &g3,
+        "New rule: action",
+        "Ignore leaves the window alone, Float lets it float above the tiles, Tile always tiles it.",
+        true,
+        b3,
+        std::ptr::null_mut(),
+        None,
+    );
     y += g3.h + gap;
     // Add
     let g4 = geo(st, y, "", s(120), 0);
-    let b4 = child(st, "BUTTON", "Add rule", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g4.ctl, ADD_BASE + 3, body);
+    let b4 = child(
+        st,
+        "BUTTON",
+        "Add rule",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g4.ctl,
+        ADD_BASE + 3,
+        body,
+    );
     hover_button(b4);
-    push(st, &g4, "Add the new rule", "", false, b4, std::ptr::null_mut(), None);
+    push(
+        st,
+        &g4,
+        "Add the new rule",
+        "",
+        false,
+        b4,
+        std::ptr::null_mut(),
+        None,
+    );
     y += g4.h + gap;
     y
 }
@@ -766,7 +1057,9 @@ fn build_install(st: &mut State, mut y: i32) -> i32 {
     let body = st.fonts.body;
     st.install = install_view();
     let b = button_states(&st.install);
-    let path = crate::install::installed_exe().map(|p| p.display().to_string()).unwrap_or_default();
+    let path = crate::install::installed_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     let push = |st: &mut State, g: &Geo, title: &str, desc: &str, ctl: HWND, reset: HWND| {
         st.rows.push(Row {
             entry: None,
@@ -783,17 +1076,48 @@ fn build_install(st: &mut State, mut y: i32) -> i32 {
         });
     };
     let hover = |h: HWND| unsafe { SetWindowSubclass(h, Some(hover_proc), 2, 0) };
-    let note = if st.install_note.is_empty() { String::new() } else { format!("\n{}", st.install_note) };
-    let (title, desc) = if st.install.running_installed {
-        ("Planor is installed".to_string(), format!("This copy runs from {path}.{note}"))
-    } else if st.install.installed {
-        ("Planor is installed".to_string(), format!("Installed at {path}. Reinstall to update it with this copy.{note}"))
+    let note = if st.install_note.is_empty() {
+        String::new()
     } else {
-        ("Install Planor".to_string(), format!("Copies Planor to {path} for your user account only, and starts it.{note}"))
+        format!("\n{}", st.install_note)
+    };
+    let (title, desc) = if st.install.running_installed {
+        (
+            "Planor is installed".to_string(),
+            format!("This copy runs from {path}.{note}"),
+        )
+    } else if st.install.installed {
+        (
+            "Planor is installed".to_string(),
+            format!("Installed at {path}. Reinstall to update it with this copy.{note}"),
+        )
+    } else {
+        (
+            "Install Planor".to_string(),
+            format!("Copies Planor to {path} for your user account only, and starts it.{note}"),
+        )
     };
     let g = geo(st, y, &desc, s(120), s(100));
-    let install = child(st, "BUTTON", b.install_label, BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE, body);
-    let uninstall = child(st, "BUTTON", "Uninstall", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.reset, INSTALL_BASE + 1, body);
+    let install = child(
+        st,
+        "BUTTON",
+        b.install_label,
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g.ctl,
+        INSTALL_BASE,
+        body,
+    );
+    let uninstall = child(
+        st,
+        "BUTTON",
+        "Uninstall",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g.reset,
+        INSTALL_BASE + 1,
+        body,
+    );
     unsafe {
         EnableWindow(install, (b.install_enabled && !st.install_busy) as i32);
         EnableWindow(uninstall, (b.uninstall_enabled && !st.install_busy) as i32);
@@ -803,19 +1127,55 @@ fn build_install(st: &mut State, mut y: i32) -> i32 {
     push(st, &g, &title, &desc, install, uninstall);
     y += g.h + gap;
 
-    let desc = if b.note.is_empty() { "Planor starts hidden when you sign in to Windows." } else { b.note };
+    let desc = if b.note.is_empty() {
+        "Planor starts hidden when you sign in to Windows."
+    } else {
+        b.note
+    };
     let g = geo(st, y, desc, s(92), 0);
-    let auto = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE + 2, body);
+    let auto = child(
+        st,
+        "BUTTON",
+        "",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g.ctl,
+        INSTALL_BASE + 2,
+        body,
+    );
     unsafe { EnableWindow(auto, b.autostart_enabled as i32) };
     hover(auto);
-    push(st, &g, "Start Planor when I sign in", desc, auto, std::ptr::null_mut());
+    push(
+        st,
+        &g,
+        "Start Planor when I sign in",
+        desc,
+        auto,
+        std::ptr::null_mut(),
+    );
     y += g.h + gap;
 
     let desc = "Uninstalling also deletes planor.toml. Leave this off to keep your settings.";
     let g = geo(st, y, desc, s(92), 0);
-    let del = child(st, "BUTTON", "", BS_OWNERDRAW as u32 | WS_TABSTOP, 0, g.ctl, INSTALL_BASE + 3, body);
+    let del = child(
+        st,
+        "BUTTON",
+        "",
+        BS_OWNERDRAW as u32 | WS_TABSTOP,
+        0,
+        g.ctl,
+        INSTALL_BASE + 3,
+        body,
+    );
     hover(del);
-    push(st, &g, "Delete my settings when uninstalling", desc, del, std::ptr::null_mut());
+    push(
+        st,
+        &g,
+        "Delete my settings when uninstalling",
+        desc,
+        del,
+        std::ptr::null_mut(),
+    );
     y + g.h + gap
 }
 
@@ -825,7 +1185,15 @@ fn apply_scroll(st: &mut State) {
         GetClientRect(st.viewport, &mut rc);
         let view_h = rc.bottom;
         st.scroll = st.scroll.clamp(0, (st.content_h - view_h).max(0));
-        SetWindowPos(st.page, std::ptr::null_mut(), 0, -st.scroll, st.page_w, st.content_h, SWP_NOZORDER | SWP_NOACTIVATE);
+        SetWindowPos(
+            st.page,
+            std::ptr::null_mut(),
+            0,
+            -st.scroll,
+            st.page_w,
+            st.content_h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
         let info = SCROLLINFO {
             cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
             fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -844,12 +1212,30 @@ fn layout(st: &mut State) {
         let mut rc: RECT = std::mem::zeroed();
         GetClientRect(st.hwnd, &mut rc);
         let dpi = st.dpi;
-        let banner_h = if st.banner_text.is_empty() { 0 } else { mul(44, dpi) };
+        let banner_h = if st.banner_text.is_empty() {
+            0
+        } else {
+            mul(44, dpi)
+        };
         let nav_w = mul(260, dpi);
-        MoveWindow(st.banner, mul(16, dpi), mul(6, dpi), rc.right - mul(32, dpi), banner_h.max(1) - mul(8, dpi).min(banner_h.max(1) - 1), 1);
+        MoveWindow(
+            st.banner,
+            mul(16, dpi),
+            mul(6, dpi),
+            rc.right - mul(32, dpi),
+            banner_h.max(1) - mul(8, dpi).min(banner_h.max(1) - 1),
+            1,
+        );
         ShowWindow(st.banner, if banner_h == 0 { SW_HIDE } else { SW_SHOW });
         MoveWindow(st.nav, 0, banner_h, nav_w, rc.bottom - banner_h, 1);
-        MoveWindow(st.viewport, nav_w, banner_h, rc.right - nav_w, rc.bottom - banner_h, 1);
+        MoveWindow(
+            st.viewport,
+            nav_w,
+            banner_h,
+            rc.right - nav_w,
+            rc.bottom - banner_h,
+            1,
+        );
         let mut vr: RECT = std::mem::zeroed();
         GetClientRect(st.viewport, &mut vr);
         st.page_w = vr.right;
@@ -871,7 +1257,11 @@ fn refresh_from_disk(st: &mut State) {
         let _ = st.model.reload_from_disk(); // a missing file keeps the in-memory defaults
     }
     st.stamp = stamp_of(&st.model.path);
-    let banner = st.blocked.as_ref().map(|e| format!("{SYNTAX_ERROR}  ({e})")).unwrap_or_default();
+    let banner = st
+        .blocked
+        .as_ref()
+        .map(|e| format!("{SYNTAX_ERROR}  ({e})"))
+        .unwrap_or_default();
     st.banner_text = String::from("\u{0}"); // force the rebuild below
     set_banner(st, &banner);
 }
@@ -956,14 +1346,24 @@ fn popup(owner: HWND, button: HWND, items: &[&str], current: Option<usize>) -> O
         GetClientRect(button, &mut rc);
         let mut at = POINT { x: 0, y: rc.bottom };
         ClientToScreen(button, &mut at);
-        let picked = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN, at.x, at.y + 2, 0, owner, std::ptr::null());
+        let picked = TrackPopupMenu(
+            menu,
+            TPM_RETURNCMD | TPM_NONOTIFY | TPM_LEFTALIGN | TPM_TOPALIGN,
+            at.x,
+            at.y + 2,
+            0,
+            owner,
+            std::ptr::null(),
+        );
         DestroyMenu(menu);
         (picked > 0).then(|| picked as usize - 1)
     }
 }
 
 fn choose(st: &mut State, i: usize, choices: &'static [&'static str]) {
-    let Some(ctl) = row_of(st, i).map(|r| r.ctl) else { return };
+    let Some(ctl) = row_of(st, i).map(|r| r.ctl) else {
+        return;
+    };
     let current = st.model.value(i);
     let at = choices.iter().position(|c| current.as_str() == Some(c));
     let picked = popup(st.hwnd, ctl, choices, at); // modal: other messages run meanwhile, so re-take the state after it
@@ -980,7 +1380,11 @@ fn action_names() -> [&'static str; 3] {
     ["Ignore", "Float", "Tile"]
 }
 fn matcher_at(n: usize) -> crate::settings_model::RuleMatch {
-    if n == 0 { crate::settings_model::RuleMatch::Process } else { crate::settings_model::RuleMatch::Class }
+    if n == 0 {
+        crate::settings_model::RuleMatch::Process
+    } else {
+        crate::settings_model::RuleMatch::Class
+    }
 }
 
 fn rules_change(st: &mut State, rules: Vec<crate::settings_model::Rule>) {
@@ -1025,12 +1429,19 @@ fn rules_command(st: &mut State, id: usize, code: u32) {
             3 => {
                 let name = text_of(item(ADD_BASE + 1)).trim().to_string();
                 if name.is_empty() {
-                    st.errors.insert(ADD_ERR, "Type the process name (like Taskmgr.exe) or window class first.".into());
+                    st.errors.insert(
+                        ADD_ERR,
+                        "Type the process name (like Taskmgr.exe) or window class first.".into(),
+                    );
                     build_page(st);
                     return;
                 }
                 let mut rules = st.model.rules();
-                rules.push(Rule { matcher: st.new_matcher, value: name, action: st.new_action });
+                rules.push(Rule {
+                    matcher: st.new_matcher,
+                    value: name,
+                    action: st.new_action,
+                });
                 rules_change(st, rules);
             }
             _ => (),
@@ -1056,7 +1467,11 @@ fn rules_command(st: &mut State, id: usize, code: u32) {
 }
 
 /// Run `job` on a worker thread and post its outcome to the window as `msg` (`wp` 1 = ok, `lp` = Box<String>).
-fn run_job(st: &mut State, msg: u32, job: impl FnOnce() -> std::result::Result<String, String> + Send + 'static) {
+fn run_job(
+    st: &mut State,
+    msg: u32,
+    job: impl FnOnce() -> std::result::Result<String, String> + Send + 'static,
+) {
     st.install_busy = true;
     build_page(st);
     let hwnd = st.hwnd as usize;
@@ -1076,7 +1491,11 @@ fn install_command(st: &mut State, id: usize, code: u32) {
     match id - INSTALL_BASE {
         0 => {
             st.install_note = "Installing...".into();
-            run_job(st, WM_INSTALL_DONE, || crate::install::install().map(|p| p.display().to_string()).map_err(|e| e.to_string()));
+            run_job(st, WM_INSTALL_DONE, || {
+                crate::install::install()
+                    .map(|p| p.display().to_string())
+                    .map_err(|e| e.to_string())
+            });
         }
         1 => {
             let owner = st.hwnd; // the confirmation is modal: re-take the state after it
@@ -1092,7 +1511,11 @@ fn install_command(st: &mut State, id: usize, code: u32) {
             if asked == IDOK {
                 let delete = st.delete_config;
                 st.install_note = "Uninstalling...".into();
-                run_job(st, WM_UNINSTALL_DONE, move || crate::install::uninstall(delete).map(|_| String::new()).map_err(|e| e.to_string()));
+                run_job(st, WM_UNINSTALL_DONE, move || {
+                    crate::install::uninstall(delete)
+                        .map(|_| String::new())
+                        .map_err(|e| e.to_string())
+                });
             }
         }
         2 => {
@@ -1162,7 +1585,9 @@ fn row_command(st: &mut State, id: usize, code: u32) {
         }
         Control::Choice(choices) if code == BN_CLICKED => choose(st, i, choices),
         Control::Number { .. } | Control::Color | Control::Hotkey | Control::Text => {
-            let Some(ctl) = row_of(st, i).map(|r| r.ctl) else { return };
+            let Some(ctl) = row_of(st, i).map(|r| r.ctl) else {
+                return;
+            };
             if code == EN_CHANGE {
                 match st.model.parse_input(i, &text_of(ctl)) {
                     Ok(v) => change(st, i, v),
@@ -1215,37 +1640,108 @@ fn paint_page(st: &State, c: &Canvas, clip: RECT) {
     let s = |px: i32| mul(px, dpi);
     c.fill(clip, pal.bg);
     let page = &st.pages[st.selected];
-    c.text(&label_for(page), rect(s(36), s(24), st.page_w - s(36), s(24) + s(48)), st.fonts.title, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    c.text(
+        &label_for(page),
+        rect(s(36), s(24), st.page_w - s(36), s(24) + s(48)),
+        st.fonts.title,
+        pal.text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    );
     for row in &st.rows {
         if row.card.bottom < clip.top || row.card.top > clip.bottom {
             continue;
         }
-        c.rrect(row.card, s(4) as f32, Some(pal.card), Some((pal.border, 1.0)));
+        c.rrect(
+            row.card,
+            s(4) as f32,
+            Some(pal.card),
+            Some((pal.border, 1.0)),
+        );
         let error = row.err_key.and_then(|k| st.errors.get(&k));
         // a card with no description makes room for the error line by lifting its title
-        let lift = if error.is_some() && row.desc.is_empty() { s(10) } else { 0 };
+        let lift = if error.is_some() && row.desc.is_empty() {
+            s(10)
+        } else {
+            0
+        };
         let up = |r: RECT| rect(r.left, r.top - lift, r.right, r.bottom - lift);
-        c.text(&row.title, up(row.title_rc), st.fonts.body, pal.text, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
+        c.text(
+            &row.title,
+            up(row.title_rc),
+            st.fonts.body,
+            pal.text,
+            DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+        );
         match error {
-            Some(e) => c.text(e, up(row.desc_rc), st.fonts.small, pal.error, DT_LEFT | DT_WORDBREAK),
-            None if !row.desc.is_empty() => c.text(&row.desc, row.desc_rc, st.fonts.small, pal.subtext, DT_LEFT | DT_WORDBREAK),
+            Some(e) => c.text(
+                e,
+                up(row.desc_rc),
+                st.fonts.small,
+                pal.error,
+                DT_LEFT | DT_WORDBREAK,
+            ),
+            None if !row.desc.is_empty() => c.text(
+                &row.desc,
+                row.desc_rc,
+                st.fonts.small,
+                pal.subtext,
+                DT_LEFT | DT_WORDBREAK,
+            ),
             None => (),
         }
         let Some(f) = row.field else { continue };
-        let own_paint = matches!(row.entry.map(|i| control_for(&st.model.entries[i])), Some(Control::Choice(_)))
-            || (row.entry.is_none() && !is_edit(row.ctl));
+        let own_paint = matches!(
+            row.entry.map(|i| control_for(&st.model.entries[i])),
+            Some(Control::Choice(_))
+        ) || (row.entry.is_none() && !is_edit(row.ctl));
         if own_paint {
             continue; // a drop-down paints itself
         }
         let focused = unsafe { GetFocus() } == row.ctl;
-        c.rrect(f, s(4) as f32, Some(pal.field), Some((if error.is_some() { pal.error } else { pal.border }, 1.0)));
-        let line = if error.is_some() { pal.error } else if focused { st.accent } else { pal.field_line };
-        c.fill(rect(f.left + s(3), f.bottom - if focused { s(2) } else { 1 }, f.right - s(3), f.bottom), line);
+        c.rrect(
+            f,
+            s(4) as f32,
+            Some(pal.field),
+            Some((
+                if error.is_some() {
+                    pal.error
+                } else {
+                    pal.border
+                },
+                1.0,
+            )),
+        );
+        let line = if error.is_some() {
+            pal.error
+        } else if focused {
+            st.accent
+        } else {
+            pal.field_line
+        };
+        c.fill(
+            rect(
+                f.left + s(3),
+                f.bottom - if focused { s(2) } else { 1 },
+                f.right - s(3),
+                f.bottom,
+            ),
+            line,
+        );
         if let (true, Some(i)) = (row.swatch, row.entry) {
             let hex = st.model.value(i);
             let hex = hex.as_str().unwrap_or("#000000");
             if let Some(color) = theme::hex_to_colorref(hex) {
-                c.rrect(rect(f.left + s(10), f.top + (f.bottom - f.top - s(18)) / 2, f.left + s(28), f.top + (f.bottom - f.top - s(18)) / 2 + s(18)), s(3) as f32, Some(color), Some((pal.field_line, 1.0)));
+                c.rrect(
+                    rect(
+                        f.left + s(10),
+                        f.top + (f.bottom - f.top - s(18)) / 2,
+                        f.left + s(28),
+                        f.top + (f.bottom - f.top - s(18)) / 2 + s(18),
+                    ),
+                    s(3) as f32,
+                    Some(color),
+                    Some((pal.field_line, 1.0)),
+                );
             }
         }
     }
@@ -1254,10 +1750,30 @@ fn paint_page(st: &State, c: &Canvas, clip: RECT) {
 fn paint_dropdown(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool) {
     let (pal, dpi) = (st.pal, st.dpi);
     let s = |px: i32| mul(px, dpi);
-    c.rrect(rc, s(4) as f32, Some(if hot { pal.hover } else { pal.field }), Some((pal.border, 1.0)));
-    c.fill(rect(rc.left + s(3), rc.bottom - 1, rc.right - s(3), rc.bottom), pal.field_line);
-    c.text(text, rect(rc.left + s(12), rc.top, rc.right - s(36), rc.bottom), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    c.text("\u{E70D}", rect(rc.right - s(32), rc.top, rc.right - s(10), rc.bottom), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    c.rrect(
+        rc,
+        s(4) as f32,
+        Some(if hot { pal.hover } else { pal.field }),
+        Some((pal.border, 1.0)),
+    );
+    c.fill(
+        rect(rc.left + s(3), rc.bottom - 1, rc.right - s(3), rc.bottom),
+        pal.field_line,
+    );
+    c.text(
+        text,
+        rect(rc.left + s(12), rc.top, rc.right - s(36), rc.bottom),
+        st.fonts.body,
+        pal.text,
+        DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+    );
+    c.text(
+        "\u{E70D}",
+        rect(rc.right - s(32), rc.top, rc.right - s(10), rc.bottom),
+        st.fonts.icon,
+        pal.text,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
 }
 /// A flat text button: accent-coloured text with a hover fill, or (`filled`) an accent-filled button.
 fn paint_text_button(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool, filled: bool) {
@@ -1265,33 +1781,83 @@ fn paint_text_button(st: &State, c: &Canvas, rc: RECT, text: &str, hot: bool, fi
     let radius = mul(4, dpi) as f32;
     if filled {
         c.rrect(rc, radius, Some(st.accent), None);
-        c.text(text, rc, st.fonts.body, if st.dark { 0 } else { 0xFFFFFF }, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        c.text(
+            text,
+            rc,
+            st.fonts.body,
+            if st.dark { 0 } else { 0xFFFFFF },
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
     } else {
         if hot {
             c.rrect(rc, radius, Some(pal.hover), None);
         }
-        c.text(text, rc, st.fonts.body, st.accent, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        c.text(
+            text,
+            rc,
+            st.fonts.body,
+            st.accent,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        );
     }
 }
 
 /// A Settings-style switch with its On/Off word: accent track and dark knob when on, outline when off.
-fn paint_switch(st: &State, c: &Canvas, rc: RECT, on: bool, hot: bool, hover: bool, disabled: bool) {
+fn paint_switch(
+    st: &State,
+    c: &Canvas,
+    rc: RECT,
+    on: bool,
+    hot: bool,
+    hover: bool,
+    disabled: bool,
+) {
     let (pal, dpi) = (st.pal, st.dpi);
     let s = |px: i32| mul(px, dpi);
     let (w, h) = (s(40), s(20));
-    let sw = rect(rc.right - w, rc.top + (rc.bottom - rc.top - h) / 2, rc.right, rc.top + (rc.bottom - rc.top - h) / 2 + h);
+    let sw = rect(
+        rc.right - w,
+        rc.top + (rc.bottom - rc.top - h) / 2,
+        rc.right,
+        rc.top + (rc.bottom - rc.top - h) / 2 + h,
+    );
     let word = if on { "On" } else { "Off" };
-    c.text(word, rect(rc.left, rc.top, sw.left - s(10), rc.bottom), st.fonts.body, if disabled { pal.subtext } else { pal.text }, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    c.text(
+        word,
+        rect(rc.left, rc.top, sw.left - s(10), rc.bottom),
+        st.fonts.body,
+        if disabled { pal.subtext } else { pal.text },
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE,
+    );
     let cy = sw.top + h / 2;
     let knob = if hot && !disabled { s(14) } else { s(12) };
     if disabled {
         c.rrect(sw, (h / 2) as f32, None, Some((pal.border, 1.0)));
-        c.circle(if on { sw.right - s(10) } else { sw.left + s(10) }, cy, knob, pal.border);
+        c.circle(
+            if on {
+                sw.right - s(10)
+            } else {
+                sw.left + s(10)
+            },
+            cy,
+            knob,
+            pal.border,
+        );
     } else if on {
         c.rrect(sw, (h / 2) as f32, Some(st.accent), None);
-        c.circle(sw.right - s(10), cy, knob, if st.dark { 0 } else { 0xFFFFFF });
+        c.circle(
+            sw.right - s(10),
+            cy,
+            knob,
+            if st.dark { 0 } else { 0xFFFFFF },
+        );
     } else {
-        c.rrect(sw, (h / 2) as f32, if hover { Some(pal.hover) } else { None }, Some((pal.track, 1.0)));
+        c.rrect(
+            sw,
+            (h / 2) as f32,
+            if hover { Some(pal.hover) } else { None },
+            Some((pal.track, 1.0)),
+        );
         c.circle(sw.left + s(10), cy, knob, pal.track);
     }
 }
@@ -1299,9 +1865,23 @@ fn paint_disabled_button(st: &State, c: &Canvas, rc: RECT, text: &str, filled: b
     if filled {
         c.rrect(rc, mul(4, st.dpi) as f32, Some(st.pal.hover), None);
     }
-    c.text(text, rc, st.fonts.body, st.pal.subtext, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    c.text(
+        text,
+        rc,
+        st.fonts.body,
+        st.pal.subtext,
+        DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+    );
 }
-fn paint_install(st: &State, c: &Canvas, rc: RECT, id: usize, hot: bool, hover: bool, disabled: bool) {
+fn paint_install(
+    st: &State,
+    c: &Canvas,
+    rc: RECT,
+    id: usize,
+    hot: bool,
+    hover: bool,
+    disabled: bool,
+) {
     let label = button_states(&st.install).install_label;
     match id - INSTALL_BASE {
         0 if disabled => paint_disabled_button(st, c, rc, label, true),
@@ -1331,8 +1911,24 @@ fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
             paint_install(st, c, rc, id, hot, hover, d.itemState & ODS_DISABLED != 0);
         } else if id >= ADD_BASE {
             match id - ADD_BASE {
-                0 => paint_dropdown(st, c, rc, matcher_names()[(st.new_matcher == crate::settings_model::RuleMatch::Class) as usize], hot),
-                2 => paint_dropdown(st, c, rc, action_names()[crate::settings_model::RuleAction::ALL.iter().position(|a| *a == st.new_action).unwrap_or(0)], hot),
+                0 => paint_dropdown(
+                    st,
+                    c,
+                    rc,
+                    matcher_names()
+                        [(st.new_matcher == crate::settings_model::RuleMatch::Class) as usize],
+                    hot,
+                ),
+                2 => paint_dropdown(
+                    st,
+                    c,
+                    rc,
+                    action_names()[crate::settings_model::RuleAction::ALL
+                        .iter()
+                        .position(|a| *a == st.new_action)
+                        .unwrap_or(0)],
+                    hot,
+                ),
                 _ => paint_text_button(st, c, rc, "Add rule", hot, true),
             }
         } else if id >= RULE_BASE {
@@ -1340,7 +1936,16 @@ fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
             if slot == 1 {
                 paint_text_button(st, c, rc, "Remove", hot, false);
             } else if let Some(r) = st.model.rules().get(n) {
-                paint_dropdown(st, c, rc, action_names()[crate::settings_model::RuleAction::ALL.iter().position(|a| *a == r.action).unwrap_or(0)], hot);
+                paint_dropdown(
+                    st,
+                    c,
+                    rc,
+                    action_names()[crate::settings_model::RuleAction::ALL
+                        .iter()
+                        .position(|a| *a == r.action)
+                        .unwrap_or(0)],
+                    hot,
+                );
             }
         } else {
             let (i, slot) = ((id - ROW_BASE) / 4, (id - ROW_BASE) % 4);
@@ -1348,14 +1953,29 @@ fn draw_item(st: &State, d: &DRAWITEMSTRUCT) {
                 paint_text_button(st, c, rc, "Reset", hot, false);
             } else {
                 match control_for(&st.model.entries[i]) {
-                    Control::Check => paint_switch(st, c, rc, st.model.value(i).as_bool() == Some(true), hot, hover, false),
-                    Control::Choice(_) => paint_dropdown(st, c, rc, st.model.value(i).as_str().unwrap_or(""), hot),
+                    Control::Check => paint_switch(
+                        st,
+                        c,
+                        rc,
+                        st.model.value(i).as_bool() == Some(true),
+                        hot,
+                        hover,
+                        false,
+                    ),
+                    Control::Choice(_) => {
+                        paint_dropdown(st, c, rc, st.model.value(i).as_str().unwrap_or(""), hot)
+                    }
                     _ => (),
                 }
             }
         }
         if focus {
-            c.rrect(rect(rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1), s(4) as f32, None, Some((pal.text, 2.0)));
+            c.rrect(
+                rect(rc.left + 1, rc.top + 1, rc.right - 1, rc.bottom - 1),
+                s(4) as f32,
+                None,
+                Some((pal.text, 2.0)),
+            );
         }
     });
 }
@@ -1370,20 +1990,53 @@ fn paint_nav(st: &State, hwnd: HWND) {
         let s = |px: i32| mul(px, dpi);
         buffered(hdc, rc, |c| {
             c.fill(rc, pal.bg);
-            DrawIconEx(c.hdc, s(18), s(18), theme::app_icon(s(28)), s(28), s(28), 0, std::ptr::null_mut(), DI_NORMAL);
-            c.text("Planor", rect(s(56), s(14), rc.right - s(8), s(14) + s(36)), st.fonts.brand, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            DrawIconEx(
+                c.hdc,
+                s(18),
+                s(18),
+                theme::app_icon(s(28)),
+                s(28),
+                s(28),
+                0,
+                std::ptr::null_mut(),
+                DI_NORMAL,
+            );
+            c.text(
+                "Planor",
+                rect(s(56), s(14), rc.right - s(8), s(14) + s(36)),
+                st.fonts.brand,
+                pal.text,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE,
+            );
             for (n, page) in st.pages.iter().enumerate() {
                 let top = s(72) + n as i32 * s(44);
                 let item = rect(s(8), top, rc.right - s(8), top + s(40));
                 let selected = n == st.selected;
                 if selected {
                     c.rrect(item, s(4) as f32, Some(pal.nav_sel), None);
-                    c.rrect(rect(item.left, top + s(12), item.left + s(3), top + s(28)), 1.5, Some(st.accent), None);
+                    c.rrect(
+                        rect(item.left, top + s(12), item.left + s(3), top + s(28)),
+                        1.5,
+                        Some(st.accent),
+                        None,
+                    );
                 } else if st.nav_hover == Some(n) {
                     c.rrect(item, s(4) as f32, Some(pal.hover), None);
                 }
-                c.text(icon_for(page), rect(item.left + s(12), top, item.left + s(36), top + s(40)), st.fonts.icon, pal.text, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                c.text(&label_for(page), rect(item.left + s(46), top, item.right - s(8), top + s(40)), st.fonts.body, pal.text, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                c.text(
+                    icon_for(page),
+                    rect(item.left + s(12), top, item.left + s(36), top + s(40)),
+                    st.fonts.icon,
+                    pal.text,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+                );
+                c.text(
+                    &label_for(page),
+                    rect(item.left + s(46), top, item.right - s(8), top + s(40)),
+                    st.fonts.body,
+                    pal.text,
+                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
             }
         });
         EndPaint(hwnd, &ps);
@@ -1402,12 +2055,24 @@ fn erase(hwnd: HWND, hdc: HDC, brush: HBRUSH) -> LRESULT {
 // ---- window procedures ---------------------------------------------------------------------------------
 
 fn track_leave(hwnd: HWND) {
-    let mut t = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+    let mut t = TRACKMOUSEEVENT {
+        cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+        dwFlags: TME_LEAVE,
+        hwndTrack: hwnd,
+        dwHoverTime: 0,
+    };
     unsafe { TrackMouseEvent(&mut t) };
 }
 
 /// Hover highlight for the owner-drawn buttons.
-unsafe extern "system" fn hover_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+unsafe extern "system" fn hover_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
     unsafe {
         let p = STATE.load(Ordering::Relaxed);
         if !p.is_null() {
@@ -1430,7 +2095,14 @@ unsafe extern "system" fn hover_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARA
 }
 
 /// Up and down arrows in a number box step the value.
-unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, entry: usize) -> LRESULT {
+unsafe extern "system" fn edit_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    entry: usize,
+) -> LRESULT {
     unsafe {
         if msg == WM_KEYDOWN && (wp as u16 == VK_UP || wp as u16 == VK_DOWN) {
             let p = STATE.load(Ordering::Relaxed);
@@ -1448,7 +2120,14 @@ unsafe extern "system" fn edit_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
 }
 
 /// A hotkey box: it records the key combination pressed instead of accepting typed text.
-unsafe extern "system" fn hotkey_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _id: usize, _data: usize) -> LRESULT {
+unsafe extern "system" fn hotkey_proc(
+    hwnd: HWND,
+    msg: u32,
+    wp: WPARAM,
+    lp: LPARAM,
+    _id: usize,
+    _data: usize,
+) -> LRESULT {
     unsafe {
         match msg {
             WM_KEYDOWN | WM_SYSKEYDOWN => {
@@ -1457,10 +2136,19 @@ unsafe extern "system" fn hotkey_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 if vk == 0x09 || (vk == 0x73 && down(VK_MENU)) {
                     return DefSubclassProc(hwnd, msg, wp, lp); // Tab moves on, Alt+F4 still closes
                 }
-                if matches!(vk as u16, VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN) {
+                if matches!(
+                    vk as u16,
+                    VK_SHIFT | VK_CONTROL | VK_MENU | VK_LWIN | VK_RWIN
+                ) {
                     return 0;
                 }
-                if let Some(text) = hotkey_text(down(VK_CONTROL), down(VK_MENU), down(VK_SHIFT), down(VK_LWIN) || down(VK_RWIN), vk) {
+                if let Some(text) = hotkey_text(
+                    down(VK_CONTROL),
+                    down(VK_MENU),
+                    down(VK_SHIFT),
+                    down(VK_LWIN) || down(VK_RWIN),
+                    vk,
+                ) {
                     set_text(hwnd, &text); // EN_CHANGE then validates and saves it
                 }
                 0
@@ -1476,7 +2164,14 @@ fn pick_color(i: usize) {
     // No borrow of the window state is held while the chooser runs: it pumps messages (timers, activation).
     let (owner, initial) = {
         let st = state();
-        (st.hwnd, st.model.value(i).as_str().and_then(theme::hex_to_colorref).unwrap_or(0))
+        (
+            st.hwnd,
+            st.model
+                .value(i)
+                .as_str()
+                .and_then(theme::hex_to_colorref)
+                .unwrap_or(0),
+        )
     };
     let mut custom = [0x00FF_FFFFu32; 16];
     let chosen = unsafe {
@@ -1532,7 +2227,11 @@ unsafe extern "system" fn page_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
                 0
             }
             WM_LBUTTONDOWN => {
-                if let Some(i) = swatch_at(s, (lp & 0xFFFF) as i16 as i32, ((lp >> 16) & 0xFFFF) as i16 as i32) {
+                if let Some(i) = swatch_at(
+                    s,
+                    (lp & 0xFFFF) as i16 as i32,
+                    ((lp >> 16) & 0xFFFF) as i16 as i32,
+                ) {
                     pick_color(i);
                 }
                 0
@@ -1580,7 +2279,8 @@ unsafe extern "system" fn viewport_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LP
 fn nav_index(st: &State, y: i32) -> Option<usize> {
     let s = |px: i32| mul(px, st.dpi);
     let rel = y - s(72);
-    (rel >= 0 && rel % s(44) < s(40) && ((rel / s(44)) as usize) < st.pages.len()).then_some((rel / s(44)) as usize)
+    (rel >= 0 && rel % s(44) < s(40) && ((rel / s(44)) as usize) < st.pages.len())
+        .then_some((rel / s(44)) as usize)
 }
 
 unsafe extern "system" fn nav_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
@@ -1677,7 +2377,15 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM
             WM_DPICHANGED => {
                 s.dpi = hi(wp);
                 let r = &*(lp as *const RECT);
-                SetWindowPos(hwnd, std::ptr::null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                SetWindowPos(
+                    hwnd,
+                    std::ptr::null_mut(),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
                 let s = &mut *p; // SetWindowPos re-entered this procedure (WM_SIZE): take the state again
                 delete_fonts(&s.fonts);
                 s.fonts = make_fonts(s.dpi);
@@ -1728,11 +2436,18 @@ fn register(name: &str, proc: WNDPROC, style: u32) {
 
 /// Open the settings window and run until it is closed.
 pub fn run(path: &Path) -> Result<()> {
-    let Some(_guard) = single_instance() else { return Ok(()) };
+    let Some(_guard) = single_instance() else {
+        return Ok(());
+    };
     theme::enable_app_dark_mode();
     let mut gdiplus_token = 0usize;
     unsafe {
-        let input = GdiplusStartupInput { GdiplusVersion: 1, DebugEventCallback: 0, SuppressBackgroundThread: 0, SuppressExternalCodecs: 0 };
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            DebugEventCallback: 0,
+            SuppressBackgroundThread: 0,
+            SuppressExternalCodecs: 0,
+        };
         GdiplusStartup(&mut gdiplus_token, &input, std::ptr::null_mut());
     }
     let (model, load_problem) = match Model::load(path) {
@@ -1770,11 +2485,29 @@ pub fn run(path: &Path) -> Result<()> {
             return Err("cannot create the settings window".into());
         }
         let mk = |class: &str, style: u32, ex: u32, id: usize| {
-            CreateWindowExW(ex, wide(class).as_ptr(), wide("").as_ptr(), style | WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, hwnd, id as isize as HMENU, instance, std::ptr::null())
+            CreateWindowExW(
+                ex,
+                wide(class).as_ptr(),
+                wide("").as_ptr(),
+                style | WS_CHILD | WS_VISIBLE,
+                0,
+                0,
+                0,
+                0,
+                hwnd,
+                id as isize as HMENU,
+                instance,
+                std::ptr::null(),
+            )
         };
         let nav = mk("PlanorNav", WS_TABSTOP, 0, 100);
         let banner = mk("STATIC", 0, 0, BANNER_ID);
-        let viewport = mk("PlanorViewport", WS_VSCROLL | WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, 0);
+        let viewport = mk(
+            "PlanorViewport",
+            WS_VSCROLL | WS_CLIPCHILDREN,
+            WS_EX_CONTROLPARENT,
+            0,
+        );
         let page = CreateWindowExW(
             WS_EX_CONTROLPARENT,
             wide("PlanorPage").as_ptr(),
@@ -1863,7 +2596,10 @@ mod tests {
         p
     }
     fn idx(m: &Model, s: &str, k: &str) -> usize {
-        m.entries.iter().position(|e| e.section == s && e.key == k).unwrap()
+        m.entries
+            .iter()
+            .position(|e| e.section == s && e.key == k)
+            .unwrap()
     }
 
     #[test]
@@ -1873,15 +2609,33 @@ mod tests {
             let c = control_for(e);
             match (&e.default, e.section.as_str()) {
                 (toml::Value::Boolean(_), _) => assert_eq!(c, Control::Check, "{}", e.key),
-                (toml::Value::Integer(_), _) => assert_eq!(c, Control::Number { float: false }, "{}", e.key),
-                (toml::Value::Float(_), _) => assert_eq!(c, Control::Number { float: true }, "{}", e.key),
+                (toml::Value::Integer(_), _) => {
+                    assert_eq!(c, Control::Number { float: false }, "{}", e.key)
+                }
+                (toml::Value::Float(_), _) => {
+                    assert_eq!(c, Control::Number { float: true }, "{}", e.key)
+                }
                 (_, "hotkeys") => assert_eq!(c, Control::Hotkey, "{}", e.key),
-                _ => assert_ne!(c, Control::Text, "{} should have a dedicated control", e.key),
+                _ => assert_ne!(
+                    c,
+                    Control::Text,
+                    "{} should have a dedicated control",
+                    e.key
+                ),
             }
         }
-        assert!(matches!(control_for(&m.entries[idx(&m, "animation", "curve")]), Control::Choice(_)));
-        assert_eq!(control_for(&m.entries[idx(&m, "borders", "focused_color")]), Control::Color);
-        assert_eq!(control_for(&m.entries[idx(&m, "hotkeys", "focus_left")]), Control::Hotkey);
+        assert!(matches!(
+            control_for(&m.entries[idx(&m, "animation", "curve")]),
+            Control::Choice(_)
+        ));
+        assert_eq!(
+            control_for(&m.entries[idx(&m, "borders", "focused_color")]),
+            Control::Color
+        );
+        assert_eq!(
+            control_for(&m.entries[idx(&m, "hotkeys", "focus_left")]),
+            Control::Hotkey
+        );
     }
 
     #[test]
@@ -1893,7 +2647,10 @@ mod tests {
         }
         assert!(!s.take_due(t0 + Duration::from_millis(449)));
         assert!(s.take_due(t0 + Duration::from_millis(450)));
-        assert!(!s.take_due(t0 + Duration::from_millis(2000)), "one save per burst");
+        assert!(
+            !s.take_due(t0 + Duration::from_millis(2000)),
+            "one save per burst"
+        );
     }
 
     #[test]
@@ -1918,7 +2675,10 @@ mod tests {
         apply_change(&mut m, width, toml::Value::Integer(5)).unwrap(); // must not reload over the unsaved first edit
         save_guarded(&mut m).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("gap_px = 8") && text.contains("width_px = 5"), "{text}");
+        assert!(
+            text.contains("gap_px = 8") && text.contains("width_px = 5"),
+            "{text}"
+        );
     }
 
     #[test]
@@ -1929,30 +2689,66 @@ mod tests {
         let gap = idx(&m, "layout", "gap_px");
         assert!(apply_change(&mut m, gap, toml::Value::Integer(3)).is_err());
         assert!(save_guarded(&mut m).is_err());
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), broken, "the file is never overwritten");
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            broken,
+            "the file is never overwritten"
+        );
     }
-
 
     #[test]
     fn hotkey_text_matches_example_style() {
-        assert_eq!(hotkey_text(false, true, false, false, 0x25).as_deref(), Some("Alt+Left"));
-        assert_eq!(hotkey_text(true, true, true, false, 0x08).as_deref(), Some("Ctrl+Alt+Shift+Backspace"));
-        assert_eq!(hotkey_text(false, true, true, false, 0x27).as_deref(), Some("Alt+Shift+Right"));
-        assert_eq!(hotkey_text(false, true, false, false, 0xDD).as_deref(), Some("Alt+]"));
-        assert_eq!(hotkey_text(false, true, false, false, 0x53).as_deref(), Some("Alt+S"));
-        assert_eq!(hotkey_text(true, false, false, true, 0x31).as_deref(), Some("Ctrl+Win+1"));
+        assert_eq!(
+            hotkey_text(false, true, false, false, 0x25).as_deref(),
+            Some("Alt+Left")
+        );
+        assert_eq!(
+            hotkey_text(true, true, true, false, 0x08).as_deref(),
+            Some("Ctrl+Alt+Shift+Backspace")
+        );
+        assert_eq!(
+            hotkey_text(false, true, true, false, 0x27).as_deref(),
+            Some("Alt+Shift+Right")
+        );
+        assert_eq!(
+            hotkey_text(false, true, false, false, 0xDD).as_deref(),
+            Some("Alt+]")
+        );
+        assert_eq!(
+            hotkey_text(false, true, false, false, 0x53).as_deref(),
+            Some("Alt+S")
+        );
+        assert_eq!(
+            hotkey_text(true, false, false, true, 0x31).as_deref(),
+            Some("Ctrl+Win+1")
+        );
     }
 
     #[test]
     fn hotkey_text_rejects_unsupported_keys_and_bare_keys() {
-        assert_eq!(hotkey_text(false, true, false, false, 0x74), None, "F5 cannot be bound");
-        assert_eq!(hotkey_text(false, false, false, false, 0x41), None, "a bare key would hijack typing");
-        assert_eq!(hotkey_text(true, false, false, false, 0x10), None, "Shift alone is not a key");
+        assert_eq!(
+            hotkey_text(false, true, false, false, 0x74),
+            None,
+            "F5 cannot be bound"
+        );
+        assert_eq!(
+            hotkey_text(false, false, false, false, 0x41),
+            None,
+            "a bare key would hijack typing"
+        );
+        assert_eq!(
+            hotkey_text(true, false, false, false, 0x10),
+            None,
+            "Shift alone is not a key"
+        );
     }
 
     #[test]
     fn hotkey_text_always_valid() {
-        let vks = [0x25, 0x26, 0x27, 0x28, 0x08, 0xDB, 0xDD].into_iter().chain(0x30..=0x39).chain(0x41..=0x5A);
+        let vks = [0x25, 0x26, 0x27, 0x28, 0x08, 0xDB, 0xDD]
+            .into_iter()
+            .chain(0x30..=0x39)
+            .chain(0x41..=0x5A);
         for vk in vks {
             for mods in 0..16u8 {
                 let (c, a, s, w) = (mods & 1 != 0, mods & 2 != 0, mods & 4 != 0, mods & 8 != 0);
@@ -1982,11 +2778,18 @@ mod tests {
         let p = temp("rules", "[layout]\ngap_px = 6\n");
         let mut m = Model::load(&p).unwrap();
         std::fs::write(&p, "[layout]\ngap_px = 9\n").unwrap();
-        let rule = Rule { matcher: RuleMatch::Process, value: "Calc.exe".into(), action: RuleAction::Float };
+        let rule = Rule {
+            matcher: RuleMatch::Process,
+            value: "Calc.exe".into(),
+            action: RuleAction::Float,
+        };
         apply_rules(&mut m, &[rule]).unwrap();
         save_guarded(&mut m).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("gap_px = 9") && text.contains("Calc.exe"), "{text}");
+        assert!(
+            text.contains("gap_px = 9") && text.contains("Calc.exe"),
+            "{text}"
+        );
         let broken = temp("rules-broken", "[layout\n");
         let mut m2 = Model::from_text(&broken, crate::EXAMPLE).unwrap();
         assert!(apply_rules(&mut m2, &[]).is_err());
@@ -1994,31 +2797,77 @@ mod tests {
 
     #[test]
     fn autostart_disabled_until_running_from_install() {
-        let v = InstallView { installed: true, running_installed: false, autostart: false };
+        let v = InstallView {
+            installed: true,
+            running_installed: false,
+            autostart: false,
+        };
         let b = button_states(&v);
         assert!(!b.autostart_enabled);
         assert!(!b.note.is_empty(), "the reason is shown");
-        let b = button_states(&InstallView { installed: false, running_installed: false, autostart: false });
-        assert!(!b.autostart_enabled && b.note.contains("Install Planor"), "{}", b.note);
-        let b = button_states(&InstallView { installed: true, running_installed: true, autostart: true });
+        let b = button_states(&InstallView {
+            installed: false,
+            running_installed: false,
+            autostart: false,
+        });
+        assert!(
+            !b.autostart_enabled && b.note.contains("Install Planor"),
+            "{}",
+            b.note
+        );
+        let b = button_states(&InstallView {
+            installed: true,
+            running_installed: true,
+            autostart: true,
+        });
         assert!(b.autostart_enabled);
     }
 
     #[test]
     fn uninstall_enabled_only_when_installed() {
-        assert!(!button_states(&InstallView { installed: false, running_installed: false, autostart: false }).uninstall_enabled);
-        assert!(button_states(&InstallView { installed: true, running_installed: false, autostart: false }).uninstall_enabled);
-        assert!(button_states(&InstallView { installed: true, running_installed: true, autostart: false }).uninstall_enabled);
+        assert!(
+            !button_states(&InstallView {
+                installed: false,
+                running_installed: false,
+                autostart: false
+            })
+            .uninstall_enabled
+        );
+        assert!(
+            button_states(&InstallView {
+                installed: true,
+                running_installed: false,
+                autostart: false
+            })
+            .uninstall_enabled
+        );
+        assert!(
+            button_states(&InstallView {
+                installed: true,
+                running_installed: true,
+                autostart: false
+            })
+            .uninstall_enabled
+        );
     }
 
     #[test]
     fn install_button_label_reinstalls() {
-        let label = |installed, running_installed| button_states(&InstallView { installed, running_installed, autostart: false });
+        let label = |installed, running_installed| {
+            button_states(&InstallView {
+                installed,
+                running_installed,
+                autostart: false,
+            })
+        };
         assert_eq!(label(false, false).install_label, "Install");
         assert_eq!(label(true, false).install_label, "Reinstall");
         let running = label(true, true);
         assert_eq!(running.install_label, "Installed");
-        assert!(!running.install_enabled, "cannot copy the running installed exe over itself");
+        assert!(
+            !running.install_enabled,
+            "cannot copy the running installed exe over itself"
+        );
         assert!(label(true, false).install_enabled && label(false, false).install_enabled);
     }
 
@@ -2032,7 +2881,10 @@ mod tests {
         perms.set_readonly(true);
         std::fs::set_permissions(&p, perms.clone()).unwrap();
         assert!(save_guarded(&mut m).is_err(), "the file is locked");
-        assert!(!m.dirty, "the unsaved edit is dropped, not kept to overwrite the file later");
+        assert!(
+            !m.dirty,
+            "the unsaved edit is dropped, not kept to overwrite the file later"
+        );
         perms.set_readonly(false);
         std::fs::set_permissions(&p, perms).unwrap();
         std::fs::write(&p, "[layout]\ngap_px = 6\n[borders]\nwidth_px = 3\n").unwrap(); // edited in Notepad meanwhile
@@ -2040,7 +2892,10 @@ mod tests {
         apply_change(&mut m, peek, toml::Value::Integer(50)).unwrap();
         save_guarded(&mut m).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("width_px = 3") && text.contains("peek_width_px = 50"), "{text}");
+        assert!(
+            text.contains("width_px = 3") && text.contains("peek_width_px = 50"),
+            "{text}"
+        );
     }
 
     #[test]

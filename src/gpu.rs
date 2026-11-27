@@ -36,17 +36,30 @@ impl GpuTimer {
         }
         let make = |kind| unsafe {
             let mut q = None;
-            dev.CreateQuery(&D3D11_QUERY_DESC { Query: kind, MiscFlags: 0 }, Some(&mut q)).ok()?;
+            dev.CreateQuery(
+                &D3D11_QUERY_DESC {
+                    Query: kind,
+                    MiscFlags: 0,
+                },
+                Some(&mut q),
+            )
+            .ok()?;
             q
         };
-        Some((make(D3D11_QUERY_TIMESTAMP_DISJOINT)?, make(D3D11_QUERY_TIMESTAMP)?, make(D3D11_QUERY_TIMESTAMP)?))
+        Some((
+            make(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
+            make(D3D11_QUERY_TIMESTAMP)?,
+            make(D3D11_QUERY_TIMESTAMP)?,
+        ))
     }
     /// Before the draw.
     pub fn begin(&mut self, dev: &ID3D11Device) -> Mark {
         if self.broken || !perf::is_enabled() || self.pending.len() >= 6 {
             return Mark(None);
         }
-        let Ok(ctx) = (unsafe { dev.GetImmediateContext() }) else { return Mark(None) };
+        let Ok(ctx) = (unsafe { dev.GetImmediateContext() }) else {
+            return Mark(None);
+        };
         let Some((d, b, e)) = self.queries(dev) else {
             self.broken = true;
             return Mark(None);
@@ -59,22 +72,39 @@ impl GpuTimer {
     }
     /// After the draw was submitted (after `EndDraw`).
     pub fn end(&mut self, dev: &ID3D11Device, mark: Mark) {
-        let Some((disjoint, begin, end, start_qpc_us)) = mark.0 else { return };
-        let Ok(ctx) = (unsafe { dev.GetImmediateContext() }) else { return };
+        let Some((disjoint, begin, end, start_qpc_us)) = mark.0 else {
+            return;
+        };
+        let Ok(ctx) = (unsafe { dev.GetImmediateContext() }) else {
+            return;
+        };
         unsafe {
             ctx.End(&end);
             ctx.End(&disjoint);
         }
-        self.pending.push_back(Pending { disjoint, begin, end, start_qpc_us });
+        self.pending.push_back(Pending {
+            disjoint,
+            begin,
+            end,
+            start_qpc_us,
+        });
         self.collect(&ctx);
     }
     /// Read back every finished frame (never waits); records `gpu.draw` spans.
     fn collect(&mut self, ctx: &ID3D11DeviceContext) {
         while let Some(p) = self.pending.front() {
             let flags = D3D11_ASYNC_GETDATA_DONOTFLUSH.0 as u32;
-            let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT { Frequency: 0, Disjoint: true.into() };
+            let mut dj = D3D11_QUERY_DATA_TIMESTAMP_DISJOINT {
+                Frequency: 0,
+                Disjoint: true.into(),
+            };
             let ok = unsafe {
-                ctx.GetData(&p.disjoint, Some((&mut dj as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast()), size_of_val(&dj) as u32, flags)
+                ctx.GetData(
+                    &p.disjoint,
+                    Some((&mut dj as *mut D3D11_QUERY_DATA_TIMESTAMP_DISJOINT).cast()),
+                    size_of_val(&dj) as u32,
+                    flags,
+                )
             };
             // S_FALSE (not ready yet) is a success code and leaves the data untouched.
             if let Err(ref e) = ok {
@@ -101,7 +131,12 @@ impl GpuTimer {
             }
             if !dj.Disjoint.as_bool() && t0 != u64::MAX && t1 != u64::MAX && t1 >= t0 {
                 let us = (t1 - t0) as f64 * 1_000_000. / dj.Frequency as f64;
-                perf::record_span(perf::SpanKind::GpuDraw, p.start_qpc_us, us.round() as u64, 0);
+                perf::record_span(
+                    perf::SpanKind::GpuDraw,
+                    p.start_qpc_us,
+                    us.round() as u64,
+                    0,
+                );
             }
             self.spare.push((p.disjoint, p.begin, p.end));
         }
@@ -168,10 +203,14 @@ impl Sampler {
                     .ok()
             };
         }
-        let Some(a) = &self.adapter else { return (None, None) };
+        let Some(a) = &self.adapter else {
+            return (None, None);
+        };
         let read = |group| unsafe {
             let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-            a.QueryVideoMemoryInfo(0, group, &mut info).ok().map(|_| info.CurrentUsage as f64 / (1024. * 1024.))
+            a.QueryVideoMemoryInfo(0, group, &mut info)
+                .ok()
+                .map(|_| info.CurrentUsage as f64 / (1024. * 1024.))
         };
         let (local, non_local) = (
             read(DXGI_MEMORY_SEGMENT_GROUP_LOCAL),
@@ -194,10 +233,13 @@ impl Sampler {
                 if PdhOpenQueryW(std::ptr::null(), 0, &mut q) != 0 {
                     return None;
                 }
-                let path: Vec<u16> = format!("\\GPU Engine(pid_{}_*)\\Utilization Percentage", perf::current_pid())
-                    .encode_utf16()
-                    .chain(Some(0))
-                    .collect();
+                let path: Vec<u16> = format!(
+                    "\\GPU Engine(pid_{}_*)\\Utilization Percentage",
+                    perf::current_pid()
+                )
+                .encode_utf16()
+                .chain(Some(0))
+                .collect();
                 let mut c = std::ptr::null_mut();
                 if PdhAddEnglishCounterW(q, path.as_ptr(), 0, &mut c) != 0 {
                     PdhCloseQuery(q);
@@ -212,7 +254,13 @@ impl Sampler {
                 return None;
             }
             let (mut size, mut count) = (0u32, 0u32);
-            let r = PdhGetFormattedCounterArrayW(c, PDH_FMT_DOUBLE, &mut size, &mut count, std::ptr::null_mut());
+            let r = PdhGetFormattedCounterArrayW(
+                c,
+                PDH_FMT_DOUBLE,
+                &mut size,
+                &mut count,
+                std::ptr::null_mut(),
+            );
             if r != PDH_MORE_DATA || size == 0 {
                 return Some(0.); // no GPU engine instance for this process yet: idle
             }
@@ -268,7 +316,13 @@ impl Sampler {
             s.dwm_frames_dropped = t.cFramesDropped.saturating_sub(dropped);
             s.dwm_frames_missed = t.cFramesMissed.saturating_sub(missed);
         }
-        self.last_dwm = Some((now, t.cFrame, t.cFramesLate, t.cFramesDropped, t.cFramesMissed));
+        self.last_dwm = Some((
+            now,
+            t.cFrame,
+            t.cFramesLate,
+            t.cFramesDropped,
+            t.cFramesMissed,
+        ));
     }
 }
 
@@ -298,16 +352,18 @@ static STARTED: std::sync::Once = std::sync::Once::new();
 /// PDH and DXGI once a second), so a process that never asks pays nothing.
 pub fn latest() -> GpuSample {
     STARTED.call_once(|| {
-        let _ = std::thread::Builder::new().name("Planor.Gpu".into()).spawn(|| {
-            let mut sampler = Sampler::default();
-            loop {
-                let s = sampler.sample();
-                if let Ok(mut l) = LATEST.lock() {
-                    *l = Some(s);
+        let _ = std::thread::Builder::new()
+            .name("Planor.Gpu".into())
+            .spawn(|| {
+                let mut sampler = Sampler::default();
+                loop {
+                    let s = sampler.sample();
+                    if let Ok(mut l) = LATEST.lock() {
+                        *l = Some(s);
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(250));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(250));
-            }
-        });
+            });
     });
     LATEST.lock().ok().and_then(|l| *l).unwrap_or_default()
 }

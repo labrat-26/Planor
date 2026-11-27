@@ -5,7 +5,8 @@ include!("common/helpers.rs");
 fn stop_restores_exact_rect() {
     let w = Sentinel::new(0, 0);
     let before = w.rect();
-    let saved=w.placement();let mut d = Daemon::new("stop");
+    let saved = w.placement();
+    let mut d = Daemon::new("stop");
     d.start();
     wait(|| w.rect() != before);
     d.stop();
@@ -140,7 +141,7 @@ fn compute_visual() {
             }
         }
     }
-let (bleed, samples) = observer.join().unwrap();
+    let (bleed, samples) = observer.join().unwrap();
     d.stop();
     if !film.is_empty() {
         let mut bytes = vec![0u8; 960 * 240 * 3];
@@ -177,7 +178,7 @@ let (bleed, samples) = observer.join().unwrap();
     }
     let dt = |ticks: i64| ticks as f64 * 1000. / hz as f64;
     // Focus changes remove the configured two-pixel stroke from the sampled client edge.
-    report["edge_tolerance_px"]=2.into();
+    report["edge_tolerance_px"] = 2.into();
     report["primary_frames"] = primary_frames.into();
     report["missing_edge_frames"] = missing.into();
     report["captured_samples"] = frames.len().into();
@@ -210,7 +211,11 @@ let (bleed, samples) = observer.join().unwrap();
             .filter(|p| p[0].1 == p[1].1)
             .count()
             .into();
-        report["non_monotonic_jumps"] = frames.windows(2).filter(|p| p[1].1-p[0].1>2).count().into()
+        report["non_monotonic_jumps"] = frames
+            .windows(2)
+            .filter(|p| p[1].1 - p[0].1 > 2)
+            .count()
+            .into()
     }
     report["input_to_first_pixel_ms"] = frames
         .iter()
@@ -332,22 +337,96 @@ fn desktop_round_trip() {
     daemon.stop();
     assert_eq!(w.rect(), before)
 }
-#[test]#[ignore]fn owned_modal_follows_display_transfer(){
-unsafe{SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);}
-let owner=Sentinel::new(0,0);let dialog=Sentinel::new(1,owner.hwnd);let before=dialog.rect();let original=owner.rect();let mut d=Daemon::new("modal-transfer");d.start();wait(||owner.rect()!=original);thread::sleep(Duration::from_millis(400));let primary=unsafe{MonitorFromWindow(owner.hwnd as _,MONITOR_DEFAULTTONEAREST)};
-unsafe extern "system" fn monitor(m:HMONITOR,_:HDC,_:*mut RECT,data:isize)->i32{unsafe{(*(data as *mut Vec<isize>)).push(m as isize)};1}
-let mut monitors=Vec::<isize>::new();unsafe{EnumDisplayMonitors(null_mut(),null(),Some(monitor),&mut monitors as *mut _ as isize);}let Some(dst)=monitors.into_iter().find(|&m|m!=primary as isize)else{eprintln!("SKIPPED_SINGLE_MONITOR");d.stop();return};
-let mut info=MONITORINFO{cbSize:size_of::<MONITORINFO>() as _,..Default::default()};assert_ne!(unsafe{GetMonitorInfoW(dst as _,&mut info)},0);let area=info.rcWork;
-struct Cursor(POINT);impl Drop for Cursor{fn drop(&mut self){unsafe{SetCursorPos(self.0.x,self.0.y);}}}let mut p=POINT::default();unsafe{GetCursorPos(&mut p)};let _cursor=Cursor(p);let h=owner.hwnd as HWND;
-use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
-unsafe{NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART,h,0,0);}thread::sleep(Duration::from_millis(120));unsafe{SetCursorPos((area.left+area.right)/2,(area.top+area.bottom)/2);SetWindowPos(h,null_mut(),area.left+25,area.top+25,0,0,SWP_NOZORDER|SWP_NOSIZE|SWP_NOACTIVATE);}thread::sleep(Duration::from_millis(150));unsafe{NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND,h,0,0);}
-wait(||{let [x,y,r,b]=dialog.rect();x>=area.left&&y>=area.top&&r<=area.right&&b<=area.bottom});d.stop();assert_eq!(dialog.rect(),before);assert_eq!(owner.rect(),original)}
+#[test]
+#[ignore]
+fn owned_modal_follows_display_transfer() {
+    unsafe {
+        SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    }
+    let owner = Sentinel::new(0, 0);
+    let dialog = Sentinel::new(1, owner.hwnd);
+    let before = dialog.rect();
+    let original = owner.rect();
+    let mut d = Daemon::new("modal-transfer");
+    d.start();
+    wait(|| owner.rect() != original);
+    thread::sleep(Duration::from_millis(400));
+    let primary = unsafe { MonitorFromWindow(owner.hwnd as _, MONITOR_DEFAULTTONEAREST) };
+    unsafe extern "system" fn monitor(m: HMONITOR, _: HDC, _: *mut RECT, data: isize) -> i32 {
+        unsafe { (*(data as *mut Vec<isize>)).push(m as isize) };
+        1
+    }
+    let mut monitors = Vec::<isize>::new();
+    unsafe {
+        EnumDisplayMonitors(
+            null_mut(),
+            null(),
+            Some(monitor),
+            &mut monitors as *mut _ as isize,
+        );
+    }
+    let Some(dst) = monitors.into_iter().find(|&m| m != primary as isize) else {
+        eprintln!("SKIPPED_SINGLE_MONITOR");
+        d.stop();
+        return;
+    };
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as _,
+        ..Default::default()
+    };
+    assert_ne!(unsafe { GetMonitorInfoW(dst as _, &mut info) }, 0);
+    let area = info.rcWork;
+    struct Cursor(POINT);
+    impl Drop for Cursor {
+        fn drop(&mut self) {
+            unsafe {
+                SetCursorPos(self.0.x, self.0.y);
+            }
+        }
+    }
+    let mut p = POINT::default();
+    unsafe { GetCursorPos(&mut p) };
+    let _cursor = Cursor(p);
+    let h = owner.hwnd as HWND;
+    use windows_sys::Win32::UI::Accessibility::NotifyWinEvent;
+    unsafe {
+        NotifyWinEvent(EVENT_SYSTEM_MOVESIZESTART, h, 0, 0);
+    }
+    thread::sleep(Duration::from_millis(120));
+    unsafe {
+        SetCursorPos((area.left + area.right) / 2, (area.top + area.bottom) / 2);
+        SetWindowPos(
+            h,
+            null_mut(),
+            area.left + 25,
+            area.top + 25,
+            0,
+            0,
+            SWP_NOZORDER | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+    thread::sleep(Duration::from_millis(150));
+    unsafe {
+        NotifyWinEvent(EVENT_SYSTEM_MOVESIZEEND, h, 0, 0);
+    }
+    wait(|| {
+        let [x, y, r, b] = dialog.rect();
+        x >= area.left && y >= area.top && r <= area.right && b <= area.bottom
+    });
+    d.stop();
+    assert_eq!(dialog.rect(), before);
+    assert_eq!(owner.rect(), original)
+}
 
 #[test]
 #[ignore]
 fn state_json_matches_real_windows() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("state-json");
     d.start();
     assert!(
@@ -362,8 +441,7 @@ fn state_json_matches_real_windows() {
         "planor state --json failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let v: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("valid state JSON");
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("valid state JSON");
     assert_eq!(v["schema_version"].as_u64(), Some(1));
     let cfg_ver = v["config_version"].as_u64().expect("config_version");
     assert!(cfg_ver >= 1, "expected config_version >= 1, got {cfg_ver}");
@@ -420,7 +498,11 @@ fn state_json_matches_real_windows() {
 #[ignore]
 fn perf_spans_and_budgets() {
     aware();
-    let ws = [Sentinel::new(0, 0), Sentinel::new(1, 0), Sentinel::new(2, 0)];
+    let ws = [
+        Sentinel::new(0, 0),
+        Sentinel::new(1, 0),
+        Sentinel::new(2, 0),
+    ];
     let mut d = Daemon::new("perf-check");
     d.start();
     assert!(
@@ -455,7 +537,13 @@ fn perf_spans_and_budgets() {
         gpu["dwm_refresh_hz"].as_f64().unwrap_or(0.0) > 0.0,
         "perf report has no DWM refresh rate in process.gpu: {gpu}"
     );
-    for required in ["daemon.tick", "daemon.layout", "render.scene", "win32.place", "gpu.draw"] {
+    for required in [
+        "daemon.tick",
+        "daemon.layout",
+        "render.scene",
+        "win32.place",
+        "gpu.draw",
+    ] {
         assert!(
             spans.iter().any(|s| s["name"].as_str() == Some(required)),
             "missing expected span {required} in perf report"
@@ -469,7 +557,13 @@ fn perf_spans_and_budgets() {
     );
 
     let trace_path = d.dir.join("perf.trace.json");
-    let tr_out = d.call_output(&["perf", "--trace", trace_path.to_str().unwrap(), "--seconds", "60"]);
+    let tr_out = d.call_output(&[
+        "perf",
+        "--trace",
+        trace_path.to_str().unwrap(),
+        "--seconds",
+        "60",
+    ]);
     assert!(tr_out.status.success());
     let tr: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&trace_path).unwrap()).unwrap();
@@ -479,4 +573,3 @@ fn perf_spans_and_budgets() {
     assert!(d.call_args(&["perf", "--reset"]));
     d.stop();
 }
-

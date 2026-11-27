@@ -33,9 +33,20 @@ pub enum Event {
     Contacts(Vec<(f64, f64)>),
     /// Mouse wheel turned with the Windows key held (`delta` in notches of 120; `tilt`: the horizontal
     /// wheel; `shift`: Shift held too), at screen point `x`, `y`.
-    Wheel { delta: i32, tilt: bool, shift: bool, x: i32, y: i32 },
+    Wheel {
+        delta: i32,
+        tilt: bool,
+        shift: bool,
+        x: i32,
+        y: i32,
+    },
     /// A mouse button went down or up (only reported while a gesture recording runs). `button`: left, right, middle.
-    Button { button: &'static str, down: bool, x: i32, y: i32 },
+    Button {
+        button: &'static str,
+        down: bool,
+        x: i32,
+        y: i32,
+    },
     Suspend(bool),
     Topology,
     Stop,
@@ -91,7 +102,12 @@ unsafe extern "system" fn mouse(code: i32, w: usize, l: isize) -> isize {
             if let Some(button) = button {
                 let p = unsafe { (*(l as *const MSLLHOOKSTRUCT)).pt };
                 let down = matches!(w as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN);
-                emit(Event::Button { button, down, x: p.x, y: p.y });
+                emit(Event::Button {
+                    button,
+                    down,
+                    x: p.x,
+                    y: p.y,
+                });
             }
         }
         if w == WM_LBUTTONDOWN as usize {
@@ -312,16 +328,26 @@ pub fn events(
             std::thread::spawn(move || {
                 crate::perf::register_thread("hooks");
                 let install = || {
-                    let hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
+                    let hook =
+                        SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(null()), 0);
                     let keys = if note_hotkey {
-                        SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard), GetModuleHandleW(null()), 0)
+                        SetWindowsHookExW(
+                            WH_KEYBOARD_LL,
+                            Some(keyboard),
+                            GetModuleHandleW(null()),
+                            0,
+                        )
                     } else {
                         null_mut()
                     };
                     (hook, keys)
                 };
                 let (mut hook, mut keys) = install();
-                diag::trace(format!("input hooks installed: mouse={} keyboard={}", !hook.is_null(), !keys.is_null()));
+                diag::trace(format!(
+                    "input hooks installed: mouse={} keyboard={}",
+                    !hook.is_null(),
+                    !keys.is_null()
+                ));
                 // Windows silently removes a low-level hook that ever answers too slowly (and after some session
                 // changes), which is how Win+W and peek clicks would stop working with nothing logged. Put the
                 // hooks back every few seconds.
@@ -740,10 +766,22 @@ pub fn minimum_size(id: isize) -> (i32, i32) {
 // swipes change the volume. See docs/BUG_TRACKPAD_SYSTEM_GESTURES.md. Set the gestures to "Nothing"
 // in Settings > Bluetooth & devices > Touchpad > Advanced gestures.
 const SYSTEM_DWORDS: [(&str, &str); 4] = [
-    (r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "SnapAssist"),
-    (r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "EnableSnapAssistFlyout"),
-    (r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "EnableSnapBar"),
-    (r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced", "JointResize"),
+    (
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+        "SnapAssist",
+    ),
+    (
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+        "EnableSnapAssistFlyout",
+    ),
+    (
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+        "EnableSnapBar",
+    ),
+    (
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced",
+        "JointResize",
+    ),
 ];
 fn reg_get(key: &str, name: &str) -> Option<u32> {
     use windows_sys::Win32::System::Registry::*;
@@ -778,7 +816,14 @@ fn reg_set(key: &str, name: &str, v: Option<u32>) {
             }
             None => {
                 let mut k = null_mut();
-                if RegOpenKeyExW(HKEY_CURRENT_USER, wide(key).as_ptr(), 0, KEY_SET_VALUE, &mut k) == 0 {
+                if RegOpenKeyExW(
+                    HKEY_CURRENT_USER,
+                    wide(key).as_ptr(),
+                    0,
+                    KEY_SET_VALUE,
+                    &mut k,
+                ) == 0
+                {
                     RegDeleteValueW(k, wide(name).as_ptr());
                     RegCloseKey(k);
                 }
@@ -851,7 +896,10 @@ pub fn tweak_system(backup: &std::path::Path) {
                 values.push((k.into(), n.into(), reg_get(k, n)));
             }
         }
-        let saved = SystemBackup { snap: snap_active(), values };
+        let saved = SystemBackup {
+            snap: snap_active(),
+            values,
+        };
         if let Ok(json) = serde_json::to_vec(&saved) {
             let _ = std::fs::write(backup, json);
         }
@@ -1057,7 +1105,8 @@ pub fn max_monitor_refresh_hz() -> f64 {
                     dmSize: size_of::<DEVMODEW>() as u16,
                     ..Default::default()
                 };
-                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) != 0
+                if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode)
+                    != 0
                     && let Some(hz) = planor::pacing::clamp_hz(mode.dmDisplayFrequency as f64)
                 {
                     *best = (*best).max(hz);
@@ -1117,16 +1166,43 @@ mod class_tests {
         assert!(never_tiled_class("PlanorSettings", true));
         assert!(never_tiled_class("PlanorSettings", false));
         assert!(never_tiled_class("PlanorSentinel_p42", true));
-        assert!(!never_tiled_class("PlanorSentinel_p42", false), "an isolated test daemon manages its own sentinels");
+        assert!(
+            !never_tiled_class("PlanorSentinel_p42", false),
+            "an isolated test daemon manages its own sentinels"
+        );
         assert!(!never_tiled_class("Notepad", true));
     }
 
     #[test]
     fn place_batch_continue_attempts_all_items_and_returns_first_error() {
         let items = vec![
-            (1, Rect { x: 0, y: 0, w: 100, h: 100 }),
-            (2, Rect { x: 100, y: 0, w: 100, h: 100 }),
-            (3, Rect { x: 200, y: 0, w: 100, h: 100 }),
+            (
+                1,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                },
+            ),
+            (
+                2,
+                Rect {
+                    x: 100,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                },
+            ),
+            (
+                3,
+                Rect {
+                    x: 200,
+                    y: 0,
+                    w: 100,
+                    h: 100,
+                },
+            ),
         ];
         let mut attempted = Vec::new();
         let res = place_batch_continue(&items, |id, _| {
@@ -1137,7 +1213,11 @@ mod class_tests {
                 Ok(())
             }
         });
-        assert_eq!(attempted, vec![1, 2, 3], "all items must be attempted after middle failure");
+        assert_eq!(
+            attempted,
+            vec![1, 2, 3],
+            "all items must be attempted after middle failure"
+        );
         assert_eq!(res.unwrap_err().to_string(), "access denied on 2");
 
         // All-succeed case returns Ok(()).
@@ -1154,7 +1234,9 @@ mod class_tests {
     fn overlay_occluder_classes_cover_system_flyouts_and_planor_ui() {
         assert!(is_overlay_occluder_class("Windows.UI.Core.CoreWindow"));
         assert!(is_overlay_occluder_class("XamlExplorerHostIslandWindow"));
-        assert!(is_overlay_occluder_class("TopLevelWindowForOverflowXamlIsland"));
+        assert!(is_overlay_occluder_class(
+            "TopLevelWindowForOverflowXamlIsland"
+        ));
         assert!(is_overlay_occluder_class("Planor.Note"));
         assert!(is_overlay_occluder_class("PlanorSettings"));
         assert!(is_overlay_occluder_class("Planor.Guide"));
@@ -1163,39 +1245,74 @@ mod class_tests {
         assert!(!is_overlay_occluder_class("Progman"));
         assert!(!is_overlay_occluder_class("WorkerW"));
         assert!(!is_overlay_occluder_class("Notepad"));
-        assert!(is_overlay_occluder_class("Planor.GestureGuide"), "the real gesture guide class");
+        assert!(
+            is_overlay_occluder_class("Planor.GestureGuide"),
+            "the real gesture guide class"
+        );
     }
 
     #[test]
     fn topmost_occluders_are_floating_apps_not_shell_or_planor_or_click_through() {
         use super::topmost_overlay_occluder as occ;
-        use windows_sys::Win32::UI::WindowsAndMessaging::{WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        };
         // Browser Picture-in-Picture and an ordinary always-on-top app (not filling a monitor).
-        assert!(occ("Chrome_WidgetWin_1", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
+        assert!(occ(
+            "Chrome_WidgetWin_1",
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            false
+        ));
         assert!(occ("MozillaDialogClass", WS_EX_TOPMOST, false));
         assert!(occ("Notepad", WS_EX_TOPMOST, false));
         // Not topmost: not this rule's business.
         assert!(!occ("Chrome_WidgetWin_1", WS_EX_TOOLWINDOW, false));
         // Shell surfaces (Shell_SecondaryTrayWnd really is WS_EX_TOPMOST | WS_EX_TOOLWINDOW).
-        for shell in ["Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW"] {
-            assert!(!occ(shell, WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false), "{shell}");
+        for shell in [
+            "Shell_TrayWnd",
+            "Shell_SecondaryTrayWnd",
+            "Progman",
+            "WorkerW",
+        ] {
+            assert!(
+                !occ(shell, WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false),
+                "{shell}"
+            );
         }
         // Planor's own overlay host: topmost, monitor-sized, layered, click-through. Holing it would
         // hide every border on the monitor.
-        let host = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        let host =
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
         assert!(!occ("Planor.Composition", host, false));
         assert!(!occ("Planor.Composition", WS_EX_TOPMOST, false));
         assert!(!occ("PlanorOverlay", WS_EX_TOPMOST, false));
         // A click-through HUD (game/recording overlay) from another app.
         assert!(!occ("CEF-OSC-WIDGET", host, false));
         // (#102 review) Tooltips: transient hover popups, holing them flickers the overlay.
-        assert!(!occ("tooltips_class32", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
-        assert!(!occ("TOOLTIPS_CLASS32", WS_EX_TOPMOST, false), "class match is case-insensitive");
+        assert!(!occ(
+            "tooltips_class32",
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            false
+        ));
+        assert!(
+            !occ("TOOLTIPS_CLASS32", WS_EX_TOPMOST, false),
+            "class match is case-insensitive"
+        );
         // (#102 review) Monitor-filling topmost windows (borderless fullscreen games, the Snipping
         // Tool full-screen frame): holing them would blank the overlay for the whole monitor.
-        assert!(!occ("Chrome_WidgetWin_1", WS_EX_TOPMOST, true), "fullscreen borderless game");
-        assert!(!occ("Screen Sketch", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, true), "Snipping Tool fullscreen");
+        assert!(
+            !occ("Chrome_WidgetWin_1", WS_EX_TOPMOST, true),
+            "fullscreen borderless game"
+        );
+        assert!(
+            !occ("Screen Sketch", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, true),
+            "Snipping Tool fullscreen"
+        );
         // A floating PiP that happens to be large but does not fill the monitor still holes.
-        assert!(occ("Chrome_WidgetWin_1", WS_EX_TOPMOST | WS_EX_TOOLWINDOW, false));
+        assert!(occ(
+            "Chrome_WidgetWin_1",
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+            false
+        ));
     }
 }

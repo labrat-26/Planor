@@ -4,9 +4,7 @@ use crate::{Result, config, folder, instance, wide};
 use planor::Rect;
 use std::io;
 use windows_sys::Win32::{
-    Foundation::*,
-    UI::Input::KeyboardAndMouse::GetAsyncKeyState,
-    UI::WindowsAndMessaging::*,
+    Foundation::*, UI::Input::KeyboardAndMouse::GetAsyncKeyState, UI::WindowsAndMessaging::*,
 };
 
 #[derive(Clone, Debug)]
@@ -331,7 +329,11 @@ impl WindowBackend for Win32Backend {
         unsafe {
             SetWindowPos(
                 id as _,
-                if topmost { HWND_TOPMOST } else { HWND_NOTOPMOST },
+                if topmost {
+                    HWND_TOPMOST
+                } else {
+                    HWND_NOTOPMOST
+                },
                 0,
                 0,
                 0,
@@ -548,10 +550,7 @@ pub(crate) mod sim {
             id
         }
 
-        pub fn apply_scene(
-            &mut self,
-            scene: &render::Scene,
-        ) -> Vec<(isize, Rect)> {
+        pub fn apply_scene(&mut self, scene: &render::Scene) -> Vec<(isize, Rect)> {
             let park = scene
                 .monitors
                 .iter()
@@ -589,7 +588,10 @@ pub(crate) mod sim {
                     peeks.push((c, tile.id));
                 }
                 let target = if proxy {
-                    Rect { x: park, ..tile.rect }
+                    Rect {
+                        x: park,
+                        ..tile.rect
+                    }
                 } else {
                     tile.rect
                 };
@@ -626,7 +628,11 @@ pub(crate) mod sim {
                 zones: scene.zones.clone(),
                 zone_icons: {
                     let dark = crate::theme::system_is_dark();
-                    scene.zones.iter().map(|z| render::zone_icon_spec(z, dark, 1.0)).collect()
+                    scene
+                        .zones
+                        .iter()
+                        .map(|z| render::zone_icon_spec(z, dark, 1.0))
+                        .collect()
                 },
                 covered: scene
                     .tiles
@@ -635,7 +641,12 @@ pub(crate) mod sim {
                     .map(|t| t.id)
                     .collect(),
                 tile_colors: scene.tiles.iter().map(|t| (t.id, t.color)).collect(),
-                os_frames: scene.tiles.iter().filter(|t| t.fullscreen).map(|t| (t.id, t.os_frame)).collect(),
+                os_frames: scene
+                    .tiles
+                    .iter()
+                    .filter(|t| t.fullscreen)
+                    .map(|t| (t.id, t.os_frame))
+                    .collect(),
             });
             rejected
         }
@@ -900,7 +911,12 @@ pub(crate) mod sim {
             let g = self.0.lock().unwrap();
             let mut cur = id;
             for _ in 0..16 {
-                let Some(next) = g.windows.get(&cur).map(|w| w.owner).filter(|&o| o != 0 && o != cur) else {
+                let Some(next) = g
+                    .windows
+                    .get(&cur)
+                    .map(|w| w.owner)
+                    .filter(|&o| o != 0 && o != cur)
+                else {
                     break;
                 };
                 cur = next;

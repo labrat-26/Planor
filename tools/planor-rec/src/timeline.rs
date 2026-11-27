@@ -9,13 +9,13 @@
 //! dropped on purpose; that is logged as an `encoder_behind` capture event.
 
 use crate::util::Rect;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     io::Write,
     sync::{
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc::{self, Receiver, SyncSender, TrySendError},
-        Arc,
     },
     thread::JoinHandle,
 };
@@ -610,7 +610,11 @@ impl FrameSink for QueueSink {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{cell::{Cell, RefCell}, collections::VecDeque, rc::Rc};
+    use std::{
+        cell::{Cell, RefCell},
+        collections::VecDeque,
+        rc::Rc,
+    };
 
     struct FakeClock {
         now: Rc<Cell<i64>>,
@@ -708,7 +712,11 @@ mod tests {
         }
     }
 
-    fn setup(now: &Rc<Cell<i64>>, source_frames: usize, ticks: usize) -> (Box<FakeSource>, VecSink, Arc<AtomicBool>) {
+    fn setup(
+        now: &Rc<Cell<i64>>,
+        source_frames: usize,
+        ticks: usize,
+    ) -> (Box<FakeSource>, VecSink, Arc<AtomicBool>) {
         let stop = Arc::new(AtomicBool::new(false));
         let source = Box::new(FakeSource {
             now: now.clone(),
@@ -744,20 +752,36 @@ mod tests {
         };
         let events = Events::default();
         let cfg = TimelineCfg::new(2, 60, (8, 4));
-        let stats = run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
+        let stats =
+            run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
         // Every tick has a row: no gap in the timeline.
         assert_eq!(sink.rows.len(), 240);
         assert_eq!(stats.dropped, 0);
         for pair in sink.rows.windows(2) {
             let gap = pair[1].present_us - pair[0].present_us;
-            assert!((15_000..=19_000).contains(&gap), "gap {gap} us between rows {} and {}", pair[0].tick, pair[1].tick);
+            assert!(
+                (15_000..=19_000).contains(&gap),
+                "gap {gap} us between rows {} and {}",
+                pair[0].tick,
+                pair[1].tick
+            );
         }
         let states: Vec<FrameState> = sink.rows.iter().map(|r| r.state).collect();
-        let first_lost = states.iter().position(|s| *s == FrameState::Lost).expect("lost rows");
-        let reopened = states.iter().position(|s| *s == FrameState::Reopened).expect("a reopened row");
+        let first_lost = states
+            .iter()
+            .position(|s| *s == FrameState::Lost)
+            .expect("lost rows");
+        let reopened = states
+            .iter()
+            .position(|s| *s == FrameState::Reopened)
+            .expect("a reopened row");
         assert!(first_lost > 0 && first_lost < reopened);
         assert!(states[..first_lost].iter().all(|s| *s == FrameState::Ok));
-        assert!(states[first_lost..reopened].iter().all(|s| *s == FrameState::Lost));
+        assert!(
+            states[first_lost..reopened]
+                .iter()
+                .all(|s| *s == FrameState::Lost)
+        );
         assert!(states[reopened + 1..].iter().all(|s| *s == FrameState::Ok));
         // Waits of 100, 200, 400 and 800 ms (back-off doubles after each failed attempt) before the
         // fourth attempt succeeds: about 1.5 s = 90 rows at 60 fps.
@@ -769,15 +793,24 @@ mod tests {
         assert_eq!(sink.data[reopened], 7);
         // Events: lost, reopen_failed (first attempt), reopened.
         let events = events.0.borrow();
-        let kinds: Vec<&str> = events.iter().map(|e| e["event"].as_str().unwrap()).collect();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|e| e["event"].as_str().unwrap())
+            .collect();
         assert!(kinds.contains(&"lost"), "{kinds:?}");
         assert!(kinds.contains(&"reopen_failed"), "{kinds:?}");
-        let reopened_event = events.iter().find(|e| e["event"] == "reopened").expect("reopened event");
+        let reopened_event = events
+            .iter()
+            .find(|e| e["event"] == "reopened")
+            .expect("reopened event");
         assert_eq!(reopened_event["kind"], "capture");
         assert_eq!(reopened_event["monitor"], 2);
         let lost_ms = reopened_event["lost_ms"].as_i64().unwrap();
         assert!((1400..=1700).contains(&lost_ms), "lost_ms {lost_ms}");
-        assert_eq!(reopened_event["reason"], "DXGI_ERROR_ACCESS_LOST (0x887A0026)");
+        assert_eq!(
+            reopened_event["reason"],
+            "DXGI_ERROR_ACCESS_LOST (0x887A0026)"
+        );
         assert_eq!(stats.reopens, 1);
         assert_eq!(stats.lost_periods, 1);
     }
@@ -794,10 +827,16 @@ mod tests {
         };
         let events = Events::default();
         let cfg = TimelineCfg::new(0, 60, (8, 4));
-        let stats = run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
+        let stats =
+            run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
         assert_eq!(sink.rows.len(), 120);
         assert_eq!(stats.reopens, 0);
-        assert!(sink.rows.iter().skip(12).all(|r| r.state == FrameState::Lost));
+        assert!(
+            sink.rows
+                .iter()
+                .skip(12)
+                .all(|r| r.state == FrameState::Lost)
+        );
         let events = events.0.borrow();
         let topo: Vec<&Value> = events.iter().filter(|e| e["event"] == "topology").collect();
         assert_eq!(topo.len(), 1, "reported once per new size");
@@ -849,11 +888,17 @@ mod tests {
         let events = Events::default();
         let mut cfg = TimelineCfg::new(1, 60, (8, 4));
         cfg.topology_epoch = Some(epoch);
-        let stats = run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
+        let stats =
+            run_timeline(&cfg, source, &mut opener, &mut sink, &events, &clock, &stop).unwrap();
         assert_eq!(opener.opened, 1);
         assert_eq!(stats.reopens, 1);
         assert_eq!(sink.inner.rows.len(), 90);
-        assert!(sink.inner.rows.iter().any(|r| r.state == FrameState::Reopened));
+        assert!(
+            sink.inner
+                .rows
+                .iter()
+                .any(|r| r.state == FrameState::Reopened)
+        );
         let events = events.0.borrow();
         assert!(events.iter().any(|e| e["event"] == "topology_reopen"));
         assert!(events.iter().any(|e| e["event"] == "reopened"));
@@ -907,12 +952,19 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         let stats = sink.finish();
-        assert!(dropped > 20, "a 30 ms encoder fed every 2 ms must drop, dropped {dropped}");
+        assert!(
+            dropped > 20,
+            "a 30 ms encoder fed every 2 ms must drop, dropped {dropped}"
+        );
         assert_eq!(stats.written, pushed);
         assert_eq!(frames_written.load(Ordering::SeqCst), pushed);
         // Only accepted frames have a CSV row.
         let csv = String::from_utf8(csv.lock().unwrap().clone()).unwrap();
-        assert_eq!(csv.lines().count() as u64, pushed + 1, "header plus one row per written frame");
+        assert_eq!(
+            csv.lines().count() as u64,
+            pushed + 1,
+            "header plus one row per written frame"
+        );
         assert!(csv.starts_with(CSV_HEADER));
     }
 
@@ -934,7 +986,10 @@ mod tests {
             rotate_stall_us: 34_000,
         };
         assert_eq!(stalled.csv_line(), "6,200,1,ok,34000\n");
-        assert_eq!(CSV_HEADER, "index,present_qpc_us,changed,state,rotate_stall_us\n");
+        assert_eq!(
+            CSV_HEADER,
+            "index,present_qpc_us,changed,state,rotate_stall_us\n"
+        );
         assert_eq!(FrameState::parse("reopened"), FrameState::Reopened);
         assert_eq!(FrameState::parse(""), FrameState::Ok);
     }

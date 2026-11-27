@@ -59,7 +59,9 @@ impl Image {
     #[inline]
     pub fn lum(&self, x: i32, y: i32) -> f32 {
         let i = self.index(x, y);
-        0.114 * self.bgra[i] as f32 + 0.587 * self.bgra[i + 1] as f32 + 0.299 * self.bgra[i + 2] as f32
+        0.114 * self.bgra[i] as f32
+            + 0.587 * self.bgra[i + 1] as f32
+            + 0.299 * self.bgra[i + 2] as f32
     }
 
     pub fn fill(&mut self, rect: Rect, rgb: [u8; 3]) {
@@ -213,7 +215,12 @@ pub fn class_runs_row(img: &Image, y: i32, taskbars: &[Rect]) -> Vec<(PixelClass
 /// Share of grid samples (every `step` px) inside `area` and outside every rectangle of `excluded` that are
 /// not wallpaper. That free area should show only the solid wallpaper; content there is another program's
 /// window. `None` when too few samples fall in the free area to say anything.
-pub fn foreign_content_fraction(img: &Image, area: Rect, excluded: &[Rect], step: i32) -> Option<f32> {
+pub fn foreign_content_fraction(
+    img: &Image,
+    area: Rect,
+    excluded: &[Rect],
+    step: i32,
+) -> Option<f32> {
     let step = step.max(1);
     let area = area.intersection(Rect::new(0, 0, img.w, img.h));
     let (mut total, mut foreign) = (0usize, 0usize);
@@ -360,12 +367,7 @@ fn known_edge(
 /// is confirmed: the window must actually reach it. One window pixel in the four-pixel deep band is
 /// enough per sample, so a single H.264 bleed pixel between a Planor border and its content does not
 /// turn a real flush edge into an unknown.
-fn window_band_fraction(
-    img: &Image,
-    expected: Rect,
-    side: Side,
-    taskbars: &[Rect],
-) -> f32 {
+fn window_band_fraction(img: &Image, expected: Rect, side: Side, taskbars: &[Rect]) -> f32 {
     let (span_lo, span_hi) = side.perpendicular_span(expected);
     let corner = ((span_hi - span_lo) / 8).clamp(0, 12);
     let lo = span_lo + corner;
@@ -779,7 +781,8 @@ fn best_horizontal(
 ) -> Option<(i32, f32)> {
     let mut best: Option<(i32, f32, f32)> = None; // pos, raw score, rank
     for dy in -search..=search {
-        if let Some((score, uniformity)) = horizontal_line_score(img, rect, base + dy, inside, band) {
+        if let Some((score, uniformity)) = horizontal_line_score(img, rect, base + dy, inside, band)
+        {
             let rank = score * (0.3 + 0.7 * uniformity);
             if best.is_none_or(|(_, _, b)| rank > b) {
                 best = Some((base + dy, score, rank));
@@ -822,11 +825,23 @@ fn measure_side(
     let horizontal_band = (expected.h / 4).clamp(4, 24);
     let fallback = match side {
         Side::Left => best_vertical(img, expected, expected.x, 1, search, vertical_band),
-        Side::Right => best_vertical(img, expected, expected.right() - 1, -1, search, vertical_band),
+        Side::Right => best_vertical(
+            img,
+            expected,
+            expected.right() - 1,
+            -1,
+            search,
+            vertical_band,
+        ),
         Side::Top => best_horizontal(img, expected, expected.y, 1, search, horizontal_band),
-        Side::Bottom => {
-            best_horizontal(img, expected, expected.bottom() - 1, -1, search, horizontal_band)
-        }
+        Side::Bottom => best_horizontal(
+            img,
+            expected,
+            expected.bottom() - 1,
+            -1,
+            search,
+            horizontal_band,
+        ),
     };
     match fallback {
         Some((pos, score)) if score >= min_score => Some(SideMeasurement {
@@ -967,9 +982,7 @@ pub fn fit_outline(
     }
     if bottom - top < 16 {
         bottom = top + expected.h;
-    } else if bottom - top - expected.h > 2 * search
-        || expected.h - (bottom - top) > 2 * search
-    {
+    } else if bottom - top - expected.h > 2 * search || expected.h - (bottom - top) > 2 * search {
         bottom = top + expected.h;
     }
 
@@ -1337,9 +1350,13 @@ pub fn on_any_outline(b: Rect, expected: &[Rect], tolerance: i32) -> bool {
                 && (b.bottom() - e.bottom()).abs() <= tolerance
         } else {
             (b.x - e.x).abs() <= tolerance && b.y < e.bottom() && b.bottom() > e.y
-                || (b.right() - e.right()).abs() <= tolerance && b.y < e.bottom() && b.bottom() > e.y
+                || (b.right() - e.right()).abs() <= tolerance
+                    && b.y < e.bottom()
+                    && b.bottom() > e.y
                 || (b.y - e.y).abs() <= tolerance && b.x < e.right() && b.right() > e.x
-                || (b.bottom() - e.bottom()).abs() <= tolerance && b.x < e.right() && b.right() > e.x
+                || (b.bottom() - e.bottom()).abs() <= tolerance
+                    && b.x < e.right()
+                    && b.right() > e.x
         }
     })
 }
@@ -1473,7 +1490,10 @@ pub fn judge_border_box(
     colour_tolerance: i32,
 ) -> (BorderVerdict, bool) {
     let mut geometry = check_border_box(b.rect, expected, work, taskbars, border_tolerance_px);
-    if matches!(geometry, BorderVerdict::OnOutline | BorderVerdict::NotOnOutline) {
+    if matches!(
+        geometry,
+        BorderVerdict::OnOutline | BorderVerdict::NotOnOutline
+    ) {
         let coverage = outline_coverage(
             img,
             b.rect,
@@ -1521,7 +1541,11 @@ pub fn read_png(path: &std::path::Path) -> std::io::Result<Image> {
     let channels = match info.color_type {
         png::ColorType::Rgb => 3,
         png::ColorType::Rgba => 4,
-        other => return Err(std::io::Error::other(format!("unsupported PNG colour type {other:?}"))),
+        other => {
+            return Err(std::io::Error::other(format!(
+                "unsupported PNG colour type {other:?}"
+            )));
+        }
     };
     let (w, h) = (info.width as i32, info.height as i32);
     let mut bgra = Vec::with_capacity((w * h * 4) as usize);
@@ -1625,10 +1649,18 @@ mod tests {
         let ctx = LayoutContext::for_image(&img);
         let fl = fit_outline(&img, left, 24, 0.10, &ctx);
         assert_eq!(fl.measured, Some(left), "{fl:?}");
-        assert!(fl.notes.iter().any(|n| n.contains("gap 6 px")), "{:?}", fl.notes);
+        assert!(
+            fl.notes.iter().any(|n| n.contains("gap 6 px")),
+            "{:?}",
+            fl.notes
+        );
         let fr = fit_outline(&img, right, 24, 0.10, &ctx);
         assert_eq!(fr.measured, Some(right), "{fr:?}");
-        assert!(fr.notes.iter().any(|n| n.contains("gap 6 px")), "{:?}", fr.notes);
+        assert!(
+            fr.notes.iter().any(|n| n.contains("gap 6 px")),
+            "{:?}",
+            fr.notes
+        );
     }
 
     #[test]
@@ -1716,7 +1748,11 @@ mod tests {
         let ctx = LayoutContext::new(Rect::new(0, 0, 320, 200), vec![taskbar], 6);
         let fit = fit_outline(&img, win, 24, 0.10, &ctx);
         assert_eq!(fit.measured, Some(win), "{fit:?}");
-        assert!(fit.notes.iter().any(|n| n.contains("taskbar edge")), "{:?}", fit.notes);
+        assert!(
+            fit.notes.iter().any(|n| n.contains("taskbar edge")),
+            "{:?}",
+            fit.notes
+        );
     }
 
     #[test]
@@ -1725,9 +1761,13 @@ mod tests {
         let boxes = find_border_boxes(&img, &BORDER_COLOURS, 12, 30, 8);
         assert!(!boxes.is_empty());
         let e = [win];
-        assert!(boxes
-            .iter()
-            .all(|b| check_border_box(b.rect, &e, Rect::new(0, 0, 240, 180), &[], 2) == BorderVerdict::OnOutline));
+        assert!(boxes.iter().all(|b| check_border_box(
+            b.rect,
+            &e,
+            Rect::new(0, 0, 240, 180),
+            &[],
+            2
+        ) == BorderVerdict::OnOutline));
     }
 
     #[test]
@@ -1768,7 +1808,13 @@ mod tests {
         );
         // Same box away from the taskbar is not on any expected outline.
         assert_eq!(
-            check_border_box(b, &[Rect::new(0, 0, 100, 100)], Rect::new(0, 0, 240, 180), &[], 2),
+            check_border_box(
+                b,
+                &[Rect::new(0, 0, 100, 100)],
+                Rect::new(0, 0, 240, 180),
+                &[],
+                2
+            ),
             BorderVerdict::NotOnOutline
         );
     }
@@ -1782,27 +1828,13 @@ mod tests {
         img.outline(Rect::new(20, 20, 106, 80), [59, 130, 246], 2);
         let boxes = find_border_boxes(&img, &BORDER_COLOURS, 12, 30, 24);
         assert!(!boxes.is_empty());
-        let coverage = outline_coverage(
-            &img,
-            boxes[0].rect,
-            [59, 130, 246],
-            12,
-            &[expected],
-            2,
-        );
+        let coverage = outline_coverage(&img, boxes[0].rect, [59, 130, 246], 12, &[expected], 2);
         assert!(coverage < 0.9, "coverage {coverage}");
         // The same ring exactly on the outline is fully covered.
         let mut ok = Image::solid(240, 180, WALL);
         ok.outline(expected, [59, 130, 246], 2);
         let boxes = find_border_boxes(&ok, &BORDER_COLOURS, 12, 30, 24);
-        let coverage = outline_coverage(
-            &ok,
-            boxes[0].rect,
-            [59, 130, 246],
-            12,
-            &[expected],
-            2,
-        );
+        let coverage = outline_coverage(&ok, boxes[0].rect, [59, 130, 246], 12, &[expected], 2);
         assert!(coverage >= 0.99, "coverage {coverage}");
     }
     #[test]
@@ -1879,7 +1911,17 @@ mod border_lookalike_tests {
         let stray = boxes
             .iter()
             .filter(|b| {
-                judge_border_box(img, b, BORDER_COLOURS[b.colour].1, &[tile], work, &[], 2, 40).1
+                judge_border_box(
+                    img,
+                    b,
+                    BORDER_COLOURS[b.colour].1,
+                    &[tile],
+                    work,
+                    &[],
+                    2,
+                    40,
+                )
+                .1
             })
             .count();
         (boxes.len(), stray)
@@ -1906,7 +1948,10 @@ mod border_lookalike_tests {
         img.fill(Rect::new(row.x, row.bottom() - 2, row.w, 2), LIGHT_BLUE);
         let boxes = find_border_boxes(&img, &BORDER_COLOURS, 40, 40, 24);
         assert_eq!(boxes.len(), 1, "one connected L shaped box: {boxes:?}");
-        assert!(boxes[0].rect.w.min(boxes[0].rect.h) >= 12, "not thin, so the 3-side rule decides");
+        assert!(
+            boxes[0].rect.w.min(boxes[0].rect.h) >= 12,
+            "not thin, so the 3-side rule decides"
+        );
         assert_eq!(sides_present(&img, boxes[0].rect, LIGHT_BLUE, 40), 2);
         let (_, stray) = judge_all(&img, tile);
         assert_eq!(stray, 0);
@@ -1966,7 +2011,8 @@ mod border_lookalike_tests {
         assert_eq!(boxes.len(), 1);
         let work = Rect::new(0, 0, 420, 224);
         let taskbar = Rect::new(0, 224, 420, 16);
-        let (verdict, stray) = judge_border_box(&img, &boxes[0], FOCUSED, &[tile], work, &[taskbar], 2, 40);
+        let (verdict, stray) =
+            judge_border_box(&img, &boxes[0], FOCUSED, &[tile], work, &[taskbar], 2, 40);
         assert_eq!(verdict, BorderVerdict::OverTaskbar);
         assert!(stray);
     }

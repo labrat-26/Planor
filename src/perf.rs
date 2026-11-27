@@ -464,15 +464,7 @@ pub fn register_thread(name: &'static str) {
         let proc_h = GetCurrentProcess();
         let thr_h = GetCurrentThread();
         let mut dup: *mut c_void = std::ptr::null_mut();
-        let ok = DuplicateHandle(
-            proc_h,
-            thr_h,
-            proc_h,
-            &mut dup,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        );
+        let ok = DuplicateHandle(proc_h, thr_h, proc_h, &mut dup, 0, 0, DUPLICATE_SAME_ACCESS);
         let tid = current_tid();
         if ok != 0
             && let Ok(mut list) = store().threads.lock()
@@ -1059,7 +1051,10 @@ pub fn format_summary(report: &PerfReport) -> String {
         report.process.os_handles
     ));
     if let Some(g) = report.process.gpu {
-        let f = |v: Option<f64>, d: usize| v.map(|v| format!("{v:.d$}")).unwrap_or_else(|| "n/a".into());
+        let f = |v: Option<f64>, d: usize| {
+            v.map(|v| format!("{v:.d$}"))
+                .unwrap_or_else(|| "n/a".into())
+        };
         out.push(format!(
             "GPU: engine {}% · VRAM local {} MB shared {} MB · DWM compose {} fps @ {} Hz (late {}, dropped {}, missed {})",
             f(g.engine_pct, 1),
@@ -1263,7 +1258,11 @@ mod tests {
         // Drain and verify Chrome trace JSON structure.
         let trace = export_chrome_trace(Some(60));
         assert_eq!(trace["clock"], "qpc_us");
-        assert!(trace["traceEvents"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(
+            trace["traceEvents"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        );
         let report = build_report(None);
         assert!(report.spans.iter().any(|s| s.name == "daemon.tick"));
         reset();

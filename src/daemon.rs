@@ -241,12 +241,15 @@ impl HotCfg {
             scroll_autofocus: touchpad["scroll_autofocus"].as_bool() == Some(true),
             swipe_drag_gain: touchpad["swipe_drag_gain"].as_float().unwrap_or(1.),
             swipe_drag_accel: touchpad["swipe_drag_accel"].as_float().unwrap_or(0.),
-            swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool() == Some(true),
+            swipe_drag_cross_monitors: touchpad["swipe_drag_cross_monitors"].as_bool()
+                == Some(true),
             drag_axis_lock: touchpad["drag_axis_lock"].as_bool() != Some(false),
             swipe_fling_enabled: touchpad["swipe_fling_enabled"].as_bool() == Some(true),
             swipe_fling_speed: touchpad["swipe_fling_speed"].as_integer().unwrap_or(900) as f64,
             win_wheel_step_px: mouse["win_wheel_step_px"].as_integer().unwrap_or(240) as f64,
-            max_log_bytes: (diagnostics["max_log_mb"].as_integer().unwrap_or(25) as u64) * 1024 * 1024,
+            max_log_bytes: (diagnostics["max_log_mb"].as_integer().unwrap_or(25) as u64)
+                * 1024
+                * 1024,
             max_log_files: diagnostics["max_log_files"].as_integer().unwrap_or(3) as usize,
         }
     }
@@ -499,9 +502,9 @@ impl<B: WindowBackend> Engine<B> {
             wheel_mode: None,
             inertia: None,
             v_travel: 0.,
-        hopped: false,
-        born: HashMap::new(),
-        gesture_rec: None,
+            hopped: false,
+            born: HashMap::new(),
+            gesture_rec: None,
             gesture: Default::default(),
             seq: 0,
             input: None,
@@ -569,7 +572,13 @@ impl<B: WindowBackend> Engine<B> {
         if self.orphans.contains(&id) {
             return true;
         }
-        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let park_x = self
+            .displays
+            .iter()
+            .map(|m| m.2.x + m.2.w)
+            .max()
+            .unwrap_or(0)
+            + 1024;
         self.backend.frame(id).is_some_and(|r| r.x >= park_x - 2)
     }
     /// Pick the spatially nearest other monitor on the same desktop that still has an active window.
@@ -660,7 +669,8 @@ impl<B: WindowBackend> Engine<B> {
         s.share = self.hot.default_tile_share;
         s.insert(id, self.backend.minimum(id, area.horizontal()));
         if cover_newborn {
-            self.born.retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
+            self.born
+                .retain(|_, (t, _)| t.elapsed() < Duration::from_secs(3));
             self.born.insert(id, (Instant::now(), 0));
             self.mark_cover(id);
         }
@@ -670,7 +680,9 @@ impl<B: WindowBackend> Engine<B> {
     /// "new window struggling to keep the position"): put it back in its slot at once. Only for the first
     /// 2.5 s and at most 6 times, so an app that insists cannot start a tug of war.
     fn hold_newborn(&mut self, id: isize, r: Rect) {
-        let Some((t, n)) = self.born.get_mut(&id) else { return };
+        let Some((t, n)) = self.born.get_mut(&id) else {
+            return;
+        };
         if t.elapsed() > Duration::from_millis(2500) || *n >= 6 {
             self.born.remove(&id);
             return;
@@ -678,13 +690,25 @@ impl<B: WindowBackend> Engine<B> {
         if self.drag.is_some() || self.pad.is_some() || self.pad_scrolling {
             return;
         }
-        let Some(&(_, want)) = self.placed.get(&id) else { return };
-        let park = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let Some(&(_, want)) = self.placed.get(&id) else {
+            return;
+        };
+        let park = self
+            .displays
+            .iter()
+            .map(|m| m.2.x + m.2.w)
+            .max()
+            .unwrap_or(0)
+            + 1024;
         let off = |a: i32, b: i32| (a - b).abs() > 2;
-        if r.x != park && (off(r.x, want.x) || off(r.y, want.y) || off(r.w, want.w) || off(r.h, want.h)) {
+        if r.x != park
+            && (off(r.x, want.x) || off(r.y, want.y) || off(r.w, want.w) || off(r.h, want.h))
+        {
             *n += 1;
             if self.diag.enabled {
-                diag::trace(format!("NEWBORN {id} moved itself to {r:?}, back to {want:?} (#{n})"));
+                diag::trace(format!(
+                    "NEWBORN {id} moved itself to {r:?}, back to {want:?} (#{n})"
+                ));
             }
             self.instant = true;
             self.force_place = true;
@@ -697,7 +721,9 @@ impl<B: WindowBackend> Engine<B> {
         reload: &crossbeam_channel::Sender<toml::Value>,
     ) -> Result<String> {
         match cmd {
-            Command::Gestures { action: crate::GestureAction::Mark { text } } => {
+            Command::Gestures {
+                action: crate::GestureAction::Mark { text },
+            } => {
                 return Ok(match self.gesture_rec.as_mut() {
                     Some(r) => {
                         r.push(serde_json::json!({ "kind": "mark", "text": text }));
@@ -706,15 +732,22 @@ impl<B: WindowBackend> Engine<B> {
                     None => "not recording".into(),
                 });
             }
-            Command::Gestures { action: crate::GestureAction::Replay { file, step, gap_ms } } => {
+            Command::Gestures {
+                action: crate::GestureAction::Replay { file, step, gap_ms },
+            } => {
                 use planor::replay::{fits, identify, parse_events_jsonl, segments};
                 let text = std::fs::read_to_string(&file)?;
                 let segs: Vec<_> = segments(&parse_events_jsonl(&text))
                     .into_iter()
-                    .filter(|s| step.as_ref().is_none_or(|w| s.label.to_lowercase().contains(&w.to_lowercase())))
+                    .filter(|s| {
+                        step.as_ref()
+                            .is_none_or(|w| s.label.to_lowercase().contains(&w.to_lowercase()))
+                    })
                     .filter(|s| {
                         let g = identify(s);
-                        s.label.is_empty() || fits(&s.label, &g) || (!s.previous.is_empty() && fits(&s.previous, &g))
+                        s.label.is_empty()
+                            || fits(&s.label, &g)
+                            || (!s.previous.is_empty() && fits(&s.previous, &g))
                     })
                     .collect();
                 let n = segs.len();
@@ -728,7 +761,11 @@ impl<B: WindowBackend> Engine<B> {
                             if let Some(wait) = due.checked_duration_since(Instant::now()) {
                                 std::thread::sleep(wait);
                             }
-                            crate::win32::emit(Event::Contacts(if p.len() >= 3 { p } else { vec![] }));
+                            crate::win32::emit(Event::Contacts(if p.len() >= 3 {
+                                p
+                            } else {
+                                vec![]
+                            }));
                         }
                         crate::win32::emit(Event::Contacts(vec![]));
                         std::thread::sleep(Duration::from_millis(gap_ms));
@@ -736,7 +773,9 @@ impl<B: WindowBackend> Engine<B> {
                 });
                 return Ok(format!("replaying {n} gestures"));
             }
-            Command::Gestures { action: crate::GestureAction::Stop } => {
+            Command::Gestures {
+                action: crate::GestureAction::Stop,
+            } => {
                 let n = self.gesture_rec.as_ref().map(|r| r.events.len());
                 self.write_gesture_recording();
                 return Ok(match n {
@@ -744,11 +783,27 @@ impl<B: WindowBackend> Engine<B> {
                     None => "not recording".into(),
                 });
             }
-            Command::Gestures { action: crate::GestureAction::Guide { .. } | crate::GestureAction::Analyze { .. } } => return Ok("runs in the client".into()),
-            Command::Gestures { action: crate::GestureAction::Record { name, seconds, out, passive } } => {
-                let Some(out) = out else { return Ok("no output path".into()) };
+            Command::Gestures {
+                action: crate::GestureAction::Guide { .. } | crate::GestureAction::Analyze { .. },
+            } => return Ok("runs in the client".into()),
+            Command::Gestures {
+                action:
+                    crate::GestureAction::Record {
+                        name,
+                        seconds,
+                        out,
+                        passive,
+                    },
+            } => {
+                let Some(out) = out else {
+                    return Ok("no output path".into());
+                };
                 let cursor = self.backend.cursor_pos();
-                let monitor = self.displays.iter().find(|m| contains(m.2, cursor)).or(self.displays.first());
+                let monitor = self
+                    .displays
+                    .iter()
+                    .find(|m| contains(m.2, cursor))
+                    .or(self.displays.first());
                 let t = &self.cfg["touchpad"];
                 self.gesture_rec = Some(GestureRec {
                     until: Instant::now() + Duration::from_secs(seconds.clamp(1, 600)),
@@ -904,8 +959,16 @@ impl<B: WindowBackend> Engine<B> {
     /// own windows, which they treat as unmanaged; carving those out would hide every border they draw, so an
     /// isolated instance carves out only windows of the class named in PLANOR_HOLES (none if unset).
     pub(crate) fn state_snapshot(&self, json: bool) -> Result<String> {
-        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
-        let stack_peek = self.cfg["layout"]["stack_peek_px"].as_integer().unwrap_or(DEFAULT_STACK_PEEK as i64) as i32;
+        let park_x = self
+            .displays
+            .iter()
+            .map(|m| m.2.x + m.2.w)
+            .max()
+            .unwrap_or(0)
+            + 1024;
+        let stack_peek = self.cfg["layout"]["stack_peek_px"]
+            .as_integer()
+            .unwrap_or(DEFAULT_STACK_PEEK as i64) as i32;
         let monitors: Vec<serde_json::Value> = self
             .displays
             .iter()
@@ -995,7 +1058,10 @@ impl<B: WindowBackend> Engine<B> {
                     && focused_id.is_some_and(|f| strip.columns[ci].members.contains(&f))
                 {
                     self.cfg["borders"]["stacked_color"].as_str()
-                } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
+                } else if focused_id == Some(id)
+                    && name == &self.active
+                    && strip.active() == Some(id)
+                {
                     self.cfg["borders"]["focused_color"].as_str()
                 } else {
                     None
@@ -1139,7 +1205,13 @@ impl<B: WindowBackend> Engine<B> {
         let Some(only) = self.backend.holes_class_filter() else {
             return vec![];
         };
-        let park_x = self.displays.iter().map(|m| m.2.x + m.2.w).max().unwrap_or(0) + 1024;
+        let park_x = self
+            .displays
+            .iter()
+            .map(|m| m.2.x + m.2.w)
+            .max()
+            .unwrap_or(0)
+            + 1024;
         let mut managed_above: Vec<Rect> = Vec::new();
         let mut out: Vec<Rect> = Vec::new();
         // `windows()` yields top-to-bottom Z-order. Only the portion of an unmanaged window / system
@@ -1247,7 +1319,9 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         // An unmanaged window appearing, moving or closing changes what the overlay must stay clear of.
-        if std::mem::take(&mut self.holes_stale) || self.holes_checked.elapsed() >= Duration::from_millis(200) {
+        if std::mem::take(&mut self.holes_stale)
+            || self.holes_checked.elapsed() >= Duration::from_millis(200)
+        {
             self.holes_checked = Instant::now();
             if self.holes() != self.last_holes {
                 self.dirty = true
@@ -1256,7 +1330,8 @@ impl<B: WindowBackend> Engine<B> {
         // Explorer reserves a monitor's taskbar space after the display change that brings the monitor back,
         // so the work area read by `topology` can still be the whole monitor. Nothing else re-reads it, and the
         // strip would keep tiles running under the taskbar. Re-run topology when the work areas differ.
-        if self.deadline.is_none() && self.monitors_checked.elapsed() >= Duration::from_millis(500) {
+        if self.deadline.is_none() && self.monitors_checked.elapsed() >= Duration::from_millis(500)
+        {
             self.monitors_checked = Instant::now();
             if self.displays != self.backend.monitors() {
                 self.deadline = Some(Instant::now() + Duration::from_millis(1500));
@@ -1276,7 +1351,10 @@ impl<B: WindowBackend> Engine<B> {
             if d != self.desktop {
                 if self.diag.enabled {
                     // #56: a virtual-desktop switch (or a failed desktop query, `None`) clears every visual.
-                    diag::trace(format!("CLEAR reason=desktop from={:?} to={d:?}", self.desktop.map(|v| format!("{v:032x}"))));
+                    diag::trace(format!(
+                        "CLEAR reason=desktop from={:?} to={d:?}",
+                        self.desktop.map(|v| format!("{v:032x}"))
+                    ));
                 }
                 self.clear()?;
                 self.desktop = d;
@@ -1286,14 +1364,25 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         self.refresh();
-        if self.gesture_rec.as_ref().is_some_and(|r| Instant::now() >= r.until) {
+        if self
+            .gesture_rec
+            .as_ref()
+            .is_some_and(|r| Instant::now() >= r.until)
+        {
             self.write_gesture_recording();
         }
-        if self.pad.as_ref().is_some_and(|p| p.last_contact.elapsed() > Duration::from_millis(800)) {
+        if self
+            .pad
+            .as_ref()
+            .is_some_and(|p| p.last_contact.elapsed() > Duration::from_millis(800))
+        {
             self.pad_end()
         }
         // Momentum normally runs on `fast_tick`; this keeps it going if the fast timer is not wired (tests).
-        if self.inertia.is_some_and(|(_, _, last, _)| last.elapsed() >= Duration::from_millis(30)) {
+        if self
+            .inertia
+            .is_some_and(|(_, _, last, _)| last.elapsed() >= Duration::from_millis(30))
+        {
             self.pad_inertia()
         }
         if self.settle.is_some_and(|t| Instant::now() >= t) {
@@ -1308,7 +1397,9 @@ impl<B: WindowBackend> Engine<B> {
     /// order: `contacts` frames (an empty `pts` is a lift), `button` clicks and `mark` step labels, each with
     /// `t` in microseconds from the start. The format `replay` and the tests read.
     pub(crate) fn write_gesture_recording(&mut self) {
-        let Some(rec) = self.gesture_rec.take() else { return };
+        let Some(rec) = self.gesture_rec.take() else {
+            return;
+        };
         crate::input::RECORD_ALL.store(false, std::sync::atomic::Ordering::Relaxed);
         let mut text = format!("{}\n", rec.meta);
         for e in &rec.events {
@@ -1316,7 +1407,11 @@ impl<B: WindowBackend> Engine<B> {
         }
         let result = std::fs::write(&rec.out, text);
         if self.diag.enabled {
-            diag::trace(format!("GESTURES recorded {} events to {} ({result:?})", rec.events.len(), rec.out.display()));
+            diag::trace(format!(
+                "GESTURES recorded {} events to {} ({result:?})",
+                rec.events.len(),
+                rec.out.display()
+            ));
         }
     }
     /// True while the strip moves by itself (momentum or drag edge-scroll) and should be stepped at frame rate.
@@ -1516,7 +1611,9 @@ impl<B: WindowBackend> Engine<B> {
         let peek = self.hot.reveal_peek_px();
         let entries: Vec<(isize, String)> = self.homes.drain().collect();
         for (id, home) in entries {
-            let Some(owner) = self.owning(id) else { continue };
+            let Some(owner) = self.owning(id) else {
+                continue;
+            };
             let Some(area) = self.displays.iter().find(|m| m.0 == home).map(|m| m.1) else {
                 self.homes.insert(id, home);
                 continue;
@@ -1541,7 +1638,11 @@ impl<B: WindowBackend> Engine<B> {
         // desktop) still ends it. Not while a settle is queued: that settle sends the final scene itself, and a
         // non-live scene before it would put the real windows at the mid-scroll position only to move them
         // again at the snap (#108 re-review N1).
-        if self.last_scene_live && !self.pad_scrolling && self.inertia.is_none() && self.settle.is_none() {
+        if self.last_scene_live
+            && !self.pad_scrolling
+            && self.inertia.is_none()
+            && self.settle.is_none()
+        {
             self.dirty = true;
         }
         if self.blocked() || !self.dirty {
@@ -1550,7 +1651,8 @@ impl<B: WindowBackend> Engine<B> {
         let t = Instant::now();
         let _span = perf::SpanGuard::new(perf::SpanKind::DaemonLayout);
         self.dirty = false;
-        self.covering.retain(|_, covered_at| covered_at.elapsed() < Duration::from_millis(500));
+        self.covering
+            .retain(|_, covered_at| covered_at.elapsed() < Duration::from_millis(500));
         for s in self.strips.values_mut() {
             s.fill_gaps()
         }
@@ -1577,7 +1679,8 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        let cap: usize = self.strips.values().map(|s| s.columns.len()).sum::<usize>() + self.pinned.len();
+        let cap: usize =
+            self.strips.values().map(|s| s.columns.len()).sum::<usize>() + self.pinned.len();
         let mut tiles = Vec::with_capacity(cap);
         let raw_fg = self.backend.foreground();
         if raw_fg != 0 {
@@ -1630,16 +1733,26 @@ impl<B: WindowBackend> Engine<B> {
                 });
             }
             if k == &d.key
-                && s.locate(d.id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
+                && s.locate(d.id)
+                    .is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             {
-                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                let (leading, trailing) = ungroup_bands(
+                    &self.displays,
+                    &k.1,
+                    s.area,
+                    group_column_rect(s, d.id, peek),
+                );
                 for (band, edge) in [(leading, false), (trailing, true)] {
                     if let Some(rect) = band {
                         zones.push(render::Zone {
                             rect,
                             monitor: k.1.clone(),
                             color: c,
-                            alpha: if d.ungroup_edge == Some(edge) { 0.85 } else { 0.35 },
+                            alpha: if d.ungroup_edge == Some(edge) {
+                                0.85
+                            } else {
+                                0.35
+                            },
                             kind: render::ZoneKind::Leave {
                                 trailing: edge,
                                 horizontal: s.area.horizontal(),
@@ -1679,8 +1792,11 @@ impl<B: WindowBackend> Engine<B> {
                         d.moved
                             && !d.resizing
                             && !d.visuals_cleared
-                            && d.destination.as_ref().is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
-                            && d.target.is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
+                            && d.destination
+                                .as_ref()
+                                .is_some_and(|dest| dest.0 == *desk && dest.1 == *name)
+                            && d.target
+                                .is_some_and(|t| strip.locate(t).is_some_and(|(c, _)| c == i))
                             && strip.columns[i].members.len() > 1
                             && strip.columns[i].members[strip.columns[i].active] == id
                     }) {
@@ -1692,24 +1808,41 @@ impl<B: WindowBackend> Engine<B> {
                         // #107: a group's border shows only while the group holds the focus. Any member
                         // counts, so a roll that moves `active` before the foreground follows keeps it.
                         hot.stacked_color
-                    } else if focused_id == Some(id) && name == &self.active && strip.active() == Some(id) {
+                    } else if focused_id == Some(id)
+                        && name == &self.active
+                        && strip.active() == Some(id)
+                    {
                         hot.focused_color
                     } else {
                         None
                     };
                     let preview = strip.columns[i].members[strip.columns[i].active] != id;
-                    let hidden = !strip.columns[i].shown(strip.columns[i].members.iter().position(|&m| m == id).unwrap_or(0));
+                    let hidden = !strip.columns[i].shown(
+                        strip.columns[i]
+                            .members
+                            .iter()
+                            .position(|&m| m == id)
+                            .unwrap_or(0),
+                    );
                     tiles.push(render::Tile {
                         id,
                         rect,
                         monitor: name.clone(),
                         pinned: false,
                         fullscreen,
-                        os_frame: if fullscreen { self.backend.frame(id) } else { None },
+                        os_frame: if fullscreen {
+                            self.backend.frame(id)
+                        } else {
+                            None
+                        },
                         preview,
                         hidden,
                         bound: if fullscreen {
-                            self.displays.iter().find(|m| &m.0 == name).map(|m| m.2).unwrap_or(strip.area)
+                            self.displays
+                                .iter()
+                                .find(|m| &m.0 == name)
+                                .map(|m| m.2)
+                                .unwrap_or(strip.area)
                         } else {
                             strip.area
                         },
@@ -1725,7 +1858,8 @@ impl<B: WindowBackend> Engine<B> {
             }
         }
         for &id in &self.pinned {
-            if let (Some(rect), Some(saved)) = (self.backend.frame(id), self.journal.entries.get(&id))
+            if let (Some(rect), Some(saved)) =
+                (self.backend.frame(id), self.journal.entries.get(&id))
                 && let Some((name, _, _)) = self.displays.iter().find(|(_, _, b)| {
                     rect.x >= b.x && rect.x < b.x + b.w && rect.y >= b.y && rect.y < b.y + b.h
                 })
@@ -1855,8 +1989,14 @@ impl<B: WindowBackend> Engine<B> {
             // Only an input that caused this scene counts towards gesture-to-place latency: one that changed
             // nothing (a lift, a tap) stayed pending and was charged to an unrelated scene seconds later
             // (p99 7.9 s, max 10.7 s in the user's daemon).
-            input: self.input.take().filter(|t| t.elapsed() < Duration::from_millis(250)),
-            input_qpc_us: self.input_qpc_us.take().filter(|&t| perf::qpc_us() - t < 250_000),
+            input: self
+                .input
+                .take()
+                .filter(|t| t.elapsed() < Duration::from_millis(250)),
+            input_qpc_us: self
+                .input_qpc_us
+                .take()
+                .filter(|&t| perf::qpc_us() - t < 250_000),
             diagnostics: self.diag.enabled,
             tiles,
             monitors: Arc::clone(&self.displays_arc),
@@ -1873,14 +2013,22 @@ impl<B: WindowBackend> Engine<B> {
         }))?;
         self.last_scene_live = live;
         if self.diag.enabled {
-            diag::trace(format!("SCENE seq={} tiles={} holes={}", self.seq, tiles_len, self.last_holes.len()));
+            diag::trace(format!(
+                "SCENE seq={} tiles={} holes={}",
+                self.seq,
+                tiles_len,
+                self.last_holes.len()
+            ));
         }
         slow("layout", t);
         Ok(())
     }
     fn contacts(&mut self, p: Vec<(f64, f64)>) {
         if let Some(rec) = self.gesture_rec.as_mut() {
-            let pts: Vec<[f64; 2]> = p.iter().map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.]).collect();
+            let pts: Vec<[f64; 2]> = p
+                .iter()
+                .map(|&(x, y)| [(x * 100.).round() / 100., (y * 100.).round() / 100.])
+                .collect();
             rec.push(serde_json::json!({ "kind": "contacts", "pts": pts }));
             if rec.passive {
                 self.gesture = Default::default();
@@ -1930,7 +2078,12 @@ impl<B: WindowBackend> Engine<B> {
                 (Some(h), Some(b)) if self.hot.swipe_drag_cross_monitors => {
                     let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
                     let side = |d: i32| {
-                        if h { planor::adjacent(b, &bounds, 0, d) } else { planor::adjacent(b, &bounds, d, 0) }.is_some()
+                        if h {
+                            planor::adjacent(b, &bounds, 0, d)
+                        } else {
+                            planor::adjacent(b, &bounds, d, 0)
+                        }
+                        .is_some()
                     };
                     (side(-1), side(1))
                 }
@@ -1954,21 +2107,29 @@ impl<B: WindowBackend> Engine<B> {
                 _ => Vec::new(),
             };
         }
-        let swipe = self.gesture.sample(
-            &p,
-            self.hot.axis_lock_deadzone,
-            self.hot.swipe_step_px,
-        );
+        let swipe = self
+            .gesture
+            .sample(&p, self.hot.axis_lock_deadzone, self.hot.swipe_step_px);
         // Three fingers move the focus, four fingers move the focused window. With the
         // natural direction the content follows the fingers (swipe right = focus left).
         // Gesture trace (diagnostics): what was recognised and when, for lining up with a note.
-        if self.diag.enabled && !matches!(swipe, Swipe::None | Swipe::DragMove(..) | Swipe::Scroll(_) | Swipe::ScrollV(_)) {
+        if self.diag.enabled
+            && !matches!(
+                swipe,
+                Swipe::None | Swipe::DragMove(..) | Swipe::Scroll(_) | Swipe::ScrollV(_)
+            )
+        {
             diag::trace(format!("PAD {swipe:?}"));
         }
         match swipe {
             Swipe::DragStart => {
                 if self.diag.enabled {
-                    diag::trace(format!("PAD drag start, window {:?}", self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active())));
+                    diag::trace(format!(
+                        "PAD drag start, window {:?}",
+                        self.key()
+                            .and_then(|k| self.strips.get(&k))
+                            .and_then(|s| s.active())
+                    ));
                 }
                 self.pad_begin();
             }
@@ -1978,7 +2139,11 @@ impl<B: WindowBackend> Engine<B> {
             Swipe::Scroll(d) => self.pad_scroll(d, false),
             Swipe::ScrollV(d) => self.pad_scroll(d, true),
             Swipe::ScrollEnd => self.pad_scroll_end(),
-            Swipe::Step { fingers, horizontal, direction } => {
+            Swipe::Step {
+                fingers,
+                horizontal,
+                direction,
+            } => {
                 let natural = self.hot.swipe_natural_direction;
                 let forward = (direction > 0) != natural;
                 let key = match (fingers, horizontal, forward) {
@@ -1990,7 +2155,9 @@ impl<B: WindowBackend> Engine<B> {
                     (4, true, true) => "move_right",
                     _ => return,
                 };
-                diag::trace(format!("PAD step fingers={fingers} horizontal={horizontal} direction={direction} key={key}"));
+                diag::trace(format!(
+                    "PAD step fingers={fingers} horizontal={horizontal} direction={direction} key={key}"
+                ));
                 self.quick = true;
                 self.keypress(key);
             }
@@ -2078,7 +2245,16 @@ impl<B: WindowBackend> Engine<B> {
                     .position(|m| m.0 == self.active)
                     .and_then(|i| planor::adjacent(bounds[i], &bounds, dx, dy))
                 {
-                    let name=&self.displays[index].0;if self.desktop.is_some_and(|d|self.strips.get(&(d,name.clone())).and_then(|s|s.active()).is_some()){self.active=name.clone();transferred=true}
+                    let name = &self.displays[index].0;
+                    if self.desktop.is_some_and(|d| {
+                        self.strips
+                            .get(&(d, name.clone()))
+                            .and_then(|s| s.active())
+                            .is_some()
+                    }) {
+                        self.active = name.clone();
+                        transferred = true
+                    }
                 }
             }
         }
@@ -2193,15 +2369,22 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
             self.scroll_dpi = self.backend.contact_dpi();
-            self.scroll_start_focus = self
-                .key()
-                .and_then(|k| self.strips.get(&k).and_then(|s| s.active()).map(|id| (k, id)));
+            self.scroll_start_focus = self.key().and_then(|k| {
+                self.strips
+                    .get(&k)
+                    .and_then(|s| s.active())
+                    .map(|id| (k, id))
+            });
         }
         self.settle = None;
         self.inertia = None;
         let now = Instant::now();
         self.scroll_samples.push_back((now, d, vertical));
-        while self.scroll_samples.front().is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150)) {
+        while self
+            .scroll_samples
+            .front()
+            .is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150))
+        {
             self.scroll_samples.pop_front();
         }
         let dpi = self.scroll_dpi;
@@ -2209,7 +2392,13 @@ impl<B: WindowBackend> Engine<B> {
     }
     /// Move the strip (or roll the focused group) by `d` finger units. Shared by the live gesture and the
     /// momentum that carries on after the fingers lift. Returns `(changed, clamped)`.
-    fn scroll_by(&mut self, d: f64, vertical: bool, live: bool, contact_dpi: Option<f64>) -> (bool, bool) {
+    fn scroll_by(
+        &mut self,
+        d: f64,
+        vertical: bool,
+        live: bool,
+        contact_dpi: Option<f64>,
+    ) -> (bool, bool) {
         let gain = self.hot.swipe_scroll_gain;
         let natural = self.hot.swipe_natural_direction;
         let signed = if natural { -d } else { d } * gain;
@@ -2290,10 +2479,18 @@ impl<B: WindowBackend> Engine<B> {
         if self.blocked() || self.drag.is_some() || self.pad.is_some() {
             return;
         }
-        let Some(name) = self.displays.iter().find(|m| contains(m.2, at)).map(|m| m.0.clone()) else {
+        let Some(name) = self
+            .displays
+            .iter()
+            .find(|m| contains(m.2, at))
+            .map(|m| m.0.clone())
+        else {
             return;
         };
-        if self.desktop.is_some_and(|d| self.strips.contains_key(&(d, name.clone()))) {
+        if self
+            .desktop
+            .is_some_and(|d| self.strips.contains_key(&(d, name.clone())))
+        {
             self.active = name;
         }
         let step = self.hot.win_wheel_step_px;
@@ -2313,7 +2510,9 @@ impl<B: WindowBackend> Engine<B> {
         self.inertia = None;
         let now = Instant::now();
         let Some(key) = self.key() else { return };
-        let Some(s) = self.strips.get_mut(&key) else { return };
+        let Some(s) = self.strips.get_mut(&key) else {
+            return;
+        };
         let focused_is_group = s.columns.get(s.focus).is_some_and(|c| c.members.len() > 1);
         let roll = if tilt {
             !s.area.horizontal()
@@ -2352,7 +2551,10 @@ impl<B: WindowBackend> Engine<B> {
             s.focus_nearest_center();
         }
         if self.diag.enabled {
-            diag::trace(format!("WHEEL delta={delta} tilt={tilt} shift={shift} offset={} focus={}", s.offset, s.focus));
+            diag::trace(format!(
+                "WHEEL delta={delta} tilt={tilt} shift={shift} offset={} focus={}",
+                s.offset, s.focus
+            ));
         }
         self.action = "scroll";
         self.quick = true;
@@ -2401,7 +2603,8 @@ impl<B: WindowBackend> Engine<B> {
         );
         // Deliberate fling while still on (or just reaching) the adjacent target: choose the destination at
         // lift and animate directly to it in one continuous motion (no inertia decay pause + second slide).
-        if let (Some(dir), Some((start_key, start_win))) = (fling_dir, self.scroll_start_focus.take())
+        if let (Some(dir), Some((start_key, start_win))) =
+            (fling_dir, self.scroll_start_focus.take())
             && self.key().as_ref() == Some(&start_key)
             && let Some(s) = self.strips.get_mut(&start_key)
         {
@@ -2469,7 +2672,9 @@ impl<B: WindowBackend> Engine<B> {
     }
     /// One tick of momentum.
     fn pad_inertia(&mut self) {
-        let Some((vertical, speed, last, dpi)) = self.inertia else { return };
+        let Some((vertical, speed, last, dpi)) = self.inertia else {
+            return;
+        };
         let now = Instant::now();
         let dt = now.duration_since(last).as_secs_f64().min(0.1);
         let (_, clamped) = self.scroll_by(speed * dt, vertical, false, dpi);
@@ -2493,7 +2698,10 @@ impl<B: WindowBackend> Engine<B> {
         if let Some(s) = self.key().and_then(|k| self.strips.get_mut(&k)) {
             s.settle_roll();
         }
-        let id = self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active());
+        let id = self
+            .key()
+            .and_then(|k| self.strips.get(&k))
+            .and_then(|s| s.active());
         self.action = "scroll";
         self.quick = true;
         self.reveal();
@@ -2515,10 +2723,16 @@ impl<B: WindowBackend> Engine<B> {
         if self.owning(focused).is_some() {
             self.select(focused)
         }
-        let Some(id) = self.key().and_then(|k| self.strips.get(&k)).and_then(|s| s.active()) else {
+        let Some(id) = self
+            .key()
+            .and_then(|k| self.strips.get(&k))
+            .and_then(|s| s.active())
+        else {
             return;
         };
-        let Some(frame) = self.backend.frame(id) else { return };
+        let Some(frame) = self.backend.frame(id) else {
+            return;
+        };
         let Some(rect) = self.backend.window_rect(id) else {
             return;
         };
@@ -2556,9 +2770,17 @@ impl<B: WindowBackend> Engine<B> {
         );
         let now = Instant::now();
         let home = self.owning(id);
-        let home_lock = self.gesture.axis_lock.and(home.as_ref().and_then(|k| self.strips.get(k)).map(|st| st.area.horizontal()));
+        let home_lock = self.gesture.axis_lock.and(
+            home.as_ref()
+                .and_then(|k| self.strips.get(k))
+                .map(|st| st.area.horizontal()),
+        );
         let lock = home_lock.filter(|_| !self.gesture.started_cross);
-        let ray = if self.gesture.started_cross { self.gesture.started_ray } else { None };
+        let ray = if self.gesture.started_cross {
+            self.gesture.started_ray
+        } else {
+            None
+        };
         self.pad = Some(PadDrag {
             id,
             grab: ((cx - rect.x) as f64, (cy - rect.y) as f64),
@@ -2572,7 +2794,11 @@ impl<B: WindowBackend> Engine<B> {
             // Lock axis and home strip come from the strip that owns the dragged window (the active
             // monitor can differ from it).
             lock,
-            line: if lock.unwrap_or(true) { cy as f64 } else { cx as f64 },
+            line: if lock.unwrap_or(true) {
+                cy as f64
+            } else {
+                cx as f64
+            },
             home,
             cross: 0.,
             home_lock,
@@ -2584,7 +2810,10 @@ impl<B: WindowBackend> Engine<B> {
     fn pad_move(&mut self, dx: f64, dy: f64) {
         let base = self.hot.swipe_drag_gain;
         let accel = self.hot.swipe_drag_accel;
-        let (relax, cross_ok) = (7. * self.hot.axis_lock_deadzone, self.hot.swipe_drag_cross_monitors);
+        let (relax, cross_ok) = (
+            7. * self.hot.axis_lock_deadzone,
+            self.hot.swipe_drag_cross_monitors,
+        );
         let stack_peek = self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
         // The visible rect of the window's own group column (None for a lone window or a gone strip).
@@ -2614,12 +2843,21 @@ impl<B: WindowBackend> Engine<B> {
             .map(|k| {
                 self.displays
                     .iter()
-                    .filter_map(|m| self.strips.get(&(k.0, m.0.clone())).map(|s| (m.2, s.area.horizontal())))
+                    .filter_map(|m| {
+                        self.strips
+                            .get(&(k.0, m.0.clone()))
+                            .map(|s| (m.2, s.area.horizontal()))
+                    })
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
         let Some(p) = self.pad.as_mut() else { return };
-        let inside = |r: Rect, c: (f64, f64)| c.0 >= r.x as f64 && c.0 < (r.x + r.w) as f64 && c.1 >= r.y as f64 && c.1 < (r.y + r.h) as f64;
+        let inside = |r: Rect, c: (f64, f64)| {
+            c.0 >= r.x as f64
+                && c.0 < (r.x + r.w) as f64
+                && c.1 >= r.y as f64
+                && c.1 < (r.y + r.h) as f64
+        };
         let in_column = column.is_some_and(|r| inside(r, p.cursor));
         // Raw deltas feed the fling velocity (a throw may go any way); the carry itself is locked.
         let (raw_dx, raw_dy) = (dx, dy);
@@ -2636,14 +2874,21 @@ impl<B: WindowBackend> Engine<B> {
             if !in_column {
                 p.cross += if h { raw_dy } else { raw_dx };
             }
-            let dir = if h { (0, if p.cross > 0. { 1 } else { -1 }) } else { (if p.cross > 0. { 1 } else { -1 }, 0) };
+            let dir = if h {
+                (0, if p.cross > 0. { 1 } else { -1 })
+            } else {
+                (if p.cross > 0. { 1 } else { -1 }, 0)
+            };
             // Whether another monitor lies that way is judged from the monitor the cursor is on now.
             let at = at_info.map(|(r, _)| r);
             let at_h = at_info.map(|(_, ah)| ah).unwrap_or(h);
-            let rays = at.map(|b| planor::monitor_rays(b, &bounds, at_h, p.cursor)).unwrap_or_default();
+            let rays = at
+                .map(|b| planor::monitor_rays(b, &bounds, at_h, p.cursor))
+                .unwrap_or_default();
             let picked_ray = planor::best_ray(p.off.0, p.off.1, &rays)
                 .filter(|&(rx, ry)| (if h { ry } else { rx }) * p.cross > 0.);
-            let monitor_that_way = at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
+            let monitor_that_way =
+                at.is_some_and(|b| planor::adjacent(b, &bounds, dir.0, dir.1).is_some());
             if cross_ok && p.cross.abs() >= relax && (picked_ray.is_some() || monitor_that_way) {
                 p.lock = None;
                 p.ray = picked_ray;
@@ -2663,10 +2908,16 @@ impl<B: WindowBackend> Engine<B> {
             if !in_column {
                 p.cross += raw_dx * (-ry) + raw_dy * rx;
             }
-            if !in_column && !p.left_home && p.cross.abs() >= relax
+            if !in_column
+                && !p.left_home
+                && p.cross.abs() >= relax
                 && let Some((at_r, at_h)) = at_info
             {
-                let (along, cross) = if at_h { (p.off.0.abs(), p.off.1.abs()) } else { (p.off.1.abs(), p.off.0.abs()) };
+                let (along, cross) = if at_h {
+                    (p.off.0.abs(), p.off.1.abs())
+                } else {
+                    (p.off.1.abs(), p.off.0.abs())
+                };
                 let strip_ok = along >= 1.5 * cross;
                 let rays: Vec<(f64, f64)> = if cross_ok {
                     planor::monitor_rays(at_r, &bounds, at_h, p.cursor)
@@ -2710,7 +2961,11 @@ impl<B: WindowBackend> Engine<B> {
         let gain = base * (1. + accel * p.speed / 1000.).min(1.6);
         p.seen = now;
         p.samples.push_back((now, raw_dx, raw_dy));
-        while p.samples.front().is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150)) {
+        while p
+            .samples
+            .front()
+            .is_some_and(|s| now.duration_since(s.0) > Duration::from_millis(150))
+        {
             p.samples.pop_front();
         }
         let (l, t, r, b) = p.limits;
@@ -2725,14 +2980,21 @@ impl<B: WindowBackend> Engine<B> {
             // by half each report and snaps once it is under 2 px.
             let c = if h { &mut p.cursor.1 } else { &mut p.cursor.0 };
             let gap = p.line - *c;
-            *c = if gap.abs() < 2. { p.line } else { *c + gap * 0.5 };
+            *c = if gap.abs() < 2. {
+                p.line
+            } else {
+                *c + gap * 0.5
+            };
         }
         // Carried onto a monitor whose strip runs the other way, the home axis means nothing: the lock
         // follows the destination strip's axis (a released lock stays released). Back on the home monitor
         // the home lock re-engages on the line the cursor re-entered at (#84). Same-orientation monitors
         // keep the lock and its line.
         if let (Some(hl), Some(hb)) = (p.home_lock, home_bounds) {
-            let here = monitor_axes.iter().find(|(r, _)| inside(*r, p.cursor)).map(|(r, h)| (*r, *h));
+            let here = monitor_axes
+                .iter()
+                .find(|(r, _)| inside(*r, p.cursor))
+                .map(|(r, h)| (*r, *h));
             if let Some((r, dest_h)) = here {
                 let line_for = |h: bool| if h { p.cursor.1 } else { p.cursor.0 };
                 if r == hb {
@@ -2764,7 +3026,8 @@ impl<B: WindowBackend> Engine<B> {
                 }
             }
         }
-        self.backend.set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
+        self.backend
+            .set_cursor_pos(p.cursor.0.round() as i32, p.cursor.1.round() as i32);
         // Asynchronous and rate-limited (scales cleanly past 120+ Hz, latest position wins): a heavy
         // window cannot keep up with every touchpad report, and a queue of stale moves would make the
         // window trail the fingers.
@@ -2817,9 +3080,7 @@ impl<B: WindowBackend> Engine<B> {
             (p.cursor.1 - p.grab.1).round() as i32,
         );
         let threshold = self.hot.swipe_fling_speed;
-        if self.hot.swipe_fling_enabled
-            && vx.hypot(vy) >= threshold
-        {
+        if self.hot.swipe_fling_enabled && vx.hypot(vy) >= threshold {
             let (dx, dy) = if vx.abs() >= vy.abs() {
                 (if vx > 0. { 1 } else { -1 }, 0)
             } else {
@@ -2977,7 +3238,12 @@ impl<B: WindowBackend> Engine<B> {
                     0
                 };
                 let beyond = at.and_then(|i| {
-                    planor::adjacent(bounds[i], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir })
+                    planor::adjacent(
+                        bounds[i],
+                        &bounds,
+                        if horizontal { dir } else { 0 },
+                        if horizontal { 0 } else { dir },
+                    )
                 });
                 if dir != 0 && beyond.is_none() {
                     let hz = self.max_refresh_hz.clamp(30.0, 240.0);
@@ -3039,12 +3305,19 @@ impl<B: WindowBackend> Engine<B> {
         }
         let home = self.strips.get(&d.key);
         let column = home.and_then(|s| s.locate(d.id)).map(|(i, _)| i);
-        let grouped = home.zip(column).is_some_and(|(s, i)| s.columns[i].members.len() > 1);
+        let grouped = home
+            .zip(column)
+            .is_some_and(|(s, i)| s.columns[i].members.len() > 1);
         // Holding the drag modifier (Shift by default) makes the drop do nothing: the window goes back.
         let held = self.backend.key_down(self.hot.drag_stack_modifier_vk);
         let ungroup_edge = if !held && grouped && k == d.key {
             self.strips.get(&k).and_then(|s| {
-                let (leading, trailing) = ungroup_bands(&self.displays, &k.1, s.area, group_column_rect(s, d.id, peek));
+                let (leading, trailing) = ungroup_bands(
+                    &self.displays,
+                    &k.1,
+                    s.area,
+                    group_column_rect(s, d.id, peek),
+                );
                 if leading.is_some_and(|r| contains(r, p)) {
                     Some(false)
                 } else if trailing.is_some_and(|r| contains(r, p)) {
@@ -3073,8 +3346,8 @@ impl<B: WindowBackend> Engine<B> {
             target
                 .filter(|_| !held)
                 .map(|(t, fraction, in_zone)| {
-                    let sibling = k == d.key
-                        && home.and_then(|s| s.locate(t)).map(|(i, _)| i) == column;
+                    let sibling =
+                        k == d.key && home.and_then(|s| s.locate(t)).map(|(i, _)| i) == column;
                     planor::drag(in_zone, fraction, grouped, sibling, k != d.key)
                 })
                 .unwrap_or(planor::Drag::None)
@@ -3099,7 +3372,9 @@ impl<B: WindowBackend> Engine<B> {
         let was_instant = self.instant;
         self.drag_update_inner(false, false);
         self.instant = was_instant;
-        let Some(mut d) = self.drag.take() else { return };
+        let Some(mut d) = self.drag.take() else {
+            return;
+        };
         self.force_place = true;
         if let Some(rec) = self.gesture_rec.as_mut() {
             // What the drop was about to do, so a recording shows Planor's answer to each gesture.
@@ -3125,7 +3400,13 @@ impl<B: WindowBackend> Engine<B> {
         }
         // The moves during a pad drag are asynchronous, so a flung or freshly-released pad-dragged
         // window may still report `d.original` from the OS before its async SetWindowPos lands.
-        let Some(r) = (if flung { Some(d.original) } else { self.backend.frame(id) }) else { return };
+        let Some(r) = (if flung {
+            Some(d.original)
+        } else {
+            self.backend.frame(id)
+        }) else {
+            return;
+        };
         let s = self.strips.get_mut(&d.key).unwrap();
         if r == d.original && !flung && !d.pad_drag {
             // Escape cancels the OS move loop and snaps the window back; a mouse drop that never
@@ -3193,13 +3474,15 @@ impl<B: WindowBackend> Engine<B> {
             && d.target.is_none()
             && d.mode == planor::Drag::None
             && let Some(s) = self.strips.get(&dest)
-            && s.locate(id).is_some_and(|(i, _)| s.columns[i].members.len() > 1)
+            && s.locate(id)
+                .is_some_and(|(i, _)| s.columns[i].members.len() > 1)
             && !self.backend.key_down(self.hot.drag_stack_modifier_vk)
         {
             // #91: a grouped window dropped beyond its group's shared border (the cursor outside the group's
             // column along the strip axis, over no window) leaves the group onto that side, the way a
             // fullscreen window sits beside, not inside, the other columns.
-            let col = group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK));
+            let col =
+                group_column_rect(s, id, self.hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK));
             let (pos, lo, hi) = if s.area.horizontal() {
                 (d.point.0, col.x, col.x + col.w)
             } else {
@@ -3227,10 +3510,7 @@ impl<B: WindowBackend> Engine<B> {
         }
         if dest != d.key {
             let (min_w, min_h) = self.backend.minimum_size(id);
-            if min_w > area.w
-                || min_h > area.h
-                || !self.transfer_dialogs(id, d.original, area)
-            {
+            if min_w > area.w || min_h > area.h || !self.transfer_dialogs(id, d.original, area) {
                 return;
             }
             self.strips.get_mut(&d.key).unwrap().remove(id);
@@ -3269,7 +3549,8 @@ impl<B: WindowBackend> Engine<B> {
                 let Some(r) = self.backend.frame(dlg) else {
                     return false;
                 };
-                if r.w > area.w || r.h > area.h || self.journal.capture(dlg, &self.backend).is_err() {
+                if r.w > area.w || r.h > area.h || self.journal.capture(dlg, &self.backend).is_err()
+                {
                     return false;
                 }
                 moves.push((
@@ -3303,7 +3584,9 @@ impl<B: WindowBackend> Engine<B> {
             self.reveal();
             return;
         }
-        let Some(r) = self.backend.frame(id) else { return };
+        let Some(r) = self.backend.frame(id) else {
+            return;
+        };
         let full = r == *bounds && !self.backend.has_caption(id);
         let existing = s.fullscreen_id() == Some(id);
         if full != existing && (full || self.backend.has_caption(id)) {
@@ -3384,17 +3667,26 @@ impl<B: WindowBackend> Engine<B> {
                     self.input_qpc_us = None;
                 }
             }
-            Event::Window(EVENT_OBJECT_DESTROY,id) if self.blocked()=>{if let Some(k)=self.owning(id){self.strips.get_mut(&k).unwrap().remove(id);}self.pinned.remove(&id);self.orphans.remove(&id);self.skipped.remove(&id);self.covering.remove(&id);self.dirty=true;},
+            Event::Window(EVENT_OBJECT_DESTROY, id) if self.blocked() => {
+                if let Some(k) = self.owning(id) {
+                    self.strips.get_mut(&k).unwrap().remove(id);
+                }
+                self.pinned.remove(&id);
+                self.orphans.remove(&id);
+                self.skipped.remove(&id);
+                self.covering.remove(&id);
+                self.dirty = true;
+            }
             Event::Window(e, id) if !self.blocked() => match e {
                 EVENT_OBJECT_SHOW | EVENT_SYSTEM_MINIMIZEEND => {
-                    if self.hot.spawn_on_cursor_monitor
-                        && e == EVENT_OBJECT_SHOW
-                    {
+                    if self.hot.spawn_on_cursor_monitor && e == EVENT_OBJECT_SHOW {
                         let (px, py) = self.backend.cursor_pos();
                         self.spawn_hint = self
                             .displays
                             .iter()
-                            .find(|(_, _, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+                            .find(|(_, _, r)| {
+                                px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h
+                            })
                             .map(|m| m.0.clone());
                     }
                     self.add(id);
@@ -3409,26 +3701,32 @@ impl<B: WindowBackend> Engine<B> {
                         self.last_foreground = id;
                     }
                     let target = self.managed_foreground_id(id);
-                    let was_self = self
-                        .self_activated
-                        .take()
-                        .is_some_and(|(a, at)| {
-                            at.elapsed() <= Duration::from_millis(250)
-                                && (a == id || target == Some(a))
-                        });
+                    let was_self = self.self_activated.take().is_some_and(|(a, at)| {
+                        at.elapsed() <= Duration::from_millis(250) && (a == id || target == Some(a))
+                    });
                     if self.diag.enabled {
                         // #56: name unmanaged foreground windows (Shell_TrayWnd = a taskbar click, Progman/WorkerW =
                         // show desktop) so a bundle shows what took focus before tiles went away.
-                        let class = if target.is_none() && id != 0 { format!(" class={}", self.backend.class_of(id)) } else { String::new() };
-                        diag::trace(format!("FG {id} managed={} external={} pad={}{class}", target.is_some(), self.backend.external(id), self.pad_scrolling));
+                        let class = if target.is_none() && id != 0 {
+                            format!(" class={}", self.backend.class_of(id))
+                        } else {
+                            String::new()
+                        };
+                        diag::trace(format!(
+                            "FG {id} managed={} external={} pad={}{class}",
+                            target.is_some(),
+                            self.backend.external(id),
+                            self.pad_scrolling
+                        ));
                     }
                     let active_id = self
                         .key()
                         .and_then(|k| self.strips.get(&k))
                         .and_then(|s| s.active());
                     let same_as_active = target.is_some() && target == active_id;
-                    let scrolling =
-                        self.settle.is_some() || self.inertia.is_some() || self.wheel_mode.is_some();
+                    let scrolling = self.settle.is_some()
+                        || self.inertia.is_some()
+                        || self.wheel_mode.is_some();
                     // Focus moving to or from an unmanaged window changes the border and the overlay order.
                     self.dirty = true;
                     if !was_self {
@@ -3491,8 +3789,10 @@ impl<B: WindowBackend> Engine<B> {
                     }
                     if !self.orphans.contains(&id) {
                         if let Some(k) = self.owning(id) {
-                            let focused = (self.strips[&k].active() == Some(id) && k.1 == self.active)
-                                || self.managed_foreground_id(self.backend.foreground()) == Some(id);
+                            let focused = (self.strips[&k].active() == Some(id)
+                                && k.1 == self.active)
+                                || self.managed_foreground_id(self.backend.foreground())
+                                    == Some(id);
                             self.strips.get_mut(&k).unwrap().remove(id);
                             self.strips.get_mut(&k).unwrap().fill();
                             if self.diag.enabled {
@@ -3503,7 +3803,8 @@ impl<B: WindowBackend> Engine<B> {
                                     _ => "hide",
                                 };
                                 let fg = self.backend.foreground();
-                                let left: usize = self.strips.values().map(|s| s.columns.len()).sum();
+                                let left: usize =
+                                    self.strips.values().map(|s| s.columns.len()).sum();
                                 diag::trace(format!(
                                     "REMOVE {id} reason={why} focused={focused} fg={fg} fg_class={} columns_left={left}",
                                     self.backend.class_of(fg)
@@ -3546,16 +3847,19 @@ impl<B: WindowBackend> Engine<B> {
                 }
                 _ => (),
             },
-            Event::Wheel { delta, tilt, shift, x, y } => self.wheel(delta, tilt, shift, (x, y)),
+            Event::Wheel {
+                delta,
+                tilt,
+                shift,
+                x,
+                y,
+            } => self.wheel(delta, tilt, shift, (x, y)),
             Event::Button { button, down, x, y } => {
                 if let Some(rec) = self.gesture_rec.as_mut() {
                     rec.push(serde_json::json!({ "kind": "button", "button": button, "down": down, "x": x, "y": y }));
                 }
             }
-            Event::Contacts(p)
-                if !self.blocked()
-                    && self.hot.three_finger_enabled =>
-            {
+            Event::Contacts(p) if !self.blocked() && self.hot.three_finger_enabled => {
                 self.input = Some(Instant::now());
                 self.input_qpc_us = Some(perf::qpc_us());
                 self.contacts(p);
@@ -3608,7 +3912,10 @@ pub(crate) fn scroll_fling_velocity(samples: &[(f64, f64)]) -> f64 {
     if samples.len() < 2 {
         return 0.0;
     }
-    let newest = samples.iter().map(|&(a, _)| a).fold(f64::INFINITY, f64::min);
+    let newest = samples
+        .iter()
+        .map(|&(a, _)| a)
+        .fold(f64::INFINITY, f64::min);
     if newest > 0.04 {
         return 0.0;
     }
@@ -3664,13 +3971,11 @@ pub(crate) fn edge_scroll_step(
 pub(crate) fn is_edge_resize(original: Rect, current: Rect) -> bool {
     let changed = |a: i32, b: i32| (a - b).abs() > 2;
     let same = |a: i32, b: i32| (a - b).abs() <= 2;
-    let x_anchored = same(current.x, original.x)
-        || same(current.x + current.w, original.x + original.w);
-    let y_anchored = same(current.y, original.y)
-        || same(current.y + current.h, original.y + original.h);
-    (changed(current.w, original.w) || changed(current.h, original.h))
-        && x_anchored
-        && y_anchored
+    let x_anchored =
+        same(current.x, original.x) || same(current.x + current.w, original.x + original.w);
+    let y_anchored =
+        same(current.y, original.y) || same(current.y + current.h, original.y + original.h);
+    (changed(current.w, original.w) || changed(current.h, original.h)) && x_anchored && y_anchored
 }
 
 /// Subtract every rectangle in `blockers` from `r`, returning the remaining non-empty
@@ -3692,23 +3997,43 @@ pub(crate) fn subtract_rects(r: Rect, blockers: &[Rect]) -> Vec<Rect> {
             };
             // Top strip
             if ov.y > p.y {
-                next.push(Rect { x: p.x, y: p.y, w: p.w, h: ov.y - p.y });
+                next.push(Rect {
+                    x: p.x,
+                    y: p.y,
+                    w: p.w,
+                    h: ov.y - p.y,
+                });
             }
             // Bottom strip
             let p_bot = p.y + p.h;
             let ov_bot = ov.y + ov.h;
             if p_bot > ov_bot {
-                next.push(Rect { x: p.x, y: ov_bot, w: p.w, h: p_bot - ov_bot });
+                next.push(Rect {
+                    x: p.x,
+                    y: ov_bot,
+                    w: p.w,
+                    h: p_bot - ov_bot,
+                });
             }
             // Left middle strip
             if ov.x > p.x {
-                next.push(Rect { x: p.x, y: ov.y, w: ov.x - p.x, h: ov.h });
+                next.push(Rect {
+                    x: p.x,
+                    y: ov.y,
+                    w: ov.x - p.x,
+                    h: ov.h,
+                });
             }
             // Right middle strip
             let p_right = p.x + p.w;
             let ov_right = ov.x + ov.w;
             if p_right > ov_right {
-                next.push(Rect { x: ov_right, y: ov.y, w: p_right - ov_right, h: ov.h });
+                next.push(Rect {
+                    x: ov_right,
+                    y: ov.y,
+                    w: p_right - ov_right,
+                    h: ov.h,
+                });
             }
         }
         pieces = next;
@@ -3720,13 +4045,19 @@ pub(crate) fn subtract_rects(r: Rect, blockers: &[Rect]) -> Vec<Rect> {
 }
 /// The stack drop zones of a strip while `dragged` is carried: one small box in the middle of the visible
 /// part of every column's active window (not the dragged window's own column). (window, visible rect, zone)
-pub(crate) fn drop_zones(s: &Strip, peek: i32, side: i32, dragged: isize) -> Vec<(isize, Rect, Rect)> {
+pub(crate) fn drop_zones(
+    s: &Strip,
+    peek: i32,
+    side: i32,
+    dragged: isize,
+) -> Vec<(isize, Rect, Rect)> {
     let own = s.locate(dragged).map(|(i, _)| i);
     s.rects(peek)
         .into_iter()
         .filter(|(id, _)| {
             *id != dragged
-                && s.locate(*id).is_some_and(|(i, j)| Some(i) != own && s.columns[i].active == j)
+                && s.locate(*id)
+                    .is_some_and(|(i, j)| Some(i) != own && s.columns[i].active == j)
         })
         .filter_map(|(id, r)| {
             clip(r, s.area).map(|v| (id, v, planor::stack_zone(v, side, s.area.horizontal())))
@@ -3746,7 +4077,13 @@ pub(crate) fn edge_borders_monitor(
         return false;
     };
     let dir = if trailing { 1 } else { -1 };
-    planor::adjacent(bounds[at], &bounds, if horizontal { dir } else { 0 }, if horizontal { 0 } else { dir }).is_some()
+    planor::adjacent(
+        bounds[at],
+        &bounds,
+        if horizontal { dir } else { 0 },
+        if horizontal { 0 } else { dir },
+    )
+    .is_some()
 }
 /// Fallback stack peek (matches `planor.example.toml`) shared by every consumer.
 pub(crate) const DEFAULT_STACK_PEEK: i32 = 96;
@@ -3766,8 +4103,13 @@ pub(crate) fn ungroup_bands(
     } else {
         (column.y <= area.y, column.y + column.h >= area.y + area.h)
     };
-    let keep = |at_edge: bool, trailing: bool| !(at_edge && edge_borders_monitor(displays, monitor, horizontal, trailing));
-    (keep(at_lead, false).then_some(leading), keep(at_trail, true).then_some(trailing))
+    let keep = |at_edge: bool, trailing: bool| {
+        !(at_edge && edge_borders_monitor(displays, monitor, horizontal, trailing))
+    };
+    (
+        keep(at_lead, false).then_some(leading),
+        keep(at_trail, true).then_some(trailing),
+    )
 }
 /// The visible part of the column holding `id`, full strip depth: the box the ungroup edge zones sit in
 /// (#90). Falls back to the whole strip area when the window is not in the strip.
@@ -3777,9 +4119,19 @@ pub(crate) fn group_column_rect(s: &Strip, id: isize, peek: i32) -> Rect {
         .find(|(w, _)| *w == id)
         .map(|(_, r)| {
             if s.area.horizontal() {
-                Rect { x: r.x, y: s.area.y, w: r.w, h: s.area.h }
+                Rect {
+                    x: r.x,
+                    y: s.area.y,
+                    w: r.w,
+                    h: s.area.h,
+                }
             } else {
-                Rect { x: s.area.x, y: r.y, w: s.area.w, h: r.h }
+                Rect {
+                    x: s.area.x,
+                    y: r.y,
+                    w: s.area.w,
+                    h: r.h,
+                }
             }
         })
         .and_then(|r| clip(r, s.area))
@@ -3793,14 +4145,34 @@ pub(crate) fn ungroup_edge_zones(column: Rect, horizontal: bool) -> (Rect, Rect)
     if horizontal {
         let band = (column.w / 10).clamp(64, 160).min((column.w / 4).max(1));
         (
-            Rect { x: column.x, y: column.y, w: band, h: column.h },
-            Rect { x: column.x + column.w - band, y: column.y, w: band, h: column.h },
+            Rect {
+                x: column.x,
+                y: column.y,
+                w: band,
+                h: column.h,
+            },
+            Rect {
+                x: column.x + column.w - band,
+                y: column.y,
+                w: band,
+                h: column.h,
+            },
         )
     } else {
         let band = (column.h / 10).clamp(64, 160).min((column.h / 4).max(1));
         (
-            Rect { x: column.x, y: column.y, w: column.w, h: band },
-            Rect { x: column.x, y: column.y + column.h - band, w: column.w, h: band },
+            Rect {
+                x: column.x,
+                y: column.y,
+                w: column.w,
+                h: band,
+            },
+            Rect {
+                x: column.x,
+                y: column.y + column.h - band,
+                w: column.w,
+                h: band,
+            },
         )
     }
 }
@@ -3819,7 +4191,13 @@ pub fn run() -> Result<()> {
             windows::Win32::System::Com::COINIT_MULTITHREADED,
         )
     };
-    let mutex = unsafe { CreateMutexW(null(), 0, wide(&format!("Local\\Planor.Daemon{}", instance())).as_ptr()) };
+    let mutex = unsafe {
+        CreateMutexW(
+            null(),
+            0,
+            wide(&format!("Local\\Planor.Daemon{}", instance())).as_ptr(),
+        )
+    };
     if mutex.is_null() || unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         return Err("daemon already running or unavailable".into());
     }
@@ -4035,7 +4413,8 @@ fn record_input() {
                     continue;
                 }
                 *slot = now;
-                let text = matches!(vk, 0x30..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDF | 0x60..=0x6F | 0x20);
+                let text =
+                    matches!(vk, 0x30..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDF | 0x60..=0x6F | 0x20);
                 if text {
                     if now {
                         chars += 1;
@@ -4081,7 +4460,10 @@ mod tests {
             },
         );
         j.save().unwrap();
-        Journal::open(path.clone()).unwrap().restore(&Win32Backend).unwrap();
+        Journal::open(path.clone())
+            .unwrap()
+            .restore(&Win32Backend)
+            .unwrap();
         assert!(!path.exists())
     }
 }

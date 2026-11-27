@@ -12,6 +12,13 @@ $script = @'
 #!/bin/sh
 set -e
 
+echo "[pre-commit] checking formatting (cargo fmt --all -- --check)..."
+if ! cargo fmt --all -- --check >/dev/null 2>&1; then
+  echo "[pre-commit] ERROR: code is not rustfmt-formatted. Run: cargo fmt --all   then re-stage and commit."
+  cargo fmt --all -- --check -l 2>/dev/null | sed 's/^/  /' | head -20
+  exit 1
+fi
+
 echo "[pre-commit] checking for println! in backend/daemon/render/win32/perf/watchdog/tray/config_watch..."
 for f in src/backend.rs src/daemon.rs src/render.rs src/win32.rs src/perf.rs src/watchdog.rs src/tray.rs src/config_watch.rs; do
   if [ -f "$f" ]; then

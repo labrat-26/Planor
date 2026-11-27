@@ -32,7 +32,8 @@ fn count_two(cap: &Capture, a: u32, b: u32) -> Option<(usize, usize)> {
             let copy = copy.unwrap();
             cap.ctx.CopyResource(&copy, &tex);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-            cap.ctx.Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
+            cap.ctx
+                .Map(&copy, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
             let (mut na, mut nb) = (0usize, 0usize);
             for y in 0..desc.Height as usize {
                 let row = std::slice::from_raw_parts(
@@ -95,7 +96,15 @@ impl Cover {
             // Shown without activation it lands just above the foreground window, which is a sentinel when the
             // desktop is as the scenario expects. Under a foreground lock (#93) the foreground window is an unrelated
             // one covering the primary, so put the cover on top of the non-topmost windows, still without activating it.
-            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(
+                hwnd,
+                HWND_TOP,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
             tx.send(hwnd as isize).unwrap();
             let mut m = MSG::default();
             while GetMessageW(&mut m, null_mut(), 0, 0) > 0 {
@@ -138,7 +147,8 @@ fn border_never_paints_over_an_unmanaged_window() {
     thread::sleep(Duration::from_millis(120));
     // Control: with nothing covering it the focus border is on screen, so a zero below means something.
     assert!(
-        eventually(4, || count_two(&cap, FOCUS_RGB, COVER_RGB).is_some_and(|c| c.0 > 0)),
+        eventually(4, || count_two(&cap, FOCUS_RGB, COVER_RGB)
+            .is_some_and(|c| c.0 > 0)),
         "control: expected the focus border colour #3B82F6 on screen before any cover window exists"
     );
     let cover = Cover::new();
@@ -162,11 +172,19 @@ fn border_never_paints_over_an_unmanaged_window() {
         // nothing does, unless unrelated windows happen to animate (#93: on a quiet desktop only one covered frame
         // ever arrived). Repaint the cover so the next frame is a fresh composition of the whole desktop.
         unsafe {
-            RedrawWindow(cover.hwnd as _, null(), null_mut(), RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+            RedrawWindow(
+                cover.hwnd as _,
+                null(),
+                null_mut(),
+                RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW,
+            );
         }
         thread::sleep(Duration::from_millis(50));
     }
-    assert!(checked >= 3, "no captured frame showed the cover window; cannot judge the border");
+    assert!(
+        checked >= 3,
+        "no captured frame showed the cover window; cannot judge the border"
+    );
     assert_eq!(
         worst, 0,
         "an unmanaged always-on-top window covers the screen: expected 0 focus-border pixels over it, observed up to {worst}"
@@ -174,7 +192,8 @@ fn border_never_paints_over_an_unmanaged_window() {
     // The border must return once the unmanaged window is gone.
     drop(cover);
     assert!(
-        eventually(6, || count_two(&cap, FOCUS_RGB, COVER_RGB).is_some_and(|c| c.0 > 0 && c.1 == 0)),
+        eventually(6, || count_two(&cap, FOCUS_RGB, COVER_RGB)
+            .is_some_and(|c| c.0 > 0 && c.1 == 0)),
         "after the unmanaged window closed the focus border did not come back"
     );
     d.stop();

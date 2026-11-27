@@ -49,7 +49,15 @@ fn box_of(b: &[BBox; N], i: usize) -> BBox {
 fn fmt_box(b: BBox) -> String {
     match b {
         None => "absent".into(),
-        Some(r) => format!("(l={} t={} r={} b={}, {}x{})", r.0, r.1, r.2, r.3, r.2 - r.0, r.3 - r.1),
+        Some(r) => format!(
+            "(l={} t={} r={} b={}, {}x{})",
+            r.0,
+            r.1,
+            r.2,
+            r.3,
+            r.2 - r.0,
+            r.3 - r.1
+        ),
     }
 }
 fn fmt_boxes(b: &[BBox; N]) -> String {
@@ -115,7 +123,9 @@ fn frame_boxes(cap: &Capture) -> (i32, i32, [BBox; N]) {
 
 /// Foreground window description for failure messages: hwnd, window class and owning process image.
 fn describe_window(h: isize) -> String {
-    use windows_sys::Win32::System::Threading::{OpenProcess, QueryFullProcessImageNameW, PROCESS_QUERY_LIMITED_INFORMATION};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+    };
     if h == 0 {
         return "hwnd 0x0 (no foreground window)".into();
     }
@@ -225,7 +235,10 @@ struct Refs {
 }
 impl Refs {
     fn new() -> Self {
-        Self { focused: [None; N], unfocused: [None; N] }
+        Self {
+            focused: [None; N],
+            unfocused: [None; N],
+        }
     }
 }
 
@@ -249,7 +262,11 @@ fn observe(
         }
         let focused = f == i;
         let state = if focused { "focused" } else { "unfocused" };
-        let slot = if focused { &mut refs.focused[i] } else { &mut refs.unfocused[i] };
+        let slot = if focused {
+            &mut refs.focused[i]
+        } else {
+            &mut refs.unfocused[i]
+        };
         let cur = *slot;
         match cur {
             None if seed => {
@@ -289,15 +306,27 @@ struct Obs {
 }
 
 /// Start a chord on a helper thread and sample the primary output for `ms` milliseconds.
-fn sample_with_focus(cap: &Capture, hw: &[isize; N], mods: &'static [u8], vk: u8, ms: u64) -> Vec<Obs> {
+fn sample_with_focus(
+    cap: &Capture,
+    hw: &[isize; N],
+    mods: &'static [u8],
+    vk: u8,
+    ms: u64,
+) -> Vec<Obs> {
     let key = thread::spawn(move || chord_now(mods, vk));
     let until = Instant::now() + Duration::from_millis(ms);
     let mut out = Vec::new();
     while Instant::now() < until {
         let before = fg_slot(hw);
-        let Ok((t, _w, _h, boxes)) = cap.boxes() else { continue };
+        let Ok((t, _w, _h, boxes)) = cap.boxes() else {
+            continue;
+        };
         let after = fg_slot(hw);
-        out.push(Obs { t, fg: if before == after { before } else { None }, boxes });
+        out.push(Obs {
+            t,
+            fg: if before == after { before } else { None },
+            boxes,
+        });
     }
     key.join().unwrap();
     out
@@ -305,7 +334,12 @@ fn sample_with_focus(cap: &Capture, hw: &[isize; N], mods: &'static [u8], vk: u8
 
 /// Every sentinel's visible width must equal `expect[i]` within TOL, for the sentinels that are reachable.
 /// Returns how many were measured.
-fn assert_widths_reachable(ws: &[Sentinel], expect: [i32; N], skip: Option<usize>, label: &str) -> usize {
+fn assert_widths_reachable(
+    ws: &[Sentinel],
+    expect: [i32; N],
+    skip: Option<usize>,
+    label: &str,
+) -> usize {
     let mut measured = 0;
     for i in 0..N {
         if Some(i) == skip || !reachable(&ws[i]) {
@@ -359,7 +393,10 @@ fn assert_geometry(ws: &[Sentinel], work: Rect4, gap: i32, label: &str) {
             frames[i + 1]
         );
     }
-    assert!(pairs > 0, "[{label}] no adjacent pair of reachable sentinels to check the gap (reachable {reach:?})");
+    assert!(
+        pairs > 0,
+        "[{label}] no adjacent pair of reachable sentinels to check the gap (reachable {reach:?})"
+    );
 }
 
 /// Peek slivers for focus on sentinel `f`. Only a MIDDLE window has off-view neighbours on both sides, so only then
@@ -368,7 +405,11 @@ fn assert_geometry(ws: &[Sentinel], work: Rect4, gap: i32, label: &str) {
 /// required there; instead the two on-screen tiles must be fully visible on the monitor.
 fn check_peeks(ws: &[Sentinel], cap: &Capture, hw: &[isize; N], mon: Rect4, f: usize) {
     let (out_w, fg, boxes) = settled_frame(cap, hw);
-    assert_eq!(fg, Some(f), "peek: expected sentinel {f} focused while measuring, foreground is {fg:?}");
+    assert_eq!(
+        fg,
+        Some(f),
+        "peek: expected sentinel {f} focused while measuring, foreground is {fg:?}"
+    );
     let all = fmt_boxes(&boxes);
     // A middle window that is already fully on screen does not move the strip (core test
     // focusing_a_visible_window_never_slides_the_strip), so an off-view neighbour is parked, not peeking.
@@ -469,8 +510,20 @@ fn scroll_boxes_constant_size() {
     let mut refs = Refs::new();
     let mut seeded = [0usize; N];
     let (out_w, fg, boxes) = settled_frame(&cap, &hw);
-    assert_eq!(fg, Some(0), "settled before Alt+Right: expected sentinel 0 focused, observed {fg:?}");
-    observe(&mut refs, out_w, fg, &boxes, "settled before Alt+Right", true, &mut seeded);
+    assert_eq!(
+        fg,
+        Some(0),
+        "settled before Alt+Right: expected sentinel 0 focused, observed {fg:?}"
+    );
+    observe(
+        &mut refs,
+        out_w,
+        fg,
+        &boxes,
+        "settled before Alt+Right",
+        true,
+        &mut seeded,
+    );
     assert!(
         refs.unfocused[1].is_some(),
         "precondition: sentinel 1 has no settled reference while unfocused; boxes: {}",
@@ -478,11 +531,27 @@ fn scroll_boxes_constant_size() {
     );
 
     let samples = sample_with_focus(&cap, &hw, &[ALT], RIGHT, 900);
-    eprintln!("scroll_boxes_constant_size: {} frames sampled during Alt+Right", samples.len());
+    eprintln!(
+        "scroll_boxes_constant_size: {} frames sampled during Alt+Right",
+        samples.len()
+    );
     // The last frame of the 900 ms window is the settled desktop after the scroll.
     let last = samples.last().expect("no desktop frame during the scroll");
-    assert_eq!(last.fg, Some(1), "after Alt+Right: expected sentinel 1 focused, observed {:?}", last.fg);
-    observe(&mut refs, out_w, last.fg, &last.boxes, "settled after Alt+Right", true, &mut seeded);
+    assert_eq!(
+        last.fg,
+        Some(1),
+        "after Alt+Right: expected sentinel 1 focused, observed {:?}",
+        last.fg
+    );
+    observe(
+        &mut refs,
+        out_w,
+        last.fg,
+        &last.boxes,
+        "settled after Alt+Right",
+        true,
+        &mut seeded,
+    );
 
     let mut checked = [0usize; N];
     let mut skipped = 0;
@@ -537,7 +606,10 @@ fn scroll_monotonic_and_gapped() {
     );
     let cap = open_primary(mon);
     let samples = sample_with_focus(&cap, &hw, &[ALT], RIGHT, 900);
-    eprintln!("scroll_monotonic_and_gapped: {} frames sampled during Alt+Right", samples.len());
+    eprintln!(
+        "scroll_monotonic_and_gapped: {} frames sampled during Alt+Right",
+        samples.len()
+    );
     assert_eq!(
         fg_index(&ws),
         Some(2),
@@ -554,7 +626,9 @@ fn scroll_monotonic_and_gapped() {
             .filter_map(|(k, o)| box_of(&o.boxes, i).map(|r| (k, r.0)))
             .collect();
         let (Some(&(_, first)), Some(&(_, last))) = (lefts.first(), lefts.last()) else {
-            eprintln!("scroll_monotonic_and_gapped: sentinel {i} was never on the desktop during the scroll");
+            eprintln!(
+                "scroll_monotonic_and_gapped: sentinel {i} was never on the desktop during the scroll"
+            );
             continue;
         };
         let total = last - first;
@@ -576,7 +650,10 @@ fn scroll_monotonic_and_gapped() {
             );
         }
     }
-    assert!(moved > 0, "no sentinel visibly moved during Alt+Right, so no motion was checked");
+    assert!(
+        moved > 0,
+        "no sentinel visibly moved during Alt+Right, so no motion was checked"
+    );
 
     // After settle: adjacent reachable sentinels are separated by gap_px scaled by DPI.
     let gap = GAP_PX;
@@ -595,7 +672,10 @@ fn scroll_monotonic_and_gapped() {
             i + 1
         );
     }
-    assert!(pairs > 0, "after Alt+Right settled: no adjacent pair of reachable sentinels to check the gap (reachable {reach:?})");
+    assert!(
+        pairs > 0,
+        "after Alt+Right settled: no adjacent pair of reachable sentinels to check the gap (reachable {reach:?})"
+    );
 }
 
 #[test]
@@ -748,11 +828,26 @@ fn scroll_no_shrink_or_offset_6_windows() {
     let mut refs = Refs::new();
     let mut counts = [0usize; N];
     let (out_w, fg, boxes) = settled_frame(&cap, &hw);
-    observe(&mut refs, out_w, fg, &boxes, "settled at start (focus last)", true, &mut counts);
+    observe(
+        &mut refs,
+        out_w,
+        fg,
+        &boxes,
+        "settled at start (focus last)",
+        true,
+        &mut counts,
+    );
 
     // Six presses across the strip and back: Alt+Left x3 (the third is clamped at window 0),
     // then Alt+Right x3 (the third is clamped at the last window). Expected focus after each press:
-    let steps: [(u8, usize); 6] = [(LEFT, 1), (LEFT, 0), (LEFT, 0), (RIGHT, 1), (RIGHT, 2), (RIGHT, 2)];
+    let steps: [(u8, usize); 6] = [
+        (LEFT, 1),
+        (LEFT, 0),
+        (LEFT, 0),
+        (RIGHT, 1),
+        (RIGHT, 2),
+        (RIGHT, 2),
+    ];
     for (k, (key, expect)) in steps.into_iter().enumerate() {
         let name = if key == LEFT { "Alt+Left" } else { "Alt+Right" };
         let samples = sample_with_focus(&cap, &hw, &[ALT], key, 900);

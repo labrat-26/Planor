@@ -100,7 +100,13 @@ pub fn stamp() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let s = d.as_secs() % 86400;
-    format!("{:02}:{:02}:{:02}.{:03}", s / 3600, s / 60 % 60, s % 60, d.subsec_millis())
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        s / 3600,
+        s / 60 % 60,
+        s % 60,
+        d.subsec_millis()
+    )
 }
 pub fn trace(line: impl AsRef<str>) {
     // Unit and simulated tests run the engine in-process: they must never touch the owner's trace (the first
@@ -117,7 +123,11 @@ pub fn trace(line: impl AsRef<str>) {
             let path = dir.join("trace.log");
             // Keep the previous run, start a fresh file each daemon start.
             let _ = fs::rename(&path, dir.join("trace.prev.log"));
-            fs::OpenOptions::new().create(true).append(true).open(path).ok()
+            fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .ok()
         });
         std::sync::Mutex::new(file)
     });

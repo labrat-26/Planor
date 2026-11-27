@@ -18,7 +18,10 @@ unsafe fn present(h: HWND) {
         let mut at = POINT::default();
         GetCursorPos(&mut at);
         let monitor = MonitorFromPoint(at, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as _, ..Default::default() };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as _,
+            ..Default::default()
+        };
         GetMonitorInfoW(monitor, &mut info);
         let mut r = RECT::default();
         GetWindowRect(h, &mut r);
@@ -208,7 +211,13 @@ fn sanitize_slug(text: &str) -> String {
     let mut slug: String = text
         .chars()
         .take(36)
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     while slug.contains("--") {
         slug = slug.replace("--", "-");
@@ -311,7 +320,11 @@ pub fn write_bundle(
     fs::create_dir_all(&bundle_dir)?;
     fs::write(
         bundle_dir.join("note.txt"),
-        format!("stamp={}\ntext={text}\nqpc_us={}\n", diag::stamp(), perf::qpc_us()),
+        format!(
+            "stamp={}\ntext={text}\nqpc_us={}\n",
+            diag::stamp(),
+            perf::qpc_us()
+        ),
     )?;
     fs::write(bundle_dir.join("state.json"), state_json)?;
     fs::write(bundle_dir.join("perf.json"), perf_json)?;
@@ -346,8 +359,14 @@ fn save_note_bundle(text: &str) {
     let trace_json = serde_json::to_string(&perf::export_chrome_trace(Some(15)))
         .unwrap_or_else(|_| "{}".to_string());
     let shot_ref = shot.as_ref().map(|(w, h, b)| (*w, *h, b.as_slice()));
-    let Ok(bundle_dir) = write_bundle(&base_dir, text, &state_json, &perf_json, &trace_json, shot_ref)
-    else {
+    let Ok(bundle_dir) = write_bundle(
+        &base_dir,
+        text,
+        &state_json,
+        &perf_json,
+        &trace_json,
+        shot_ref,
+    ) else {
         return;
     };
     if let Some(rec) = watchdog::find_planor_rec() {
@@ -371,8 +390,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("planor-note-bundle-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
-        fs::write(dir.join("trace.log"), "12:00:00.000 START test\n12:00:01.000 PLACE 1\n")
-            .unwrap();
+        fs::write(
+            dir.join("trace.log"),
+            "12:00:00.000 START test\n12:00:01.000 PLACE 1\n",
+        )
+        .unwrap();
 
         let rgba = vec![0xffu8; 4 * 4 * 4];
         let bundle = write_bundle(
@@ -386,9 +408,11 @@ mod tests {
         .unwrap();
 
         assert!(bundle.join("note.txt").is_file());
-        assert!(fs::read_to_string(bundle.join("note.txt"))
-            .unwrap()
-            .contains("jumpy scroll right!!"));
+        assert!(
+            fs::read_to_string(bundle.join("note.txt"))
+                .unwrap()
+                .contains("jumpy scroll right!!")
+        );
         assert!(bundle.join("state.json").is_file());
         assert!(bundle.join("perf.json").is_file());
         assert!(bundle.join("perf.trace.json").is_file());

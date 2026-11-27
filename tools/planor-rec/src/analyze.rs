@@ -5,7 +5,7 @@
 
 use crate::{
     capture::{self, MonitorInfo},
-    config::{Config, BORDER_COLOURS},
+    config::{BORDER_COLOURS, Config},
     events::OsWindow,
     image::{self, Image, Interior},
     record::{self, AudioMeta, CaptureStats, HotkeyStatus, Meta},
@@ -14,7 +14,7 @@ use crate::{
     util::{self, Rect},
 };
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
     io::Read,
@@ -274,8 +274,14 @@ fn parse_frame_rows(text: &str) -> util::anyhow_lite::Result<Vec<FrameRow>> {
             .ok_or_else(|| util::fmt_err(format!("bad frames csv line: {line}")))?;
         let _changed = parts.next().map(|v| v.trim() == "1").unwrap_or(false);
         // Older recordings have no `state` column; every row is then a healthy frame.
-        let state = parts.next().map(FrameState::parse).unwrap_or(FrameState::Ok);
-        let rotate_stall_us = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(0);
+        let state = parts
+            .next()
+            .map(FrameState::parse)
+            .unwrap_or(FrameState::Ok);
+        let rotate_stall_us = parts
+            .next()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
         out.push(FrameRow {
             present_us: present,
             state,
@@ -347,7 +353,11 @@ fn merge_expectations(
         if e.scene != 0 && e.scene != current_scene {
             current_scene = e.scene;
             let listed = &scene_windows[&e.scene];
-            let gone: Vec<i64> = last.keys().copied().filter(|h| !listed.contains(h)).collect();
+            let gone: Vec<i64> = last
+                .keys()
+                .copied()
+                .filter(|h| !listed.contains(h))
+                .collect();
             for hwnd in gone {
                 if let Some(idx) = last.remove(&hwnd) {
                     out[idx].end_us = e.t_us;
@@ -410,7 +420,11 @@ fn merge_expectations(
 pub const DAEMON_STOP_MARK: &str = "daemon-stopped";
 
 fn daemon_stop_us(marks: &[(i64, String)]) -> Option<i64> {
-    marks.iter().filter(|(_, text)| text.trim() == DAEMON_STOP_MARK).map(|(t, _)| *t).min()
+    marks
+        .iter()
+        .filter(|(_, text)| text.trim() == DAEMON_STOP_MARK)
+        .map(|(t, _)| *t)
+        .min()
 }
 
 /// End every expectation at `stop_us`; those that had not begun by then are dropped.
@@ -637,7 +651,12 @@ fn all_settled(exps: &[Exp], t_us: i64) -> bool {
 /// `threshold_us` or more in the past at `now_us`. Returns that first activity time. Activity that only
 /// just started cannot be judged yet: the pixels update a frame or two later, and a screen that sat idle
 /// before the activity is not frozen.
-pub fn frozen_since(activity: &[i64], static_since_us: i64, now_us: i64, threshold_us: i64) -> Option<i64> {
+pub fn frozen_since(
+    activity: &[i64],
+    static_since_us: i64,
+    now_us: i64,
+    threshold_us: i64,
+) -> Option<i64> {
     let i = activity.partition_point(|&x| x < static_since_us);
     let first = *activity.get(i)?;
     (now_us - first >= threshold_us).then_some(first)
@@ -662,11 +681,7 @@ fn os_rect_at(os: &[OsSnapshot], hwnd: i64, t_us: i64) -> Option<Rect> {
 /// pointer moved over it, i.e. moments when the recorder should have produced different pixels.
 /// Keyboard input alone is not used: typing into an overlay can repaint without changing the
 /// captured desktop and would otherwise look like a freeze.
-fn monitor_activity_times(
-    monitor: &MonitorInfo,
-    events: &[Value],
-    os: &[OsSnapshot],
-) -> Vec<i64> {
+fn monitor_activity_times(monitor: &MonitorInfo, events: &[Value], os: &[OsSnapshot]) -> Vec<i64> {
     let mut out = Vec::new();
     for e in events {
         if e.get("kind").and_then(|k| k.as_str()) == Some("input")
@@ -689,9 +704,7 @@ fn monitor_activity_times(
         }
         let mut changed = false;
         for (hwnd, rect) in &current {
-            if rect.overlap_area(monitor.rect) > 0
-                && previous.get(hwnd).is_none_or(|p| p != rect)
-            {
+            if rect.overlap_area(monitor.rect) > 0 && previous.get(hwnd).is_none_or(|p| p != rect) {
                 changed = true;
             }
         }
@@ -868,7 +881,11 @@ pub fn lost_stretches(rows: &[FrameRow]) -> Vec<LostStretch> {
         } else {
             // Lost until the recording ended: one more tick past the last row.
             let last = rows[rows.len() - 1].present_us;
-            let prev = if rows.len() >= 2 { rows[rows.len() - 2].present_us } else { last };
+            let prev = if rows.len() >= 2 {
+                rows[rows.len() - 2].present_us
+            } else {
+                last
+            };
             last + (last - prev).max(0)
         };
         out.push(LostStretch {
@@ -905,7 +922,12 @@ fn lost_reason(events: &[Value], monitor: u32, t_us: i64) -> Option<String> {
                 && e.get("event").and_then(|k| k.as_str()) == Some("lost")
                 && e.get("monitor").and_then(|m| m.as_u64()) == Some(monitor as u64)
         })
-        .filter_map(|e| Some((e.get("t")?.as_i64()?, e.get("reason")?.as_str()?.to_string())))
+        .filter_map(|e| {
+            Some((
+                e.get("t")?.as_i64()?,
+                e.get("reason")?.as_str()?.to_string(),
+            ))
+        })
         .filter(|(t, _)| (t - t_us).abs() <= 250_000)
         .min_by_key(|(t, _)| (t - t_us).abs())
         .map(|(_, r)| r)
@@ -944,7 +966,8 @@ pub fn rect_change(events: &[Value], monitor: &MonitorInfo) -> Option<(i64, Rect
             Some("topology") => {
                 if let Some(list) = e.get("monitors").and_then(|m| m.as_array()) {
                     for m in list {
-                        let same = m.get("device").and_then(|d| d.as_str()) == Some(monitor.device.as_str());
+                        let same = m.get("device").and_then(|d| d.as_str())
+                            == Some(monitor.device.as_str());
                         if same {
                             if let Some(r) = m.get("rect").and_then(arr) {
                                 if r != monitor.rect {
@@ -1078,8 +1101,13 @@ pub fn occluding_foreign_window(windows: &[OsWindow], tiles: &[(i64, Rect)]) -> 
         for w in windows {
             let shell = matches!(
                 w.class.as_str(),
-                "Shell_TrayWnd" | "Shell_SecondaryTrayWnd" | "Progman" | "WorkerW" | "XamlExplorerHostIslandWindow"
-                    | "Windows.UI.Core.CoreWindow" | "TopLevelWindowForOverflowXamlIsland"
+                "Shell_TrayWnd"
+                    | "Shell_SecondaryTrayWnd"
+                    | "Progman"
+                    | "WorkerW"
+                    | "XamlExplorerHostIslandWindow"
+                    | "Windows.UI.Core.CoreWindow"
+                    | "TopLevelWindowForOverflowXamlIsland"
             ) || w.class.starts_with("Planor");
             if w.z < tile_z
                 && !shell
@@ -1109,7 +1137,10 @@ fn downgrade_for_environment(
     for c in checks.iter_mut() {
         if c.monitor == monitor
             && c.verdict == "fail"
-            && matches!(c.kind.as_str(), "position" | "border" | "border_missing" | "lag" | "startup_latency")
+            && matches!(
+                c.kind.as_str(),
+                "position" | "border" | "border_missing" | "lag" | "startup_latency"
+            )
         {
             c.verdict = Verdict::Unmeasurable.as_str().into();
             c.severity = Verdict::Unmeasurable.severity();
@@ -1208,7 +1239,9 @@ impl<'a> Runner<'a> {
     }
 
     fn overlaps_lost(&self, from_us: i64, to_us: i64) -> bool {
-        self.lost.iter().any(|l| l.start_us < to_us && l.end_us > from_us)
+        self.lost
+            .iter()
+            .any(|l| l.start_us < to_us && l.end_us > from_us)
     }
 
     fn local(&self, r: Rect) -> Rect {
@@ -1235,11 +1268,7 @@ impl<'a> Runner<'a> {
             if d <= 5_000_000 && best.as_ref().is_none_or(|(bd, _)| d < *bd) {
                 best = Some((
                     d,
-                    format!(
-                        "NOTE [+{} ms] {}",
-                        (n.t_us - self.base_us) / 1000,
-                        n.text
-                    ),
+                    format!("NOTE [+{} ms] {}", (n.t_us - self.base_us) / 1000, n.text),
                 ));
             }
         }
@@ -1250,7 +1279,11 @@ impl<'a> Runner<'a> {
         let key = if f.kind == "border" {
             // One report per distinct stray border location; a static false positive must not
             // reappear every sample.
-            format!("border|{}|{:?}", f.verdict.as_str(), f.measured.map(|r| r.to_array()))
+            format!(
+                "border|{}|{:?}",
+                f.verdict.as_str(),
+                f.measured.map(|r| r.to_array())
+            )
         } else if f.kind == "lag" || f.kind == "startup_latency" {
             format!(
                 "lag|{}|{:?}|{}",
@@ -1259,7 +1292,11 @@ impl<'a> Runner<'a> {
                 f.t_us / 500_000
             )
         } else if f.kind == "border_missing" {
-            format!("border_missing|{:?}|{:?}", f.hwnd, f.expected.map(|r| r.to_array()))
+            format!(
+                "border_missing|{:?}|{:?}",
+                f.hwnd,
+                f.expected.map(|r| r.to_array())
+            )
         } else {
             format!(
                 "{}|{:?}|{}|{}",
@@ -1371,16 +1408,19 @@ impl<'a> Runner<'a> {
         // Planor parks the real window off every monitor and shows a stand-in image of it (screen-edge peeks,
         // group previews). The OS rectangle is then the parking spot by design; only the picture can be
         // compared with the expected rectangle.
-        let mon = Rect::new(self.monitor.rect.x, self.monitor.rect.y, self.monitor.rect.w, self.monitor.rect.h);
-        let parked = reported.is_some_and(|r| r.overlap_area(mon) == 0) && expected.overlap_area(mon) > 0;
+        let mon = Rect::new(
+            self.monitor.rect.x,
+            self.monitor.rect.y,
+            self.monitor.rect.w,
+            self.monitor.rect.h,
+        );
+        let parked =
+            reported.is_some_and(|r| r.overlap_area(mon) == 0) && expected.overlap_area(mon) > 0;
         let reported_for_verdict = if parked { Some(expected) } else { reported };
         let local = self.local(expected);
         let frame_rect = Rect::new(0, 0, img.w, img.h);
         let visible = local.intersection(frame_rect);
-        if local.w < 16
-            || local.h < 16
-            || visible.area() * 2 < local.area().max(1)
-        {
+        if local.w < 16 || local.h < 16 || visible.area() * 2 < local.area().max(1) {
             let percent = if local.area() > 0 {
                 visible.area() * 100 / local.area()
             } else {
@@ -1737,9 +1777,7 @@ impl<'a> Runner<'a> {
         if let Some(prev) = &self.prev_summary {
             if image::is_static(prev, &summary) {
                 let start = *self.frozen_start.get_or_insert(self.prev_t);
-                if !self.frozen_reported
-                    && t_us - start >= (self.cfg.black_flat_ms as i64) * 1000
-                {
+                if !self.frozen_reported && t_us - start >= (self.cfg.black_flat_ms as i64) * 1000 {
                     // A window moved/resized (or the pointer moved here) and the monitor still did not
                     // change for the threshold afterwards: that is a freeze.
                     let frozen = frozen_since(
@@ -2034,9 +2072,10 @@ fn build_jobs(
     }
 
     // Border colour checks: a global scan every 400 ms while anything is expected.
-    let start = exps.first().map(|e| e.settle_us).unwrap_or_else(|| {
-        times.first().copied().unwrap_or(0)
-    });
+    let start = exps
+        .first()
+        .map(|e| e.settle_us)
+        .unwrap_or_else(|| times.first().copied().unwrap_or(0));
     let mut t = start;
     let mut n = 0;
     while t < end_us && n < 240 {
@@ -2141,13 +2180,7 @@ fn decode_frames(
 ) -> util::anyhow_lite::Result<usize> {
     let ffmpeg = util::find_ffmpeg().ok_or_else(|| util::fmt_err("FFmpeg not found"))?;
     let mut child = Command::new(ffmpeg)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostdin",
-            "-i",
-        ])
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-i"])
         .arg(path)
         .args(["-an", "-f", "rawvideo", "-pix_fmt", "bgra", "-"])
         .stdout(Stdio::piped())
@@ -2242,7 +2275,8 @@ fn analyze_monitor(
         .map(|t| Rect::new(t.x - origin.0, t.y - origin.1, t.w, t.h))
         .collect();
     let layout = image::LayoutContext::new(work_local, taskbars_local, rec.config.gap_px);
-    let (jobs, lag, exp_track) = build_jobs(&exps, &rec.os, &times, end_us, &rec.config, monitor.rect);
+    let (jobs, lag, exp_track) =
+        build_jobs(&exps, &rec.os, &times, end_us, &rec.config, monitor.rect);
     let activity = monitor_activity_times(monitor, &rec.events, &rec.os);
     let suspects_dir = rec.dir.join("suspects");
     util::ensure_dir(&suspects_dir)?;
@@ -2308,9 +2342,7 @@ fn analyze_monitor(
         let t_us = times[frame_no];
         // No live capture (or a monitor that is no longer where `meta.json` says): the picture
         // proves nothing, so no check runs on it.
-        if rows[frame_no].state == FrameState::Lost
-            || skip_from.is_some_and(|s| frame_no >= s)
-        {
+        if rows[frame_no].state == FrameState::Lost || skip_from.is_some_and(|s| frame_no >= s) {
             runner.on_lost_frame();
             frame_no += 1;
             return true;
@@ -2349,7 +2381,9 @@ fn analyze_monitor(
             fraction * 100.0
         );
         let reason = format!("{}/{} frames", runner.env.dirty, runner.env.frames);
-        let Runner { checks, suspects, .. } = &mut runner;
+        let Runner {
+            checks, suspects, ..
+        } = &mut runner;
         let n = downgrade_for_environment(checks, suspects, monitor.index, &reason);
         println!(
             "planor-rec: monitor {}: environment_not_clean ({reason}); {n} position/border finding(s) downgraded to unmeasurable",
@@ -2564,28 +2598,27 @@ fn write_markdown(path: &Path, report: &Report) -> std::io::Result<()> {
         let _ = writeln!(
             s,
             "- Monitor {} capture: {} timeline ticks, {} frames encoded, {} dropped, {} lost ({} loss period(s), longest {} ms, {} reopen(s))",
-            c.monitor, c.ticks, c.written, c.dropped, c.lost_ticks, c.lost_periods, c.max_lost_ms, c.reopens
+            c.monitor,
+            c.ticks,
+            c.written,
+            c.dropped,
+            c.lost_ticks,
+            c.lost_periods,
+            c.max_lost_ms,
+            c.reopens
         );
     }
     if let Some(a) = &report.recording.audio {
         let _ = writeln!(
             s,
             "- Audio `{}`: {} ms, {} Hz mono, **starts {:+} ms from the recording start** (audio start QPC {} µs). Video frames of a monitor begin later than the recording start, so line a note up with frames through the per-monitor offsets below.",
-            a.file,
-            a.duration_ms,
-            a.sample_rate,
-            a.offset_to_video_start_ms,
-            a.start_qpc_us
+            a.file, a.duration_ms, a.sample_rate, a.offset_to_video_start_ms, a.start_qpc_us
         );
         for o in &report.recording.audio_offsets_to_first_frame_ms {
             let _ = writeln!(
                 s,
                 "  - monitor {}: audio starts {:+} ms from this monitor's first video frame (QPC {} µs); the video frame for audio time `a` ms is the first row of `frames-{}.csv` with `present_qpc_us >= {} + a*1000`",
-                o.monitor,
-                o.offset_ms,
-                o.first_frame_qpc_us,
-                o.monitor,
-                a.start_qpc_us
+                o.monitor, o.offset_ms, o.first_frame_qpc_us, o.monitor, a.start_qpc_us
             );
         }
     }
@@ -2621,7 +2654,10 @@ fn write_markdown(path: &Path, report: &Report) -> std::io::Result<()> {
         );
     }
 
-    for (title, want) in [("Failures", Verdict::Fail), ("Unmeasurable", Verdict::Unmeasurable)] {
+    for (title, want) in [
+        ("Failures", Verdict::Fail),
+        ("Unmeasurable", Verdict::Unmeasurable),
+    ] {
         let list: Vec<&Check> = report
             .checks
             .iter()
@@ -2680,9 +2716,17 @@ fn write_markdown(path: &Path, report: &Report) -> std::io::Result<()> {
                 c.monitor,
                 rect_str(c.expected),
                 c.time_ms,
-                if c.kind == "startup_latency" { "STARTUP (limit 1500 ms after EXPECT)," } else { "" },
-                c.arrival_ms.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
-                c.late_ms.map(|v| format!("{v:+}")).unwrap_or_else(|| "-".into()),
+                if c.kind == "startup_latency" {
+                    "STARTUP (limit 1500 ms after EXPECT),"
+                } else {
+                    ""
+                },
+                c.arrival_ms
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                c.late_ms
+                    .map(|v| format!("{v:+}"))
+                    .unwrap_or_else(|| "-".into()),
                 c.verdict
             );
         }
@@ -2918,7 +2962,12 @@ pub fn probe(
         .filter(|t| t.overlap_area(monitor.rect) > 0)
         .map(|t| Rect::new(t.x - origin.0, t.y - origin.1, t.w, t.h))
         .collect();
-    let work = Rect::new(monitor.work.x - origin.0, monitor.work.y - origin.1, monitor.work.w, monitor.work.h);
+    let work = Rect::new(
+        monitor.work.x - origin.0,
+        monitor.work.y - origin.1,
+        monitor.work.w,
+        monitor.work.h,
+    );
     let layout = image::LayoutContext::new(work, taskbars, config.gap_px);
     let local = Rect::new(rect.x - origin.0, rect.y - origin.1, rect.w, rect.h);
     let video = dir.join(format!("video-{monitor_index}.mp4"));
@@ -2933,13 +2982,23 @@ pub fn probe(
             return false;
         }
         if t_ms >= from_ms {
-            let fit = image::fit_outline(img, local, config.edge_search_px, config.min_edge_score, &layout);
-            let measured = fit.measured.map(|m| Rect::new(m.x + origin.0, m.y + origin.1, m.w, m.h));
+            let fit = image::fit_outline(
+                img,
+                local,
+                config.edge_search_px,
+                config.min_edge_score,
+                &layout,
+            );
+            let measured = fit
+                .measured
+                .map(|m| Rect::new(m.x + origin.0, m.y + origin.1, m.w, m.h));
             println!(
                 "{n:5} {t_ms:5}  {:8}  {:34} {:>13}  {:.3}",
                 row.state.as_str(),
                 rect_str(measured),
-                measured.map(|m| m.max_side_diff(rect).to_string()).unwrap_or_else(|| "-".into()),
+                measured
+                    .map(|m| m.max_side_diff(rect).to_string())
+                    .unwrap_or_else(|| "-".into()),
                 fit.score
             );
             if let Some(y) = scan_row {
@@ -2947,7 +3006,14 @@ pub fn probe(
                 let runs: Vec<String> = image::class_runs_row(img, y - origin.1, &layout.taskbars)
                     .into_iter()
                     .filter(|(_, a, b)| b - a >= 3)
-                    .map(|(c, a, b)| format!("{}[{},{})", &format!("{c:?}")[..1], a + origin.0, b + origin.0))
+                    .map(|(c, a, b)| {
+                        format!(
+                            "{}[{},{})",
+                            &format!("{c:?}")[..1],
+                            a + origin.0,
+                            b + origin.0
+                        )
+                    })
                     .collect();
                 println!("        row {y}: {}", runs.join(" "));
             }
@@ -3037,9 +3103,17 @@ mod tests {
         let mut new = Image::solid(320, 200, [0, 0, 90]);
         new.fill(Rect::new(54, 0, 224, 200), [24, 24, 24]); // window A at its target
         new.fill(Rect::new(284, 0, 36, 200), [30, 30, 30]);
-        let fit_old = image::fit_outline(&old, target, cfg.edge_search_px, cfg.min_edge_score, &layout);
+        let fit_old = image::fit_outline(
+            &old,
+            target,
+            cfg.edge_search_px,
+            cfg.min_edge_score,
+            &layout,
+        );
         assert!(
-            fit_old.measured.is_some_and(|m| m.max_side_diff(target) <= 2),
+            fit_old
+                .measured
+                .is_some_and(|m| m.max_side_diff(target) <= 2),
             "the old frame reproduces the false match: {fit_old:?}"
         );
         assert_eq!(fit_old.sides, [false, false, true, true]);
@@ -3167,29 +3241,66 @@ mod tests {
             scene_exp(4_000_000, 2, 200, 3),
         ];
         let exps = merge_expectations(&all, &mon0(), 900_000, 9_000_000, &Config::default());
-        let w1: Vec<(i64, i64)> = exps.iter().filter(|e| e.hwnd == 1).map(|e| (e.t_us, e.end_us)).collect();
+        let w1: Vec<(i64, i64)> = exps
+            .iter()
+            .filter(|e| e.hwnd == 1)
+            .map(|e| (e.t_us, e.end_us))
+            .collect();
         assert_eq!(
             w1,
             vec![(1_000_000, 2_000_000), (4_000_000, 9_000_000)],
             "window 1 is expected only while a scene lists it"
         );
-        let w2: Vec<(i64, i64)> = exps.iter().filter(|e| e.hwnd == 2).map(|e| (e.t_us, e.end_us)).collect();
-        assert_eq!(w2, vec![(1_000_000, 9_000_000)], "window 2 stays in every scene: one expectation");
+        let w2: Vec<(i64, i64)> = exps
+            .iter()
+            .filter(|e| e.hwnd == 2)
+            .map(|e| (e.t_us, e.end_us))
+            .collect();
+        assert_eq!(
+            w2,
+            vec![(1_000_000, 9_000_000)],
+            "window 2 stays in every scene: one expectation"
+        );
         // Back in the same place after being away: a new arrival to wait for, not "already there".
         let times: Vec<i64> = (0..600).map(|i| 1_000_000 + i * 16_667).collect();
-        let (_, _, exp_track) = build_jobs(&exps, &[], &times, 9_000_000, &Config::default(), mon0()[0].rect);
-        let back = exps.iter().position(|e| e.hwnd == 1 && e.t_us == 4_000_000).unwrap();
+        let (_, _, exp_track) = build_jobs(
+            &exps,
+            &[],
+            &times,
+            9_000_000,
+            &Config::default(),
+            mon0()[0].rect,
+        );
+        let back = exps
+            .iter()
+            .position(|e| e.hwnd == 1 && e.t_us == 4_000_000)
+            .unwrap();
         assert!(exp_track[back].is_some());
     }
 
     #[test]
     fn nothing_is_expected_after_the_daemon_stop_marker() {
-        let marks = vec![(1_000_000, "scenario-start".to_string()), (5_000_000, "daemon-stopped".into()), (7_000_000, "daemon-stopped".into())];
-        assert_eq!(daemon_stop_us(&marks), Some(5_000_000), "the first marker counts");
+        let marks = vec![
+            (1_000_000, "scenario-start".to_string()),
+            (5_000_000, "daemon-stopped".into()),
+            (7_000_000, "daemon-stopped".into()),
+        ];
+        assert_eq!(
+            daemon_stop_us(&marks),
+            Some(5_000_000),
+            "the first marker counts"
+        );
         assert_eq!(daemon_stop_us(&marks[..1]), None);
-        let mut exps = vec![exp_at(1, 1_000_000, 0, false), exp_at(2, 6_000_000, 200, false)];
+        let mut exps = vec![
+            exp_at(1, 1_000_000, 0, false),
+            exp_at(2, 6_000_000, 200, false),
+        ];
         end_expectations_at(&mut exps, 5_000_000);
-        assert_eq!(exps.len(), 1, "an expectation that begins after the stop is dropped");
+        assert_eq!(
+            exps.len(),
+            1,
+            "an expectation that begins after the stop is dropped"
+        );
         assert_eq!(exps[0].end_us, 5_000_000);
     }
 
@@ -3273,7 +3384,11 @@ mod tests {
     }
 
     fn row(t: i64, state: FrameState) -> FrameRow {
-        FrameRow { present_us: t, state, rotate_stall_us: 0 }
+        FrameRow {
+            present_us: t,
+            state,
+            rotate_stall_us: 0,
+        }
     }
 
     #[test]
@@ -3283,19 +3398,28 @@ mod tests {
         assert_eq!(frozen_since(&[2_000_000], 0, 2_050_000, thr), None);
         // ... and only if the screen is still identical 300 ms after the activity is it a freeze,
         // reported at the time of the activity.
-        assert_eq!(frozen_since(&[2_000_000], 0, 2_300_000, thr), Some(2_000_000));
+        assert_eq!(
+            frozen_since(&[2_000_000], 0, 2_300_000, thr),
+            Some(2_000_000)
+        );
         // Activity before the static run began does not count.
         assert_eq!(frozen_since(&[100], 1_000_000, 9_000_000, thr), None);
         // No activity at all: an idle screen is not frozen.
         assert_eq!(frozen_since(&[], 0, 9_000_000, thr), None);
         // The first activity inside the run decides.
-        assert_eq!(frozen_since(&[500_000, 900_000], 0, 900_000, thr), Some(500_000));
+        assert_eq!(
+            frozen_since(&[500_000, 900_000], 0, 900_000, thr),
+            Some(500_000)
+        );
     }
 
     #[test]
     fn os_rectangles_stand_in_only_when_there_is_no_planor_trace_at_all() {
         assert!(use_os_fallback(false, false));
-        assert!(!use_os_fallback(true, false), "EXPECT exists for other monitors: nothing is claimed here");
+        assert!(
+            !use_os_fallback(true, false),
+            "EXPECT exists for other monitors: nothing is claimed here"
+        );
         assert!(!use_os_fallback(false, true));
         assert!(!use_os_fallback(true, true));
     }
@@ -3320,9 +3444,18 @@ mod tests {
             minimized: false,
         };
         let snaps = vec![
-            OsSnapshot { t_us: 1_000, windows: vec![win(0)] },
-            OsSnapshot { t_us: 2_000, windows: vec![win(0)] },
-            OsSnapshot { t_us: 3_000, windows: vec![win(40)] },
+            OsSnapshot {
+                t_us: 1_000,
+                windows: vec![win(0)],
+            },
+            OsSnapshot {
+                t_us: 2_000,
+                windows: vec![win(0)],
+            },
+            OsSnapshot {
+                t_us: 3_000,
+                windows: vec![win(40)],
+            },
         ];
         assert_eq!(monitor_activity_times(&monitor, &[], &snaps), vec![3_000]);
     }
@@ -3397,16 +3530,26 @@ mod tests {
         let exps = vec![
             exp_at(1, 1_000_000, 0, true),    // first appearance, startup scene
             exp_at(2, 1_000_000, 200, false), // first appearance, ordinary
-            exp_at(1, 4_000_000, 0, false),   // same rect again for window 1 after a merge gap: unchanged
+            exp_at(1, 4_000_000, 0, false), // same rect again for window 1 after a merge gap: unchanged
         ];
-        let (jobs, lag, exp_track) =
-            build_jobs(&exps, &[], &times, 7_000_000, &cfg, Rect::new(0, 0, 1000, 1000));
+        let (jobs, lag, exp_track) = build_jobs(
+            &exps,
+            &[],
+            &times,
+            7_000_000,
+            &cfg,
+            Rect::new(0, 0, 1000, 1000),
+        );
         assert_eq!(exp_track, vec![Some(0), Some(1), None]);
         assert!(lag[0].startup && !lag[1].startup);
         assert_eq!(lag[0].watch_end_us(), 1_000_000 + 2_000_000);
         assert_eq!(lag[1].watch_end_us(), 1_000_000 + 1_000_000);
         // Position samples are still scheduled; the runner defers them until the arrival resolved.
-        assert!(jobs.values().flatten().any(|j| matches!(j, Job::Position { exp: 0, .. })));
+        assert!(
+            jobs.values()
+                .flatten()
+                .any(|j| matches!(j, Job::Position { exp: 0, .. }))
+        );
     }
 
     // ---- D: the first scene after a daemon start has its own latency check ----
@@ -3414,12 +3557,28 @@ mod tests {
     #[test]
     fn startup_latency_is_a_number_that_fails_only_above_1500_ms() {
         assert_eq!(startup_verdict(Some(0), false, true), Verdict::Pass);
-        assert_eq!(startup_verdict(Some(740), false, true), Verdict::Pass, "the real 0.5 to 0.8 s startup passes");
+        assert_eq!(
+            startup_verdict(Some(740), false, true),
+            Verdict::Pass,
+            "the real 0.5 to 0.8 s startup passes"
+        );
         assert_eq!(startup_verdict(Some(1500), false, true), Verdict::Pass);
         assert_eq!(startup_verdict(Some(1501), false, true), Verdict::Fail);
-        assert_eq!(startup_verdict(Some(2400), true, true), Verdict::Unmeasurable, "frames missing: only an upper bound");
-        assert_eq!(startup_verdict(None, false, true), Verdict::Fail, "never arrived");
-        assert_eq!(startup_verdict(None, false, false), Verdict::Unmeasurable, "edge never visible");
+        assert_eq!(
+            startup_verdict(Some(2400), true, true),
+            Verdict::Unmeasurable,
+            "frames missing: only an upper bound"
+        );
+        assert_eq!(
+            startup_verdict(None, false, true),
+            Verdict::Fail,
+            "never arrived"
+        );
+        assert_eq!(
+            startup_verdict(None, false, false),
+            Verdict::Unmeasurable,
+            "edge never visible"
+        );
         // The strict threshold is untouched for every later scene: 61 ms late is a failure there.
         let cfg = Config::default();
         assert_eq!(cfg.lag_ms, 50);
@@ -3447,7 +3606,10 @@ mod tests {
         let f = image::foreign_content_fraction(&only_tile, area, &excluded, 8).unwrap();
         assert!(f < 0.01, "{f}");
         // Too small a free area says nothing.
-        assert_eq!(image::foreign_content_fraction(&clean, Rect::new(0, 0, 16, 16), &[], 8), None);
+        assert_eq!(
+            image::foreign_content_fraction(&clean, Rect::new(0, 0, 16, 16), &[], 8),
+            None
+        );
 
         let mut env = EnvTracker::default();
         env.observe(10, 0, Some(0.0));
@@ -3474,7 +3636,10 @@ mod tests {
         };
         let tile = Rect::new(0, 0, 957, 1140);
         let tiles = [(10i64, tile), (11, Rect::new(963, 0, 957, 1140))];
-        let tile_windows = [win(10, "Sentinel", 5, tile), win(11, "Sentinel", 6, Rect::new(963, 0, 957, 1140))];
+        let tile_windows = [
+            win(10, "Sentinel", 5, tile),
+            win(11, "Sentinel", 6, Rect::new(963, 0, 957, 1140)),
+        ];
         let with = |extra: OsWindow| {
             let mut v = vec![extra];
             v.extend(tile_windows.iter().cloned());
@@ -3482,18 +3647,42 @@ mod tests {
         };
         // The developer's app, above the tiles and covering one of them.
         let app = win(99, "Chrome_WidgetWin_1", 0, Rect::new(100, 50, 1400, 1000));
-        assert_eq!(occluding_foreign_window(&with(app.clone()), &tiles).as_deref(), Some("Chrome_WidgetWin_1"));
+        assert_eq!(
+            occluding_foreign_window(&with(app.clone()), &tiles).as_deref(),
+            Some("Chrome_WidgetWin_1")
+        );
         // The same window below the tiles is hidden by them: fine.
-        let below = OsWindow { z: 9, ..app.clone() };
+        let below = OsWindow {
+            z: 9,
+            ..app.clone()
+        };
         assert_eq!(occluding_foreign_window(&with(below), &tiles), None);
         // Planor's overlay, the taskbar, tiny, cloaked and minimised windows never count.
         for other in [
-            OsWindow { class: "Planor.Composition".into(), ..app.clone() },
-            OsWindow { class: "Shell_TrayWnd".into(), ..app.clone() },
-            OsWindow { rect: Rect::new(100, 50, 60, 60), ..app.clone() },
-            OsWindow { cloaked: true, ..app.clone() },
-            OsWindow { minimized: true, ..app.clone() },
-            OsWindow { rect: Rect::new(1900, 1100, 400, 400), ..app.clone() }, // barely touches a tile
+            OsWindow {
+                class: "Planor.Composition".into(),
+                ..app.clone()
+            },
+            OsWindow {
+                class: "Shell_TrayWnd".into(),
+                ..app.clone()
+            },
+            OsWindow {
+                rect: Rect::new(100, 50, 60, 60),
+                ..app.clone()
+            },
+            OsWindow {
+                cloaked: true,
+                ..app.clone()
+            },
+            OsWindow {
+                minimized: true,
+                ..app.clone()
+            },
+            OsWindow {
+                rect: Rect::new(1900, 1100, 400, 400),
+                ..app.clone()
+            }, // barely touches a tile
         ] {
             assert_eq!(occluding_foreign_window(&with(other), &tiles), None);
         }
@@ -3531,9 +3720,9 @@ mod tests {
             mk_check(1, "position", "fail", 0),
             mk_check(2, "border_missing", "fail", 0),
             mk_check(3, "border", "fail", 0),
-            mk_check(4, "position", "fail", 1),   // another monitor: untouched
-            mk_check(5, "lag", "fail", 0),        // arrival is read from the same pixels: downgraded too
-            mk_check(6, "position", "pass", 0),   // a pass stays a pass
+            mk_check(4, "position", "fail", 1), // another monitor: untouched
+            mk_check(5, "lag", "fail", 0), // arrival is read from the same pixels: downgraded too
+            mk_check(6, "position", "pass", 0), // a pass stays a pass
             mk_check(7, "pacing", "fail", 0),
         ];
         let mut suspects = vec![Suspect {
@@ -3555,8 +3744,25 @@ mod tests {
         let n = downgrade_for_environment(&mut checks, &mut suspects, 0, "5/5 frames");
         assert_eq!(n, 4);
         let v: Vec<&str> = checks.iter().map(|c| c.verdict.as_str()).collect();
-        assert_eq!(v, ["unmeasurable", "unmeasurable", "unmeasurable", "fail", "unmeasurable", "pass", "fail"]);
-        assert!(checks[0].detail.starts_with("environment_not_clean (5/5 frames)"), "{}", checks[0].detail);
+        assert_eq!(
+            v,
+            [
+                "unmeasurable",
+                "unmeasurable",
+                "unmeasurable",
+                "fail",
+                "unmeasurable",
+                "pass",
+                "fail"
+            ]
+        );
+        assert!(
+            checks[0]
+                .detail
+                .starts_with("environment_not_clean (5/5 frames)"),
+            "{}",
+            checks[0].detail
+        );
         assert!(checks[0].detail.contains("9 px off"));
         assert_eq!(checks[0].severity, 1);
         assert_eq!(suspects[0].verdict, "unmeasurable");
@@ -3571,8 +3777,12 @@ mod tests {
                    "acquire_next_frame_ms":2,"gpu_copy_map_ms":6,"cpu_copy_rotate_ms":62}),
             json!({"kind":"capture","event":"slow_acquire","monitor":1,"t":5_000_000,"ms":90}),
         ];
-        let text = slow_acquire_in(&events, 2, 1_010_000, 1_090_000).expect("overlaps the 70 ms call");
-        assert!(text.contains("70 ms") && text.contains("CPU copy/rotate 62 ms"), "{text}");
+        let text =
+            slow_acquire_in(&events, 2, 1_010_000, 1_090_000).expect("overlaps the 70 ms call");
+        assert!(
+            text.contains("70 ms") && text.contains("CPU copy/rotate 62 ms"),
+            "{text}"
+        );
         assert!(text.contains("recorder stall"));
         // Another monitor's call, or a gap that does not overlap, is not an explanation.
         assert_eq!(slow_acquire_in(&events, 0, 1_010_000, 1_090_000), None);
@@ -3610,7 +3820,11 @@ mod tests {
         assert_eq!(lost[0].start_us, 1_000_000 + 10 * p);
         assert_eq!(lost[0].duration_ms(), 500);
         // A loss that lasts until the recording ends still has a duration.
-        let tail = vec![row(0, FrameState::Ok), row(16_000, FrameState::Lost), row(32_000, FrameState::Lost)];
+        let tail = vec![
+            row(0, FrameState::Ok),
+            row(16_000, FrameState::Lost),
+            row(32_000, FrameState::Lost),
+        ];
         let lost = lost_stretches(&tail);
         assert_eq!(lost.len(), 1);
         assert_eq!(lost[0].frames, 2);
@@ -3630,14 +3844,21 @@ mod tests {
         };
         let same = json!({"kind":"capture","event":"reopened","monitor":1,"t":5,"rect":[1920,0,2560,1440]});
         assert_eq!(rect_change(&[same], &monitor), None);
-        let moved = json!({"kind":"capture","event":"reopened","monitor":1,"t":9,"rect":[0,0,2560,1440]});
-        assert_eq!(rect_change(&[moved], &monitor), Some((9, Rect::new(0, 0, 2560, 1440))));
+        let moved =
+            json!({"kind":"capture","event":"reopened","monitor":1,"t":9,"rect":[0,0,2560,1440]});
+        assert_eq!(
+            rect_change(&[moved], &monitor),
+            Some((9, Rect::new(0, 0, 2560, 1440)))
+        );
         let other = json!({"kind":"capture","event":"reopened","monitor":0,"t":9,"rect":[0,0,1,1]});
         assert_eq!(rect_change(&[other], &monitor), None);
         let topo = json!({"kind":"capture","event":"topology","t":7,"monitors":[
             {"index":0,"device":"\\\\.\\DISPLAY1","rect":[0,0,1920,1200]},
             {"index":1,"device":"\\\\.\\DISPLAY2","rect":[1920,0,1920,1080]}]});
-        assert_eq!(rect_change(&[topo], &monitor), Some((7, Rect::new(1920, 0, 1920, 1080))));
+        assert_eq!(
+            rect_change(&[topo], &monitor),
+            Some((7, Rect::new(1920, 0, 1920, 1080)))
+        );
         let ok = json!({"kind":"capture","event":"topology","t":7,"monitors":[
             {"index":1,"device":"\\\\.\\DISPLAY2","rect":[1920,0,2560,1440]}]});
         assert_eq!(rect_change(&[ok], &monitor), None);
@@ -3650,10 +3871,20 @@ mod tests {
             ..AudioMeta::default()
         };
         let offsets = audio_offsets(&audio, &[(0, 10_000_000), (2, 10_050_000)]);
-        assert_eq!(offsets[0], AudioOffset { monitor: 0, first_frame_qpc_us: 10_000_000, offset_ms: 1603 });
+        assert_eq!(
+            offsets[0],
+            AudioOffset {
+                monitor: 0,
+                first_frame_qpc_us: 10_000_000,
+                offset_ms: 1603
+            }
+        );
         assert_eq!(offsets[1].offset_ms, 1553);
         // Audio that began before the first frame has a negative offset.
-        let early = AudioMeta { start_qpc_us: 9_900_000, ..AudioMeta::default() };
+        let early = AudioMeta {
+            start_qpc_us: 9_900_000,
+            ..AudioMeta::default()
+        };
         assert_eq!(audio_offsets(&early, &[(0, 10_000_000)])[0].offset_ms, -100);
     }
 
@@ -3665,7 +3896,10 @@ mod tests {
             json!({"kind":"capture","event":"encoder_behind","monitor":2,"t":2_000_000,"dropped":7}),
             json!({"kind":"capture","event":"encoder_behind","monitor":2,"t":3_000_000,"dropped":3}),
         ];
-        assert_eq!(lost_reason(&events, 2, 1_010_000).as_deref(), Some("ACCESS_LOST"));
+        assert_eq!(
+            lost_reason(&events, 2, 1_010_000).as_deref(),
+            Some("ACCESS_LOST")
+        );
         assert_eq!(lost_reason(&events, 2, 9_000_000), None);
         assert_eq!(dropped_frames(&events, 2), (10, Some(2_000_000)));
         assert_eq!(dropped_frames(&events, 0), (0, None));
@@ -3720,15 +3954,25 @@ mod lag_slack_tests {
     /// so its timestamp carried about 34 ms of recorder work. Measured against 50 + 34 ms it passes.
     #[test]
     fn rotated_arrival_frame_is_judged_with_its_recorder_stall() {
-        assert!(61_000 <= lag_limit_us(50, 34_000), "61 ms must pass when 34 ms of it is recorder stall");
-        assert!(61_000 > lag_limit_us(50, 0), "an unrotated monitor keeps the plain 50 ms threshold");
+        assert!(
+            61_000 <= lag_limit_us(50, 34_000),
+            "61 ms must pass when 34 ms of it is recorder stall"
+        );
+        assert!(
+            61_000 > lag_limit_us(50, 0),
+            "an unrotated monitor keeps the plain 50 ms threshold"
+        );
     }
 
     #[test]
     fn stall_widens_the_limit_by_exactly_the_stall() {
         assert_eq!(lag_limit_us(50, 0), 50_000);
         assert_eq!(lag_limit_us(50, 34_000), 84_000);
-        assert_eq!(lag_limit_us(50, -5), 50_000, "a negative stall never tightens the threshold");
+        assert_eq!(
+            lag_limit_us(50, -5),
+            50_000,
+            "a negative stall never tightens the threshold"
+        );
         // A real lag beyond threshold + stall still fails.
         assert!(90_000 > lag_limit_us(50, 34_000));
     }
@@ -3740,14 +3984,26 @@ mod lag_slack_tests {
         )
         .unwrap();
         assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].present_us, rows[0].rotate_stall_us), (1000, 34_000));
+        assert_eq!(
+            (rows[0].present_us, rows[0].rotate_stall_us),
+            (1000, 34_000)
+        );
         assert_eq!(rows[1].rotate_stall_us, 0);
 
         // Recordings made before the stall column existed: the stall is zero, nothing else changes.
-        let old = parse_frame_rows("index,present_qpc_us,changed,state\n0,1000,1,ok\n1,2000,0,lost\n").unwrap();
+        let old =
+            parse_frame_rows("index,present_qpc_us,changed,state\n0,1000,1,ok\n1,2000,0,lost\n")
+                .unwrap();
         assert_eq!(old[1].state, FrameState::Lost);
         assert!(old.iter().all(|r| r.rotate_stall_us == 0));
         let oldest = parse_frame_rows("index,present_qpc_us\n0,1000\n").unwrap();
-        assert_eq!((oldest[0].present_us, oldest[0].state, oldest[0].rotate_stall_us), (1000, FrameState::Ok, 0));
+        assert_eq!(
+            (
+                oldest[0].present_us,
+                oldest[0].state,
+                oldest[0].rotate_stall_us
+            ),
+            (1000, FrameState::Ok, 0)
+        );
     }
 }
