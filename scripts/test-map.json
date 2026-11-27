@@ -14,7 +14,7 @@
     {
       "pattern": "^src/render\\.rs$",
       "unit": ["--bin planor (sim_tests)", "--bin planor (other)", "--test core"],
-      "live": ["live::state_json_matches_real_windows", "scn_overlay::border_never_paints_over_an_unmanaged_window", "scn_taskbar::overlay_click_through_everywhere_but_peek", "scn_scroll::peek_visible"]
+      "live": ["live::state_json_matches_real_windows", "scn_overlay::border_never_paints_over_an_unmanaged_window", "scn_taskbar::overlay_click_through_everywhere_but_peek", "scn_scroll::peek_visible", "scn_video"]
     },
     {
       "pattern": "^src/input\\.rs$",
@@ -24,7 +24,7 @@
     {
       "pattern": "^src/win32\\.rs$",
       "unit": ["--bin planor (other)"],
-      "live": ["live::state_json_matches_real_windows", "live::stop_restores_exact_rect", "scn_taskbar::tiles_stay_inside_work_area", "scn_drag::reorder_before_after"]
+      "live": ["live::state_json_matches_real_windows", "live::stop_restores_exact_rect", "scn_taskbar::tiles_stay_inside_work_area", "scn_drag::reorder_before_after", "scn_video::pip_topmost_toolwindow_stays_untiled_unparked_and_topmost_during_scroll"]
     },
     {
       "pattern": "^src/(daemon|backend|sim_tests)\\.rs$",
@@ -55,6 +55,11 @@
       "pattern": "^tools/planor-rec/",
       "unit": ["-p planor-rec"],
       "live": []
+    },
+    {
+      "pattern": "^tests/scn_video\\.rs$",
+      "unit": [],
+      "live": ["scn_video"]
     },
     {
       "pattern": "^tests/core\\.rs$",

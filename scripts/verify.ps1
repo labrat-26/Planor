@@ -471,7 +471,7 @@ try {
   if ($Tier -ne "unit") {
     Write-Host ("== live tests ({0}{1})" -f $Tier, $(if ($Parallel) { ", parallel-safe max=$liveParallelJobs" } else { "" })) -ForegroundColor Cyan
     $env:PLANOR_KEEP_ARTIFACTS = $out
-    $liveFiles = @("live", "scn_focus", "scn_scroll", "scn_drag", "scn_exit", "scn_taskbar", "scn_overlay", "scn_display")
+    $liveFiles = @("live", "scn_focus", "scn_scroll", "scn_drag", "scn_exit", "scn_taskbar", "scn_overlay", "scn_video", "scn_display")
     if ($NoDisplaySwitch) {
       $liveFiles = @($liveFiles | Where-Object { $_ -ne "scn_display" })
     }

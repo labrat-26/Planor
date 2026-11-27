@@ -836,6 +836,7 @@ pub(crate) mod sim {
                 return false;
             }
             win32::is_overlay_occluder_class(&w.class)
+                || (w.topmost && win32::topmost_overlay_occluder(&w.class, WS_EX_TOPMOST))
         }
 
         fn class_of(&self, id: isize) -> String {
@@ -969,10 +970,20 @@ pub(crate) mod sim {
 
         fn activate(&self, id: isize) {
             let mut g = self.0.lock().unwrap();
-            if g.windows.contains_key(&id) {
+            if let Some(topmost) = g.windows.get(&id).map(|w| w.topmost) {
                 g.foreground = id;
                 g.z_order.retain(|&x| x != id);
-                g.z_order.insert(0, id);
+                // As in Windows: activating a normal window raises it to the top of the normal band,
+                // still below every WS_EX_TOPMOST window (#106).
+                let at = if topmost {
+                    0
+                } else {
+                    g.z_order
+                        .iter()
+                        .position(|x| !g.windows.get(x).is_some_and(|w| w.topmost))
+                        .unwrap_or(g.z_order.len())
+                };
+                g.z_order.insert(at, id);
             }
         }
 

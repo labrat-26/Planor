@@ -3302,6 +3302,67 @@ fn issue_17_system_flyouts_and_note_box_punch_holes_only_when_visible_and_uncloa
     h.stop_clean();
 }
 
+/// #106: a Picture-in-Picture window (small, WS_EX_TOPMOST | WS_EX_TOOLWINDOW, not owned) is never tiled, and the
+/// overlay leaves it alone: it punches a hole even while the strip scrolls under it, keeps its rect, and does not
+/// stop the strip from scrolling. The taskbars and Planor's own topmost overlay hosts never punch holes.
+#[test]
+fn issue_106_pip_topmost_window_punches_hole_is_not_tiled_and_scroll_still_works() {
+    let pip_rect = Rect { x: 1500, y: 800, w: 400, h: 225 };
+    let tray_rect = Rect { x: 0, y: 1140, w: 1920, h: 60 };
+    let host_rect = Rect { x: 0, y: 0, w: 1920, h: 1200 };
+    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
+        for (i, id) in [101, 102, 103].into_iter().enumerate() {
+            sim.add_window(SimWindow::new(id, Rect { x: 100 + 300 * i as i32, y: 100, w: 800, h: 700 }));
+        }
+        let mut tray = SimWindow::new(920, tray_rect);
+        tray.class = "Shell_TrayWnd".into();
+        tray.topmost = true;
+        tray.toolwindow = true;
+        sim.add_window(tray);
+        let mut host = SimWindow::new(921, host_rect);
+        host.class = "Planor.Composition".into();
+        host.topmost = true;
+        host.toolwindow = true;
+        host.noactivate = true;
+        sim.add_window(host);
+        let mut pip = SimWindow::new(930, pip_rect);
+        pip.class = "Chrome_WidgetWin_1".into();
+        pip.topmost = true;
+        pip.toolwindow = true;
+        sim.add_window(pip);
+        sim.foreground = 103;
+    });
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+
+    let snap = h.state();
+    let ids: Vec<i64> = snap["tiles"].as_array().unwrap().iter().filter_map(|t| t["id"].as_i64()).collect();
+    for unmanaged in [920, 921, 930] {
+        assert!(!ids.contains(&unmanaged), "window {unmanaged} must never be tiled: tiles {ids:?}");
+    }
+    assert_eq!(ids.len(), 3, "the three normal windows are tiled: {ids:?}");
+    let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+    assert_eq!(holes, vec![pip_rect], "only the PiP window punches a hole (not the taskbar, not Planor's host)");
+
+    // Scroll the strip left twice and right twice under the PiP window: it keeps its rect and its hole, and the
+    // focus really moves.
+    let mut focused = vec![h.state()["strips"][0]["focus"].as_u64().unwrap()];
+    for key in ["focus_left", "focus_left", "focus_right", "focus_right"] {
+        h.cmd(Command::Key { name: key.into() });
+        h.settle();
+        h.engine.expire_timers_for_test();
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        focused.push(h.state()["strips"][0]["focus"].as_u64().unwrap());
+        assert_eq!(h.rect(930), pip_rect, "after {key}: the PiP window keeps its rect");
+        let holes = h.desktop.0.lock().unwrap().scenes.last().unwrap().holes.clone();
+        assert_eq!(holes, vec![pip_rect], "after {key}: the PiP window still punches its hole");
+    }
+    assert_eq!(focused, vec![2, 1, 0, 1, 2], "the strip still scrolls with a PiP window on top");
+    h.stop_clean();
+}
+
 #[test]
 fn issue_17_edge_resize_does_not_show_green_drop_target_border_or_zones() {
     let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
