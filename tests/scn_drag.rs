@@ -1196,3 +1196,89 @@ fn edge_scroll_steps_are_even() {
         "edge_scroll_steps_are_even: stutter, p95 step {p95} px vs median {med} px ({steps:?})"
     );
 }
+
+/// Drop box colour (src/daemon.rs DROP_BOX_RGB = #0EA5E9) as 0x00RRGGBB.
+const DROP_BOX_RGB_PX: u32 = 0x000ea5e9;
+
+/// Owner report: the small drop box never showed on landscape. Captures the real screen while a window hovers
+/// the middle of its neighbour: the box colour must be on screen during the hover, and gone after the drop.
+#[test]
+#[ignore]
+fn drop_box_is_drawn_while_hovering_the_middle_of_a_neighbour() {
+    aware();
+    let ws: Vec<Sentinel> = (0..2).map(|i| Sentinel::new(i, 0)).collect();
+    let cap = Capture::open(0).expect("desktop duplication for the drop box colour check");
+    let mut d = Daemon::new("s4-dropbox");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
+        panic!(
+            "precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
+    });
+    let to = centre(vis(&ws[0]));
+    let mut seen_after_dwell = false;
+    let mut best_px = 0usize;
+    assert_eq!(
+        count_rgb(&cap, DROP_BOX_RGB_PX),
+        0,
+        "no drop box before the drag"
+    );
+    m.down(from);
+    m.glide(from, to);
+    // Sample at once on arrival: the dwell (250 ms) has not elapsed, so the neighbour has not moved aside yet.
+    // The box must already be there (owner report: it only appeared after the neighbour shifted).
+    let arrived = Instant::now();
+    let mut seen_before_dwell = false;
+    while arrived.elapsed() < Duration::from_millis(200) {
+        m.put((to.0 + 1, to.1));
+        if count_rgb(&cap, DROP_BOX_RGB_PX) > 0 {
+            seen_before_dwell = true;
+            break;
+        }
+    }
+    thread::sleep(Duration::from_millis(250));
+    let mut seen = false;
+    for i in 0..HOVER.as_millis() as u64 / 50 {
+        let dx: i32 = if i % 2 == 0 { 2 } else { -2 };
+        m.put((to.0 + dx, to.1));
+        thread::sleep(Duration::from_millis(50));
+        let px = count_rgb(&cap, DROP_BOX_RGB_PX);
+        best_px = best_px.max(px);
+        if px > 0 {
+            seen = true;
+            if i >= 10 {
+                seen_after_dwell = true;
+            }
+        }
+    }
+    m.up();
+    thread::sleep(SETTLE);
+    assert!(
+        seen,
+        "drop box colour #0EA5E9 never appeared on screen while hovering the middle of the neighbour; {}",
+        describe(&ws)
+    );
+    assert!(
+        seen_before_dwell,
+        "the drop box must show on arrival in the middle range, before the dwell moves the neighbour; {}",
+        describe(&ws)
+    );
+    assert!(
+        seen_after_dwell,
+        "drop box was drawn before the dwell but vanished once the neighbour moved aside (preview shift); {}",
+        describe(&ws)
+    );
+    println!("drop_box: best outline pixel count {best_px}");
+    assert!(
+        eventually(4, || count_rgb(&cap, DROP_BOX_RGB_PX) == 0),
+        "drop box left behind after the drop"
+    );
+    d.stop();
+}

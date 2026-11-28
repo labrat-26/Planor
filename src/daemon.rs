@@ -182,6 +182,9 @@ pub(crate) struct HotCfg {
     pub max_log_files: usize,
 }
 
+/// Fill and outline of the drop box: distinct from the focus (blue), stack (mauve) and pin (amber) borders.
+pub(crate) const DROP_BOX_RGB: u32 = 0x0EA5E9;
+
 fn parse_hex_color(v: &toml::Value) -> Option<u32> {
     v.as_str()
         .and_then(|s| u32::from_str_radix(s.trim_start_matches('#'), 16).ok())
@@ -1837,7 +1840,7 @@ impl<B: WindowBackend> Engine<B> {
                     target_rect: Some(target_rect),
                     horizontal: dest_strip.area.horizontal(),
                     input,
-                    kind: crate::cue::CueKind::DropBox,
+                    kind: crate::cue::CueKind::DropBox { rgb: DROP_BOX_RGB },
                     started_at: Instant::now(),
                 });
             }

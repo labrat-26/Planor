@@ -36,7 +36,7 @@ pub enum CueKind {
     /// `trailing`: `false` (left in landscape / up in portrait), `true` (right / down).
     StackExit { trailing: bool },
     /// A small filled box in the target while the pointer is in its middle range (1/4..3/4): where a drop would land.
-    DropBox,
+    DropBox { rgb: u32 },
 }
 
 /// Non-interactive animated SVG guidance cue placed on one monitor's overlay.
@@ -330,7 +330,7 @@ pub fn evaluate_cue(
     dpi: f32,
 ) -> SvgScene {
     let dpi = dpi.clamp(0.5, 4.0);
-    if cue.kind == CueKind::DropBox {
+    if let CueKind::DropBox { rgb } = cue.kind {
         // A small filled box centred in the target (owner request: "way smaller", always filled, on the
         // monitor the window is over). No card, no animation.
         let t = cue.target_rect.unwrap_or(cue.monitor_area);
@@ -358,8 +358,8 @@ pub fn evaluate_cue(
                 w: side as f32,
                 h: side as f32,
                 rx: 8.0 * dpi,
-                fill: Some((palette.accent, 0.55)),
-                stroke: Some((palette.accent, 0.95, (2.0 * dpi).max(1.5))),
+                fill: Some((rgb, 0.55)),
+                stroke: Some((rgb, 1.0, (3.0 * dpi).max(2.0))),
             }],
         };
     }
@@ -531,7 +531,7 @@ pub fn evaluate_cue(
             );
             ((dx, dy), av)
         }
-        CueKind::DropBox => ((0.0, 0.0), (0.0, 0.0)),
+        CueKind::DropBox { .. } => ((0.0, 0.0), (0.0, 0.0)),
         CueKind::StackExit { trailing } => {
             let dir_f = if trailing { 1.0f32 } else { -1.0f32 };
             let slide = (0.35 + 0.65 * pulse) * 12.0 * dpi;
@@ -646,7 +646,7 @@ pub fn to_svg_xml(scene: &SvgScene) -> String {
         CueKind::StackEntryPreview { .. } => "preview",
         CueKind::StackEntryCommitted { .. } => "committed",
         CueKind::StackExit { .. } => "exit",
-        CueKind::DropBox => "dropbox",
+        CueKind::DropBox { .. } => "dropbox",
     };
     let input = match scene.input {
         CueInput::Mouse { .. } => "mouse",

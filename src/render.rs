@@ -806,98 +806,6 @@ impl Surface {
                         }),
                     )
                 }
-                // The theme and accent are registry/DWM reads: cached on the surface, refreshed at
-                // most once a second, and only while an animated SVG cue is drawn (#102, #112).
-                if let Some(cd) = *cue {
-                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
-                        self.dark = crate::theme::system_is_dark();
-                        self.accent = crate::theme::accent_color();
-                        self.dark_at = Instant::now();
-                    }
-                    let palette = crate::cue::CuePalette::from_system(self.dark, self.accent);
-                    let svg = crate::cue::evaluate_cue(
-                        &cd.cue,
-                        cd.phase_ms,
-                        palette,
-                        &cd.world_holes,
-                        dpi,
-                    );
-                    let ox = (svg.rect.x - cd.host_origin.0 + off.x) as f32;
-                    let oy = (svg.rect.y - cd.host_origin.1 + off.y) as f32;
-                    let pt = |px: f32, py: f32| {
-                        let mut p = D2D1_ELLIPSE::default().point;
-                        p.X = ox + px;
-                        p.Y = oy + py;
-                        p
-                    };
-                    for elem in &svg.elements {
-                        match elem {
-                            crate::cue::SvgElem::RoundedRect {
-                                x,
-                                y,
-                                w,
-                                h,
-                                rx,
-                                fill,
-                                stroke,
-                            } => {
-                                let rr = D2D1_ROUNDED_RECT {
-                                    rect: D2D_RECT_F {
-                                        left: ox + *x,
-                                        top: oy + *y,
-                                        right: ox + *x + *w,
-                                        bottom: oy + *y + *h,
-                                    },
-                                    radiusX: *rx,
-                                    radiusY: *rx,
-                                };
-                                if let Some((c, alpha)) = *fill {
-                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
-                                    b.SetOpacity(alpha);
-                                    rt.FillRoundedRectangle(&rr, b);
-                                }
-                                if let Some((c, alpha, sw)) = *stroke {
-                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
-                                    b.SetOpacity(alpha);
-                                    rt.DrawRoundedRectangle(&rr, b, sw, None);
-                                }
-                            }
-                            crate::cue::SvgElem::Line {
-                                x1,
-                                y1,
-                                x2,
-                                y2,
-                                color,
-                                alpha,
-                                width: sw,
-                            } => {
-                                let b = Self::brush_for(&mut self.brushes, rt, *color)?;
-                                b.SetOpacity(*alpha);
-                                rt.DrawLine(pt(*x1, *y1), pt(*x2, *y2), b, *sw, None);
-                            }
-                            crate::cue::SvgElem::Polyline {
-                                points,
-                                color,
-                                alpha,
-                                width: sw,
-                            } => {
-                                if points.len() >= 2 {
-                                    let b = Self::brush_for(&mut self.brushes, rt, *color)?;
-                                    b.SetOpacity(*alpha);
-                                    for seg in points.windows(2) {
-                                        rt.DrawLine(
-                                            pt(seg[0].0, seg[0].1),
-                                            pt(seg[1].0, seg[1].1),
-                                            b,
-                                            *sw,
-                                            None,
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
                 for card in *cards {
                     let x = (card.rect.x + off.x) as f32;
                     let y = (card.rect.y + off.y) as f32;
@@ -1035,6 +943,99 @@ impl Surface {
                     }
                     self.context
                         .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                }
+                // Drawn AFTER the holes are punched: the box sits under the dragged window, whose own hole would erase it.
+                // The theme and accent are registry/DWM reads: cached on the surface, refreshed at
+                // most once a second, and only while an animated SVG cue is drawn (#102, #112).
+                if let Some(cd) = *cue {
+                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
+                        self.dark = crate::theme::system_is_dark();
+                        self.accent = crate::theme::accent_color();
+                        self.dark_at = Instant::now();
+                    }
+                    let palette = crate::cue::CuePalette::from_system(self.dark, self.accent);
+                    let svg = crate::cue::evaluate_cue(
+                        &cd.cue,
+                        cd.phase_ms,
+                        palette,
+                        &cd.world_holes,
+                        dpi,
+                    );
+                    let ox = (svg.rect.x - cd.host_origin.0 + off.x) as f32;
+                    let oy = (svg.rect.y - cd.host_origin.1 + off.y) as f32;
+                    let pt = |px: f32, py: f32| {
+                        let mut p = D2D1_ELLIPSE::default().point;
+                        p.X = ox + px;
+                        p.Y = oy + py;
+                        p
+                    };
+                    for elem in &svg.elements {
+                        match elem {
+                            crate::cue::SvgElem::RoundedRect {
+                                x,
+                                y,
+                                w,
+                                h,
+                                rx,
+                                fill,
+                                stroke,
+                            } => {
+                                let rr = D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: ox + *x,
+                                        top: oy + *y,
+                                        right: ox + *x + *w,
+                                        bottom: oy + *y + *h,
+                                    },
+                                    radiusX: *rx,
+                                    radiusY: *rx,
+                                };
+                                if let Some((c, alpha)) = *fill {
+                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
+                                    b.SetOpacity(alpha);
+                                    rt.FillRoundedRectangle(&rr, b);
+                                }
+                                if let Some((c, alpha, sw)) = *stroke {
+                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
+                                    b.SetOpacity(alpha);
+                                    rt.DrawRoundedRectangle(&rr, b, sw, None);
+                                }
+                            }
+                            crate::cue::SvgElem::Line {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                color,
+                                alpha,
+                                width: sw,
+                            } => {
+                                let b = Self::brush_for(&mut self.brushes, rt, *color)?;
+                                b.SetOpacity(*alpha);
+                                rt.DrawLine(pt(*x1, *y1), pt(*x2, *y2), b, *sw, None);
+                            }
+                            crate::cue::SvgElem::Polyline {
+                                points,
+                                color,
+                                alpha,
+                                width: sw,
+                            } => {
+                                if points.len() >= 2 {
+                                    let b = Self::brush_for(&mut self.brushes, rt, *color)?;
+                                    b.SetOpacity(*alpha);
+                                    for seg in points.windows(2) {
+                                        rt.DrawLine(
+                                            pt(seg[0].0, seg[0].1),
+                                            pt(seg[1].0, seg[1].1),
+                                            b,
+                                            *sw,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 let end = rt.EndDraw(None, None);
                 self.context.SetTarget(None);

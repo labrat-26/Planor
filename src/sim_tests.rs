@@ -3832,7 +3832,7 @@ fn edge_resize_suppresses_merge_boxes_and_borders_while_move_shows_them() {
             move_scene
                 .cue
                 .as_ref()
-                .is_none_or(|c| c.kind == crate::cue::CueKind::DropBox)
+                .is_none_or(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. }))
                 && h.engine
                     .drag
                     .as_ref()
@@ -4133,7 +4133,7 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         drag_scene
             .cue
             .as_ref()
-            .is_some_and(|c| c.kind == crate::cue::CueKind::DropBox),
+            .is_some_and(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
         "the pointer is in the neighbour's middle range: the small drop box is drawn"
     );
 
@@ -10133,7 +10133,7 @@ fn drag_hover_never_draws_the_stack_border_before_group_mode() {
         scene
             .cue
             .as_ref()
-            .is_some_and(|c| c.kind == crate::cue::CueKind::DropBox),
+            .is_some_and(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
         "the middle hover shows the small drop box (and no stack border)"
     );
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
@@ -10230,7 +10230,7 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
         assert!(
             zones(&h)
                 .iter()
-                .all(|c| c.kind == crate::cue::CueKind::DropBox),
+                .all(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
             "{mon}: only the small drop box is ever drawn (no cue card)"
         );
         // Press the setting-selected modifier (Shift by default): group mode.
@@ -11472,7 +11472,7 @@ fn drop_box_shows_only_in_the_middle_range_and_clears_on_drop() {
     let boxes = zones(&h);
     assert_eq!(boxes.len(), 1, "one drop box in the middle range");
     let c = &boxes[0];
-    assert_eq!(c.kind, crate::cue::CueKind::DropBox);
+    assert!(matches!(c.kind, crate::cue::CueKind::DropBox { .. }));
     let svg =
         crate::cue::evaluate_cue(c, 0, crate::cue::CuePalette::from_system(true, 0), &[], 1.0);
     assert!(
