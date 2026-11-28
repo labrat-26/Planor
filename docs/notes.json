@@ -1,6 +1,68 @@
 ﻿{
     "schema_version":  1,
     "notes":  [
-
+                  {
+                      "id":  "N-001",
+                      "time_utc":  "21:56:02.769 (local)",
+                      "text":  "broke the top window",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-002",
+                      "time_utc":  "22:01:35.842 (local)",
+                      "text":  "no scroll vertical on the top bottom edge",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-003",
+                      "time_utc":  "22:02:25.039 (local)",
+                      "text":  "windows still slide behind other windows",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-004",
+                      "time_utc":  "22:02:56.952 (local)",
+                      "text":  "window do not want to pair virtically",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-005",
+                      "time_utc":  "22:03:21.079 (local)",
+                      "text":  "I thought i asked for an option to not snap to the focused window",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-006",
+                      "time_utc":  "22:03:53.079 (local)",
+                      "text":  "cannot fling reliably to the right",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-007",
+                      "time_utc":  "22:04:05.235 (local)",
+                      "text":  "cannot fling up",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-008",
+                      "time_utc":  "22:04:34.586 (local)",
+                      "text":  "cannot change focus with the pad",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-009",
+                      "time_utc":  "22:05:03.682 (local)",
+                      "text":  "oprning a minimisez window causes the laptop screen to flicker temp",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  }
               ]
 }
