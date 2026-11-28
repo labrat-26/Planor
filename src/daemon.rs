@@ -2173,8 +2173,26 @@ impl<B: WindowBackend> Engine<B> {
             } else {
                 None
             };
-            // #111: four-finger movement stays on its starting monitor; only a qualifying fling crosses.
+            // A swipe that starts across the strip axis is still recognised when a monitor lies that way, so a
+            // flick up/down/left/right reaches it; the carry stays on the axis (pad_move zeroes the cross travel)
+            // while the raw finger travel feeds the fling.
             self.gesture.cross_ok = (false, false);
+            if let Some(h) = self.gesture.axis_lock {
+                let fg = self.backend.foreground();
+                let home = self
+                    .owning(fg)
+                    .or_else(|| self.key())
+                    .and_then(|k| self.displays.iter().find(|m| m.0 == k.1).map(|m| m.2));
+                if let Some(b) = home {
+                    let bounds = self.displays.iter().map(|m| m.2).collect::<Vec<_>>();
+                    let has = |dx, dy| planor::fling_target(b, &bounds, dx, dy).is_some();
+                    self.gesture.cross_ok = if h {
+                        (has(0, -1), has(0, 1))
+                    } else {
+                        (has(-1, 0), has(1, 0))
+                    };
+                }
+            }
             self.gesture.monitor_rays = Vec::new();
         }
         let swipe = self
@@ -3096,24 +3114,9 @@ impl<B: WindowBackend> Engine<B> {
             let dest = current
                 .and_then(|n| self.displays.iter().position(|m| m.0 == n))
                 .and_then(|i| {
-                    // The dominant axis first; a clearly diagonal fling (secondary >= 1/3 of the dominant) may
-                    // use the other axis. A monitor touching only at a corner or across a gap stays unreachable.
-                    planor::connected_adjacent(bounds[i], &bounds, dx, dy).or_else(|| {
-                        let (minor, major) = if dx != 0 {
-                            (vy.abs(), vx.abs())
-                        } else {
-                            (vx.abs(), vy.abs())
-                        };
-                        if minor * 3.0 < major {
-                            return None;
-                        }
-                        let (sx, sy) = if dx != 0 {
-                            (0, if vy > 0. { 1 } else { -1 })
-                        } else {
-                            (if vx > 0. { 1 } else { -1 }, 0)
-                        };
-                        planor::connected_adjacent(bounds[i], &bounds, sx, sy)
-                    })
+                    // Up, down, left or right only (dominant axis, no diagonals): the monitor on that side nearest the
+                    // centre, even when it is offset or across a small gap.
+                    planor::fling_target(bounds[i], &bounds, dx, dy)
                 });
             if let Some(i) = dest {
                 let b = bounds[i];

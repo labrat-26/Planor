@@ -2268,3 +2268,37 @@ fn group_at_places_the_joiner_by_swipe_direction() {
         assert_eq!(s.active(), Some(1), "joiner becomes active");
     }
 }
+
+/// Fling targets (owner's layout): laptop with a landscape monitor above and a portrait one to the left.
+/// Up, down, left, right only; offset monitors count; several candidates pick the one nearest the centre.
+#[test]
+fn fling_target_covers_every_direction_with_an_offset_layout() {
+    let r = |x, y, w, h| Rect { x, y, w, h };
+    let laptop = r(0, 0, 1920, 1200);
+    let top = r(0, -1440, 2560, 1440);
+    let portrait = r(-1440, -1859, 1440, 2560);
+    let all = [laptop, top, portrait];
+    assert_eq!(fling_target(laptop, &all, 0, -1), Some(1), "laptop up");
+    assert_eq!(fling_target(laptop, &all, -1, 0), Some(2), "laptop left");
+    assert_eq!(fling_target(laptop, &all, 1, 0), None, "laptop right: none");
+    assert_eq!(fling_target(laptop, &all, 0, 1), None, "laptop down: none");
+    assert_eq!(fling_target(top, &all, -1, 0), Some(2), "top left");
+    assert_eq!(fling_target(top, &all, 0, 1), Some(0), "top down");
+    assert_eq!(fling_target(top, &all, 0, -1), None, "top up: none");
+    // Portrait right: laptop and top both qualify; the nearest centre wins.
+    assert_eq!(
+        fling_target(portrait, &all, 1, 0),
+        Some(1),
+        "portrait right"
+    );
+    assert_eq!(
+        fling_target(portrait, &all, -1, 0),
+        None,
+        "portrait left: none"
+    );
+    assert_eq!(
+        fling_target(laptop, &all, 1, 1),
+        None,
+        "diagonals are not directions"
+    );
+}

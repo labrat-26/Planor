@@ -9191,17 +9191,27 @@ fn axis_lock_is_on_by_default_and_listed_in_settings() {
 }
 
 #[test]
-fn axis_lock_ignores_cross_axis_start_and_keeps_carry_on_axis() {
+fn axis_lock_cross_axis_start_picks_up_only_toward_a_monitor_and_keeps_carry_on_axis() {
     // Landscape (MON0, window 101): the strip runs sideways. Portrait (MON2, window 301): up and down.
     for (win, along, cross, name) in [
         (101, (30., 0.), (0., 30.), "landscape"),
         (301, (0., 30.), (30., 0.), "portrait"),
     ] {
-        let (picked, _) = axis_lock_drag(None, win, cross);
-        assert!(
-            !picked,
-            "{name}: a cross-axis start must not pick the window up"
-        );
+        // Cross-axis start: picked up only when a monitor lies that way. The rig is a row (MON2, MON0, MON1):
+        // nothing above or below the landscape MON0, MON0 (and MON1) to the right of the portrait MON2, nothing
+        // to its left.
+        let (toward, away) = if win == 101 {
+            (None, (0., -30.))
+        } else {
+            (Some((30., 0.)), (-30., 0.))
+        };
+        if let Some(t) = toward {
+            let (picked, _) = axis_lock_drag(None, win, t);
+            assert!(picked, "{name}: a swipe toward a monitor is recognised");
+        }
+        let (picked, _) = axis_lock_drag(None, win, away);
+        assert!(!picked, "{name}: a swipe toward nothing is ignored");
+        let _ = cross;
         let (picked, t) = axis_lock_drag(None, win, along);
         assert!(picked, "{name}: an along-axis start picks the window up");
         let (cx, cy) = (t.0.abs(), t.1.abs());

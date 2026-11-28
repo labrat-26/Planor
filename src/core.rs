@@ -1866,3 +1866,31 @@ mod contact_frame_tests {
         assert_eq!(rec.packet(1, []), Some(vec![]));
     }
 }
+
+/// Monitor a fling in direction `(dx, dy)` (unit axis step) throws a window to: any other monitor lying on
+/// that side of `source` (its rect starts past the source edge, within 2 px of overlap), even offset or across
+/// a small gap. When several qualify, the one whose centre is nearest the source centre wins.
+pub fn fling_target(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize> {
+    let sc = (
+        source.x as f64 + source.w as f64 / 2.,
+        source.y as f64 + source.h as f64 / 2.,
+    );
+    others
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b != source)
+        .filter(|(_, b)| match (dx, dy) {
+            (1, 0) => b.x >= source.x + source.w - 2,
+            (-1, 0) => b.x + b.w <= source.x + 2,
+            (0, 1) => b.y >= source.y + source.h - 2,
+            (0, -1) => b.y + b.h <= source.y + 2,
+            _ => false,
+        })
+        .map(|(i, b)| {
+            let c = (b.x as f64 + b.w as f64 / 2., b.y as f64 + b.h as f64 / 2.);
+            let d = (c.0 - sc.0).powi(2) + (c.1 - sc.1).powi(2);
+            ((d * 1000.) as i64, i)
+        })
+        .min()
+        .map(|(_, i)| i)
+}
