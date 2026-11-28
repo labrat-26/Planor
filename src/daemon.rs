@@ -2973,6 +2973,17 @@ impl<B: WindowBackend> Engine<B> {
             let raw_perp = if home_horizontal { raw_dy } else { raw_dx };
             match d.phase {
                 DragPhase::MiddlePreview { target, .. } => {
+                    // A swipe across the strip is mostly perpendicular but the fingers drift along it; letting
+                    // that drift carry the window moves it out of the preview range before the swipe commits
+                    // (Win+W "cant pair"). While the cross travel leads, the along-axis carry is held.
+                    let raw_along = if home_horizontal { raw_dx } else { raw_dy };
+                    if raw_perp.abs() >= raw_along.abs() {
+                        if home_horizontal {
+                            dx = 0.;
+                        } else {
+                            dy = 0.;
+                        }
+                    }
                     d.pad_perp_accum += raw_perp;
                     if d.pad_perp_accum.abs() >= perp_thresh {
                         let dir = if d.pad_perp_accum < 0.0 { -1 } else { 1 };

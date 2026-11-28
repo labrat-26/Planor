@@ -11245,3 +11245,64 @@ fn pad_perpendicular_swipe_groups_on_a_portrait_monitor() {
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
 }
+
+/// Win+W "cant pair" x3: the owner's fingers drift along the strip while swiping across it. A perpendicular
+/// swipe with along-axis drift (landscape and portrait) must still commit group mode.
+#[test]
+fn pad_perpendicular_swipe_with_along_axis_drift_still_groups() {
+    for (win, horizontal) in [(101, true), (301, false)] {
+        let mut cfg = note_cfg();
+        cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+        cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        focus(&mut h, win);
+        let (mut x, mut y) = (500., 500.);
+        h.engine.event(Event::Contacts(four(x, y)));
+        let mut seen_preview = false;
+        for _ in 0..200 {
+            if horizontal {
+                x += 8.;
+            } else {
+                y += 8.;
+            }
+            h.engine.event(Event::Contacts(four(x, y)));
+            h.engine.tick().unwrap();
+            if matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddlePreview { .. })
+            ) {
+                seen_preview = true;
+                break;
+            }
+        }
+        assert!(seen_preview, "{win}: preview reached: {:?}", phase(&h));
+        let mut grouped = false;
+        for _ in 0..60 {
+            // 8 across, 3 along (the drift), both signs of drift tried in turn.
+            if horizontal {
+                y -= 4.;
+                x -= 2.;
+            } else {
+                x -= 4.;
+                y -= 2.;
+            }
+            h.engine.event(Event::Contacts(four(x, y)));
+            h.engine.tick().unwrap();
+            if matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ) {
+                grouped = true;
+                break;
+            }
+        }
+        assert!(
+            grouped,
+            "{win}: a drifting perpendicular swipe commits group mode: {:?}",
+            phase(&h)
+        );
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle();
+    }
+}
