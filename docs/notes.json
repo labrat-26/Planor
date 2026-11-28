@@ -2,13 +2,6 @@
     "schema_version":  1,
     "notes":  [
                   {
-                      "id":  "N-004",
-                      "time_utc":  "22:02:56.952 (local)",
-                      "text":  "window do not want to pair virtically",
-                      "status":  "open",
-                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
-                  },
-                  {
                       "id":  "N-006",
                       "time_utc":  "22:03:53.079 (local)",
                       "text":  "cannot fling reliably to the right",

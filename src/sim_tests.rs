@@ -11186,3 +11186,52 @@ fn reveal_on_focus_false_keeps_the_strip_where_it_is() {
     let (b, a, _) = run(true);
     assert_ne!(b, a, "default reveals the off-screen window");
 }
+
+/// Win+W note 220256952 ("window do not want to pair virtically"): on the portrait monitor the strip runs
+/// vertically, so the perpendicular swipe is horizontal and must still commit group mode.
+#[test]
+fn pad_perpendicular_swipe_groups_on_a_portrait_monitor() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 301);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let (x, mut y) = (500., 500.);
+    let mut seen_preview = false;
+    for _ in 0..120 {
+        y += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            seen_preview = true;
+            break;
+        }
+    }
+    assert!(seen_preview, "portrait pad drag previews: {:?}", phase(&h));
+    let mut xx = x;
+    for _ in 0..40 {
+        xx += 8.;
+        h.engine.event(Event::Contacts(four(xx, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ),
+        "horizontal swipe commits group mode on a vertical strip: {:?}",
+        phase(&h)
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
