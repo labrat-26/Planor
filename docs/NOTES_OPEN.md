@@ -13,6 +13,7 @@ Generated from [notes.json](notes.json) via `scripts\notes.ps1 -Generate`. Raw t
 | N-007 | 22:04:05.235 (local) | cannot fling up | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 | N-008 | 22:04:34.586 (local) | cannot change focus with the pad | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 | N-009 | 22:05:03.682 (local) | oprning a minimisez window causes the laptop screen to flicker temp | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
+| N-010 | 22:01:59.852 (local) | broke the top window temporaryl | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 
 ## Fixed (guarded by regression tests)
 

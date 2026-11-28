@@ -63,6 +63,13 @@
                       "text":  "oprning a minimisez window causes the laptop screen to flicker temp",
                       "status":  "open",
                       "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
+                  },
+                  {
+                      "id":  "N-010",
+                      "time_utc":  "22:01:59.852 (local)",
+                      "text":  "broke the top window temporaryl",
+                      "status":  "open",
+                      "note":  "open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry"
                   }
               ]
 }
