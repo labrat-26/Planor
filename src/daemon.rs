@@ -3077,14 +3077,12 @@ impl<B: WindowBackend> Engine<B> {
         let Some(p) = self.pad.take() else { return };
         self.gesture = Default::default();
         let now = Instant::now();
-        let (mut vx, mut vy) = (0., 0.);
-        for (t, dx, dy) in &p.samples {
-            if now.duration_since(*t) <= Duration::from_millis(120) {
-                vx += dx;
-                vy += dy;
-            }
-        }
-        let (vx, vy) = (vx / 0.12, vy / 0.12);
+        let ages: Vec<(f64, f64, f64)> = p
+            .samples
+            .iter()
+            .map(|(t, dx, dy)| (now.duration_since(*t).as_secs_f64(), *dx, *dy))
+            .collect();
+        let (vx, vy) = planor::fling_velocity(&ages);
         self.backend.move_window_async(
             p.id,
             (p.cursor.0 - p.grab.0).round() as i32,

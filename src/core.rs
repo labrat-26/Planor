@@ -1894,3 +1894,19 @@ pub fn fling_target(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<u
         .min()
         .map(|(_, i)| i)
 }
+
+/// Lift-off velocity (units/s) of a flick from `(age_secs, dx, dy)` samples: the travel of the last 120 ms
+/// divided by the time that travel actually took (at least 40 ms), so a short quick flick is not diluted by a
+/// fixed 120 ms divisor.
+pub fn fling_velocity(samples: &[(f64, f64, f64)]) -> (f64, f64) {
+    let (mut vx, mut vy, mut oldest) = (0., 0., None::<f64>);
+    for &(age, dx, dy) in samples {
+        if age <= 0.12 {
+            vx += dx;
+            vy += dy;
+            oldest = Some(oldest.map_or(age, |o: f64| o.max(age)));
+        }
+    }
+    let span = oldest.unwrap_or(0.12).clamp(0.04, 0.12);
+    (vx / span, vy / span)
+}

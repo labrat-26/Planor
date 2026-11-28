@@ -2302,3 +2302,27 @@ fn fling_target_covers_every_direction_with_an_offset_layout() {
         "diagonals are not directions"
     );
 }
+
+/// Win+W "not able to fling down": a 55 ms, 54-unit flick must read as fast (>= 900/s), not 450/s.
+#[test]
+fn short_quick_flick_reads_its_true_speed() {
+    let samples = [
+        (0.055, 0., 10.),
+        (0.04, 0., 14.),
+        (0.02, 0., 16.),
+        (0.005, 0., 14.),
+    ];
+    let (vx, vy) = fling_velocity(&samples);
+    assert_eq!(vx, 0.);
+    assert!(vy >= 900., "short flick speed {vy}");
+    // A slow drag over the whole window stays slow.
+    let slow = [
+        (0.11, 0., 5.),
+        (0.08, 0., 5.),
+        (0.05, 0., 5.),
+        (0.02, 0., 5.),
+    ];
+    assert!(fling_velocity(&slow).1 < 400.);
+    // Samples older than 120 ms never count.
+    assert_eq!(fling_velocity(&[(0.5, 0., 900.)]), (0., 0.));
+}
