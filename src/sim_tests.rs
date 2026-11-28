@@ -11151,3 +11151,38 @@ fn fling_release_onto_another_monitor_commits_immediately_even_before_async_move
     );
     h.stop_clean();
 }
+
+/// Win+W note 220321078: with `reveal_on_focus = false`, focus landing on an off-screen window selects
+/// it without scrolling the strip; the default still reveals it.
+#[test]
+fn reveal_on_focus_false_keeps_the_strip_where_it_is() {
+    let run = |reveal: bool| {
+        let mut cfg = test_cfg();
+        cfg["layout"]["reveal_on_focus"] = toml::Value::Boolean(reveal);
+        let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+            for i in 0..6 {
+                sim.add_window(SimWindow::new(
+                    101 + i,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 900,
+                        h: 1000,
+                    },
+                ));
+            }
+        });
+        focus(&mut h, 101);
+        let before = h.engine.strips[&(1, h.engine.active.clone())].offset;
+        focus(&mut h, 106);
+        let after = h.engine.strips[&(1, h.engine.active.clone())].offset;
+        let active = h.engine.strips[&(1, h.engine.active.clone())].active();
+        h.stop_clean();
+        (before, after, active)
+    };
+    let (b, a, act) = run(false);
+    assert_eq!(act, Some(106), "focus still selects the window");
+    assert_eq!(b, a, "strip did not scroll");
+    let (b, a, _) = run(true);
+    assert_ne!(b, a, "default reveals the off-screen window");
+}

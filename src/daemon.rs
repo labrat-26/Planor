@@ -145,6 +145,7 @@ pub(crate) struct HotCfg {
     pub spawn_on_cursor_monitor: bool,
     pub focus_follows_mouse: bool,
     pub warp_cursor_to_focused: bool,
+    pub reveal_on_focus: bool,
     pub drag_stack_modifier_vk: i32,
     #[allow(dead_code)] // legacy: the cue card that showed the key name was retired
     pub drag_stack_modifier_name: &'static str,
@@ -220,6 +221,7 @@ impl HotCfg {
             spawn_on_cursor_monitor: layout["spawn_on_cursor_monitor"].as_bool() == Some(true),
             focus_follows_mouse: layout["focus_follows_mouse"].as_bool() == Some(true),
             warp_cursor_to_focused: layout["warp_cursor_to_focused"].as_bool() == Some(true),
+            reveal_on_focus: layout["reveal_on_focus"].as_bool() != Some(false),
             drag_stack_modifier_vk: match layout["drag_stack_modifier"].as_str() {
                 Some("Ctrl") => 17,
                 Some("Alt") => 18,
@@ -4079,8 +4081,8 @@ impl<B: WindowBackend> Engine<B> {
                                     .owning(managed_id)
                                     .and_then(|k| self.strips.get(&k))
                                     .is_some_and(|s| s.in_view(managed_id));
-                                if visible {
-                                    // Already on screen (e.g. a click on a visible tile): only move the border.
+                                if visible || !self.hot.reveal_on_focus {
+                                    // Already on screen (or reveal_on_focus is off): only move the border.
                                     self.dirty = true
                                 } else {
                                     self.action = "scroll";

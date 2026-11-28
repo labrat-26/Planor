@@ -22,6 +22,9 @@ spawn_on_cursor_monitor = true
 drag_stack_modifier = "Shift"
 focus_follows_mouse = false
 warp_cursor_to_focused = false
+# Scroll the strip to a window that takes focus while off screen (alt-tab, taskbar, a dialog closing).
+# Off: focus moves to it but the strip stays where it is.
+reveal_on_focus = true
 
 [borders]
 enabled = true
