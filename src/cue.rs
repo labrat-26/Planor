@@ -35,6 +35,8 @@ pub enum CueKind {
     /// Quarter-span directional stack exit (#115).
     /// `trailing`: `false` (left in landscape / up in portrait), `true` (right / down).
     StackExit { trailing: bool },
+    /// A small filled box in the target while the pointer is in its middle range (1/4..3/4): where a drop would land.
+    DropBox,
 }
 
 /// Non-interactive animated SVG guidance cue placed on one monitor's overlay.
@@ -328,6 +330,39 @@ pub fn evaluate_cue(
     dpi: f32,
 ) -> SvgScene {
     let dpi = dpi.clamp(0.5, 4.0);
+    if cue.kind == CueKind::DropBox {
+        // A small filled box centred in the target (owner request: "way smaller", always filled, on the
+        // monitor the window is over). No card, no animation.
+        let t = cue.target_rect.unwrap_or(cue.monitor_area);
+        let side = ((t.w.min(t.h) as f32 / 4.0).max(28.0 * dpi)).round() as i32;
+        let side = side.min(t.w.min(t.h).max(1));
+        let rect = Rect {
+            x: t.x + (t.w - side) / 2,
+            y: t.y + (t.h - side) / 2,
+            w: side,
+            h: side,
+        };
+        return SvgScene {
+            rect,
+            dpi,
+            horizontal: cue.horizontal,
+            input: cue.input,
+            kind: cue.kind,
+            slide_offset: (0.0, 0.0),
+            arrow_vector: (0.0, 0.0),
+            key_label: None,
+            committed: false,
+            elements: vec![SvgElem::RoundedRect {
+                x: 0.0,
+                y: 0.0,
+                w: side as f32,
+                h: side as f32,
+                rx: 8.0 * dpi,
+                fill: Some((palette.accent, 0.55)),
+                stroke: Some((palette.accent, 0.95, (2.0 * dpi).max(1.5))),
+            }],
+        };
+    }
     let rect = place_cue_rect(cue, holes, dpi);
     let w = rect.w as f32;
     let h = rect.h as f32;
@@ -496,6 +531,7 @@ pub fn evaluate_cue(
             );
             ((dx, dy), av)
         }
+        CueKind::DropBox => ((0.0, 0.0), (0.0, 0.0)),
         CueKind::StackExit { trailing } => {
             let dir_f = if trailing { 1.0f32 } else { -1.0f32 };
             let slide = (0.35 + 0.65 * pulse) * 12.0 * dpi;
@@ -610,6 +646,7 @@ pub fn to_svg_xml(scene: &SvgScene) -> String {
         CueKind::StackEntryPreview { .. } => "preview",
         CueKind::StackEntryCommitted { .. } => "committed",
         CueKind::StackExit { .. } => "exit",
+        CueKind::DropBox => "dropbox",
     };
     let input = match scene.input {
         CueInput::Mouse { .. } => "mouse",

@@ -143,6 +143,7 @@ impl SimHarness {
                         update_id,
                         holes,
                         colors,
+                        cue,
                         ..
                     } => {
                         let mut g = desktop_render.0.lock().unwrap();
@@ -150,6 +151,7 @@ impl SimHarness {
                         if let Some(last) = g.scenes.last_mut() {
                             last.holes = holes.to_vec();
                             last.tile_colors = colors;
+                            last.cue = cue;
                         }
                         drop(g);
                         overlay_render.store(update_id, Ordering::Release);
@@ -3827,12 +3829,15 @@ fn edge_resize_suppresses_merge_boxes_and_borders_while_move_shows_them() {
 
         let move_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
         assert!(
-            move_scene.cue.is_none()
+            move_scene
+                .cue
+                .as_ref()
+                .is_none_or(|c| c.kind == crate::cue::CueKind::DropBox)
                 && h.engine
                     .drag
                     .as_ref()
                     .is_some_and(|d| d.target == Some(second_id)),
-            "{mon}: real move aims at the neighbour; the cue only appears after the dwell"
+            "{mon}: real move aims at the neighbour; at most the small drop box shows (no card)"
         );
         h.engine
             .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, first_id));
@@ -4125,8 +4130,11 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         "drag hover scene must be instant so zones match tiles"
     );
     assert!(
-        drag_scene.cue.is_none(),
-        "before 1/4 of the neighbour no cue is drawn"
+        drag_scene
+            .cue
+            .as_ref()
+            .is_some_and(|c| c.kind == crate::cue::CueKind::DropBox),
+        "the pointer is in the neighbour's middle range: the small drop box is drawn"
     );
 
     // Assert EVERY zone against its own tile's clipped rect and stack_zone(...).
@@ -10121,7 +10129,13 @@ fn drag_hover_never_draws_the_stack_border_before_group_mode() {
         "target window must not show the stack border during a plain middle hover (no modifier)"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-    assert!(scene.cue.is_none(), "no cue card exists any more");
+    assert!(
+        scene
+            .cue
+            .as_ref()
+            .is_some_and(|c| c.kind == crate::cue::CueKind::DropBox),
+        "the middle hover shows the small drop box (and no stack border)"
+    );
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
 }
@@ -10213,7 +10227,12 @@ fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
             h.engine.hot.stacked_color,
             "{mon}: a tile-beside preview never shows the stack border"
         );
-        assert!(zones(&h).is_empty(), "{mon}: no cue card exists any more");
+        assert!(
+            zones(&h)
+                .iter()
+                .all(|c| c.kind == crate::cue::CueKind::DropBox),
+            "{mon}: only the small drop box is ever drawn (no cue card)"
+        );
         // Press the setting-selected modifier (Shift by default): group mode.
         h.desktop.0.lock().unwrap().keys_down.insert(0x10);
         h.engine.tick().unwrap();
@@ -11422,4 +11441,77 @@ fn stack_trigger_requests_the_drag_reflow_animation_at_once() {
     drop(g);
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
+}
+
+/// Owner request: a small filled drop box shows in the target while the pointer is between 1/4 and 3/4 of it,
+/// not before 1/4, and never after the drop.
+#[test]
+fn drop_box_shows_only_in_the_middle_range_and_clears_on_drop() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let b = visible_rect(
+        &h,
+        102,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+    );
+    let at = |frac: f64| (b.x + (b.w as f64 * frac) as i32, b.y + b.h / 2);
+    // Before a quarter: no box.
+    mouse_hold(&mut h, 101, at(0.1));
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(zones(&h).is_empty(), "no drop box before 1/4");
+    // Middle range: the small box, inside the target and much smaller than it.
+    h.desktop.0.lock().unwrap().cursor = at(0.5);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let boxes = zones(&h);
+    assert_eq!(boxes.len(), 1, "one drop box in the middle range");
+    let c = &boxes[0];
+    assert_eq!(c.kind, crate::cue::CueKind::DropBox);
+    let svg =
+        crate::cue::evaluate_cue(c, 0, crate::cue::CuePalette::from_system(true, 0), &[], 1.0);
+    assert!(
+        svg.rect.w * 2 <= b.w && svg.rect.h * 2 <= b.h,
+        "the box is way smaller than the target: {:?} vs {b:?}",
+        svg.rect
+    );
+    // Drop: no box left behind.
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, 101);
+    assert!(zones(&h).is_empty(), "no drop box after the drop");
+    h.stop_clean();
+}
+
+/// Owner request: when the window crosses to another monitor the box leaves the first one and appears on the other.
+#[test]
+fn drop_box_follows_the_window_to_the_other_monitor() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let b = visible_rect(
+        &h,
+        202,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+    );
+    mouse_hold(&mut h, 101, (b.x + b.w / 2, b.y + b.h / 2));
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let boxes = zones(&h);
+    assert!(
+        boxes.iter().all(|c| c.monitor == "MON1"),
+        "the box is only on the monitor the window is over: {:?}",
+        boxes.iter().map(|c| c.monitor.clone()).collect::<Vec<_>>()
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
 }

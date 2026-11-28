@@ -1799,7 +1799,7 @@ impl<B: WindowBackend> Engine<B> {
         // and compute non-mutating preview strips for vacancy closure / preview shift / immediate stack.
         let stack_peek = hot.stack_peek_px.unwrap_or(DEFAULT_STACK_PEEK);
         let mut preview_strips: HashMap<Key, Strip> = HashMap::new();
-        let cue: Option<crate::cue::GestureCue> = None;
+        let mut cue: Option<crate::cue::GestureCue> = None;
         if let Some(d) = self.drag.as_mut()
             && d.moved
             && !d.resizing
@@ -1808,9 +1808,39 @@ impl<B: WindowBackend> Engine<B> {
             let dest_key = d.destination.clone().unwrap_or_else(|| d.key.clone());
             let _held_rect = self.backend.frame(d.id).unwrap_or(d.original);
 
-            // 4.8 follow-up: no cue card. Only the target's mauve border marks a drop that would stack.
+            // No cue card. The target gets a small filled drop box in the middle range and, in group mode, a mauve border.
             d.cue_sig = None;
             d.cue_started_at = None;
+            // The drop box: a small filled box in the target while the pointer is between 1/4 and 3/4 of it,
+            // on the monitor the window is over (it moves to the next monitor when the window crosses).
+            if let DragPhase::MiddleWaiting { target, .. } | DragPhase::MiddlePreview { target, .. } =
+                d.phase
+                && Some(dest_key.0) == self.desktop
+                && let Some(dest_strip) = self.strips.get(&dest_key)
+                && let Some(target_rect) = dest_strip
+                    .rects(stack_peek)
+                    .into_iter()
+                    .find(|(w, _)| *w == target)
+                    .and_then(|(_, r)| clip(r, dest_strip.area))
+            {
+                let input = if d.pad_drag {
+                    crate::cue::CueInput::Trackpad
+                } else {
+                    crate::cue::CueInput::Mouse {
+                        modifier: hot.drag_stack_modifier_name,
+                    }
+                };
+                cue = Some(crate::cue::GestureCue {
+                    monitor: dest_key.1.clone(),
+                    monitor_area: dest_strip.area,
+                    held_rect: _held_rect,
+                    target_rect: Some(target_rect),
+                    horizontal: dest_strip.area.horizontal(),
+                    input,
+                    kind: crate::cue::CueKind::DropBox,
+                    started_at: Instant::now(),
+                });
+            }
 
             // Compute non-mutating preview strips without touching authoritative `self.strips`.
             let preview_active = matches!(
