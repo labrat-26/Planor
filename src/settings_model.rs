@@ -192,7 +192,8 @@ impl Model {
                 } else {
                     1
                 };
-                toml::Value::Integer((n + dir * unit).max(0))
+                let max = crate::int_max(e.key.as_str());
+                toml::Value::Integer((n + dir * unit).clamp(0, max))
             }
             (toml::Value::Float(f), _) => {
                 let unit = if f <= 1. { 0.05 } else { 0.5 };
@@ -218,6 +219,8 @@ impl Model {
 
 pub(crate) fn range_hint(e: &Entry) -> &'static str {
     match &e.default {
+        toml::Value::Integer(_) if e.key == "drag_dwell_ms" => "0 to 5000 ms",
+        toml::Value::Integer(_) if e.key == "drag_edge_scroll_percent" => "0 to 40 %",
         toml::Value::Integer(_) => "0 to 100000",
         toml::Value::Float(_) if e.key == "default_tile_share" => "above 0, at most 1",
         toml::Value::Float(_) => "above 0",
@@ -447,10 +450,10 @@ mod tests {
             !m.sections.contains(&"rules".to_string()),
             "[[rules]] has its own editor"
         );
-        let z = idx(&m, "layout", "stack_zone_percent");
-        assert_eq!(m.value(z), toml::Value::Integer(50));
+        let z = idx(&m, "layout", "drag_dwell_ms");
+        assert_eq!(m.value(z), toml::Value::Integer(250));
         assert!(
-            m.entries[z].help.contains("stack zone"),
+            m.entries[z].help.contains("dwell"),
             "help: {}",
             m.entries[z].help
         );
@@ -508,7 +511,7 @@ mod tests {
     fn a_user_file_with_only_a_few_keys_and_an_invalid_one() {
         let m = Model::from_text(
             Path::new("p.toml"),
-            "[layout]\ngap_px = 12\nstack_zone_percent = -3\n",
+            "[layout]\ngap_px = 12\ndrag_dwell_ms = -3\n",
         )
         .unwrap();
         assert_eq!(
@@ -516,8 +519,8 @@ mod tests {
             toml::Value::Integer(12)
         );
         assert_eq!(
-            m.value(idx(&m, "layout", "stack_zone_percent")),
-            toml::Value::Integer(50),
+            m.value(idx(&m, "layout", "drag_dwell_ms")),
+            toml::Value::Integer(250),
             "invalid -> default"
         );
         assert_eq!(

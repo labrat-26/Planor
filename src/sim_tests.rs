@@ -143,6 +143,7 @@ impl SimHarness {
                         update_id,
                         holes,
                         colors,
+                        cue,
                         ..
                     } => {
                         let mut g = desktop_render.0.lock().unwrap();
@@ -150,6 +151,7 @@ impl SimHarness {
                         if let Some(last) = g.scenes.last_mut() {
                             last.holes = holes.to_vec();
                             last.tile_colors = colors;
+                            last.cue = cue;
                         }
                         drop(g);
                         overlay_render.store(update_id, Ordering::Release);
@@ -1284,7 +1286,7 @@ fn to_start(h: &mut SimHarness, mon: &str) {
     );
 }
 
-fn zones(h: &SimHarness) -> Vec<render::Zone> {
+fn zones(h: &SimHarness) -> Vec<crate::cue::GestureCue> {
     h.desktop
         .0
         .lock()
@@ -1292,8 +1294,23 @@ fn zones(h: &SimHarness) -> Vec<render::Zone> {
         .scenes
         .last()
         .unwrap()
-        .zones
+        .cue
         .clone()
+        .into_iter()
+        .collect()
+}
+/// Visible (strip-area clipped) rect of a window in its strip's layout: where a drag aims at it now that
+/// drop zones are gone (#112). `work` is unused beyond documenting the monitor.
+fn visible_rect(h: &SimHarness, id: isize, _work: Rect) -> Rect {
+    let (key, s) = h
+        .engine
+        .strips
+        .iter()
+        .find(|(_, s)| s.locate(id).is_some())
+        .expect("window is managed");
+    let _ = key;
+    let r = s.rects(96).into_iter().find(|x| x.0 == id).unwrap().1;
+    crate::daemon::clip(r, s.area).expect("window is visible in its strip")
 }
 
 #[test]
@@ -1648,9 +1665,10 @@ fn drop_now(h: &mut SimHarness, id: isize) {
 }
 
 #[test]
-fn n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientations() {
+fn n012_mouse_drop_tiles_beside_past_three_quarters_and_stacks_only_with_the_modifier() {
     for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
         let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
         let key = (1, mon.to_string());
         focus(&mut h, ids[0]);
         let visible: Vec<isize> = ids
@@ -1671,19 +1689,15 @@ fn n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientat
                 .collect::<Vec<_>>()
         };
         let before = order(&h);
-        // Off-centre on b (outside the middle half, an eighth of the way in): swap. Nothing dodges while dragging.
+        // Past 3/4 of b from its leading edge: it tiles after b, no drop zone, no group.
         let rb = h.rect(b);
-        mouse_drag(&mut h, a, (rb.x + rb.w / 8, rb.y + rb.h / 8));
-        assert_eq!(
-            h.engine.drag.as_ref().map(|d| d.mode),
-            Some(planor::Drag::Swap),
-            "{mon}: off-centre is a swap"
-        );
-        let z = zones(&h);
-        assert!(!z.is_empty(), "{mon}: stack zones are drawn while dragging");
+        mouse_drag(&mut h, a, (rb.x + rb.w * 19 / 25, rb.y + rb.h * 19 / 25));
         assert!(
-            z.iter().all(|z| z.monitor == mon),
-            "{mon}: zones only on the monitor under the cursor"
+            matches!(
+                h.engine.drag.as_ref().map(|d| d.phase),
+                Some(crate::daemon::DragPhase::PastThreeQuarters { target, after: true }) if target == b
+            ),
+            "{mon}: past 3/4 targets the far side of b"
         );
         assert_eq!(h.rect(b), rb, "{mon}: the target does not dodge");
         drop_now(&mut h, a);
@@ -1692,24 +1706,58 @@ fn n012_drop_on_a_window_swaps_and_the_small_centre_zone_groups_on_both_orientat
             before.iter().position(|&x| x == a).unwrap(),
             before.iter().position(|&x| x == b).unwrap(),
         );
-        let mut want = before.clone();
-        want.swap(ia, ib);
-        assert_eq!(after, want, "{mon}: a and b exchanged places");
-        assert!(zones(&h).is_empty(), "{mon}: zones gone after the drop");
-        // Dead centre of b: stack.
-        let rb = h.rect(b);
-        mouse_drag(&mut h, a, (rb.x + rb.w / 2, rb.y + rb.h / 2));
-        assert_eq!(
-            h.engine.drag.as_ref().map(|d| d.mode),
-            Some(planor::Drag::Stack),
-            "{mon}: centre zone groups"
-        );
-        drop_now(&mut h, a);
-        let s = &h.engine.strips[&key];
-        let (i, _) = s.locate(a).unwrap();
         assert!(
-            s.columns[i].members.contains(&b),
-            "{mon}: a joined b's group"
+            after.iter().position(|&x| x == a).unwrap()
+                > after.iter().position(|&x| x == b).unwrap()
+                && ia < ib,
+            "{mon}: a moved after b: {before:?} -> {after:?}"
+        );
+        assert!(zones(&h).is_empty(), "{mon}: cue gone after the drop");
+        // Middle of b without the modifier: tiles on the midpoint side, never stacks.
+        let ra = h.rect(a);
+        let rb = h.rect(b);
+        mouse_drag(&mut h, b, (ra.x + ra.w / 2, ra.y + ra.h / 2));
+        drop_now(&mut h, b);
+        let s = &h.engine.strips[&key];
+        let (i, _) = s.locate(b).unwrap();
+        assert!(
+            !s.columns[i].members.contains(&a),
+            "{mon}: no modifier -> no stack"
+        );
+        let _ = rb;
+        // Middle of the neighbour with the modifier held: stack.
+        let ra = h.rect(a);
+        let rb = h.rect(b);
+        let (mover, target) = if ra.x + ra.y <= rb.x + rb.y {
+            (b, a)
+        } else {
+            (a, b)
+        };
+        let rt = h.rect(target);
+        h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+        mouse_drag(&mut h, mover, (rt.x + rt.w / 2, rt.y + rt.h / 2));
+        h.engine.tick().unwrap();
+        // A key held since before the drag does not count (edge semantics): release, then press afresh.
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+        h.engine.tick().unwrap();
+        h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+        h.engine.tick().unwrap();
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                h.engine.drag.as_ref().map(|d| d.phase),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ),
+            "{mon}: modifier after dwell activates group mode: {:?}",
+            h.engine.drag.as_ref().map(|d| d.phase)
+        );
+        drop_now(&mut h, mover);
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+        let s = &h.engine.strips[&key];
+        let (i, _) = s.locate(mover).unwrap();
+        assert!(
+            s.columns[i].members.contains(&target),
+            "{mon}: mover joined the target's group"
         );
         h.stop_clean();
     }
@@ -1773,15 +1821,21 @@ fn n012_drop_across_monitors_goes_beside_and_the_zones_follow_the_cursor() {
     let target = h.engine.strips[&port].columns[0].members[0];
     let rt = h.rect(target);
     mouse_drag(&mut h, 101, (rt.x + rt.w / 8, rt.y + rt.h / 8));
-    let z = zones(&h);
-    assert!(
-        !z.is_empty() && z.iter().all(|z| z.monitor == "MON2"),
-        "highlights moved to the portrait monitor: {z:?}"
-    );
     assert_eq!(
-        h.engine.drag.as_ref().map(|d| d.mode),
-        Some(planor::Drag::Before),
-        "from another monitor: beside, no swap"
+        h.engine.drag.as_ref().and_then(|d| d.destination.clone()),
+        Some(port.clone()),
+        "the drag follows the cursor onto the portrait monitor"
+    );
+    assert!(
+        zones(&h).iter().all(|c| c.monitor == "MON2"),
+        "any cue is on MON2"
+    );
+    assert!(
+        matches!(
+            h.engine.drag.as_ref().map(|d| d.phase),
+            Some(crate::daemon::DragPhase::BeforeQuarter { .. })
+        ),
+        "from another monitor: still before 1/4, no swap, no stack"
     );
     drop_now(&mut h, 101);
     assert_eq!(
@@ -3730,7 +3784,7 @@ fn edge_resize_suppresses_merge_boxes_and_borders_while_move_shows_them() {
 
         let last = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
         assert!(
-            last.zones.is_empty(),
+            last.cue.is_none(),
             "{mon}: resize must not emit merge zones"
         );
         assert!(
@@ -3775,18 +3829,28 @@ fn edge_resize_suppresses_merge_boxes_and_borders_while_move_shows_them() {
 
         let move_scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
         assert!(
-            !move_scene.zones.is_empty(),
-            "{mon}: real move must show merge zones"
+            move_scene
+                .cue
+                .as_ref()
+                .is_none_or(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. }))
+                && h.engine
+                    .drag
+                    .as_ref()
+                    .is_some_and(|d| d.target == Some(second_id)),
+            "{mon}: real move aims at the neighbour; at most the small drop box shows (no card)"
         );
         h.engine
             .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, first_id));
         h.settle();
+        let s = &h.engine.strips[&key];
         assert_eq!(
-            h.engine.strips[&key].locate(first_id).unwrap().0,
-            h.engine.strips[&key].locate(second_id).unwrap().0,
-            "{mon}: dropping inside stack zone must group windows"
+            s.locate(first_id)
+                .unwrap()
+                .0
+                .abs_diff(s.locate(second_id).unwrap().0),
+            1,
+            "{mon}: dropping mid-neighbour without the modifier tiles beside it, never stacks"
         );
-        h.stop_clean();
     }
 }
 
@@ -3858,7 +3922,7 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
         );
         assert!(
             h.engine.instant,
-            "edge-scroll must mark scene instant so drop boxes never lag behind animating windows"
+            "edge-scroll is placed at once: a 70 ms ease restarted every step lagged and pulsed (owner notes)"
         );
         // Calling tick() again immediately (<30ms) must be rate-limited so left windows aren't flung away.
         h.engine.tick().unwrap();
@@ -3868,24 +3932,33 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
         );
         h.settle_quiet();
 
-        // Verify left window (101) has a drop zone inside its visible rect, and dropping there groups 103 with 101.
-        let zones = crate::daemon::drop_zones(&h.engine.strips[&key], 96, 50, 103);
-        let left_zone = zones
-            .iter()
-            .find(|(id, _, _)| *id == 101)
-            .expect("left window 101 must have a drop zone");
-        assert!(left_zone.2.x >= 0 && left_zone.2.x + left_zone.2.w <= 1920);
-        h.desktop.0.lock().unwrap().cursor = (
-            left_zone.2.x + left_zone.2.w / 2,
-            left_zone.2.y + left_zone.2.h / 2,
+        // The left window (101) is partly visible; aim at its visible rect (no drop zones, #112).
+        let left_zone = visible_rect(
+            &h,
+            101,
+            Rect {
+                x: 0,
+                y: 0,
+                w: 1920,
+                h: 1140,
+            },
         );
+        assert!(
+            left_zone.x >= 0 && left_zone.x + left_zone.w <= 1920,
+            "101 visible rect {left_zone:?} rect {:?} offset {}",
+            h.rect(101),
+            h.engine.strips[&key].offset
+        );
+        h.desktop.0.lock().unwrap().cursor =
+            (left_zone.x + left_zone.w / 2, left_zone.y + left_zone.h / 2);
         h.engine.tick().unwrap();
         h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 103));
         h.settle();
+        let s = &h.engine.strips[&key];
         assert_eq!(
-            h.engine.strips[&key].locate(103).unwrap().0,
-            h.engine.strips[&key].locate(101).unwrap().0,
-            "dropping 103 into scrolled left window 101's drop zone must group them"
+            s.locate(103).unwrap().0.abs_diff(s.locate(101).unwrap().0),
+            1,
+            "dropping 103 over scrolled left window 101 (no modifier) must tile it beside 101, never stack"
         );
         h.stop_clean();
     }
@@ -3900,14 +3973,19 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
         h.settle();
 
         let r301 = h.rect(301);
-        let zones = crate::daemon::drop_zones(&h.engine.strips[&key], 96, 50, 301);
-        let bottom_zone = zones
-            .iter()
-            .find(|(id, _, _)| *id == 303)
-            .expect("bottom window 303 on portrait monitor must have a drop zone");
+        let bottom_zone = visible_rect(
+            &h,
+            303,
+            Rect {
+                x: -1440,
+                y: 0,
+                w: 1440,
+                h: 2512,
+            },
+        );
         assert!(
-            bottom_zone.2.y >= 0 && bottom_zone.2.y + bottom_zone.2.h <= 2512,
-            "portrait bottom drop zone must stay within monitor work area"
+            bottom_zone.y >= 0 && bottom_zone.y + bottom_zone.h <= 2512,
+            "portrait bottom window must stay within monitor work area"
         );
 
         h.engine
@@ -3920,17 +3998,18 @@ fn drag_to_group_with_left_and_bottom_windows_while_scrolled_syncs_drop_zones() 
                 ..r301
             };
             d.cursor = (
-                bottom_zone.2.x + bottom_zone.2.w / 2,
-                bottom_zone.2.y + bottom_zone.2.h / 2,
+                bottom_zone.x + bottom_zone.w / 2,
+                bottom_zone.y + bottom_zone.h / 2,
             );
         }
         h.engine.tick().unwrap();
         h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
         h.settle();
+        let s = &h.engine.strips[&key];
         assert_eq!(
-            h.engine.strips[&key].locate(301).unwrap().0,
-            h.engine.strips[&key].locate(303).unwrap().0,
-            "dropping 301 into bottom window 303's drop zone on portrait monitor must group them"
+            s.locate(301).unwrap().0.abs_diff(s.locate(303).unwrap().0),
+            1,
+            "dropping 301 over bottom window 303 (no modifier) tiles beside it on the portrait monitor"
         );
         h.stop_clean();
     }
@@ -4050,10 +4129,12 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         drag_scene.duration, 0,
         "drag hover scene must be instant so zones match tiles"
     );
-    assert_eq!(
-        drag_scene.zones.len(),
-        2,
-        "both visible neighbours (1376768 and 11339466) show zones"
+    assert!(
+        drag_scene
+            .cue
+            .as_ref()
+            .is_some_and(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
+        "the pointer is in the neighbour's middle range: the small drop box is drawn"
     );
 
     // Assert EVERY zone against its own tile's clipped rect and stack_zone(...).
@@ -4065,15 +4146,6 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
             .map(|&(_, r)| r)
             .unwrap()
     };
-    let clip_to_work = |r: Rect| {
-        let x = r.x.max(0);
-        let y = r.y.max(0);
-        let w = (r.x + r.w).min(1920) - x;
-        let h = (r.y + r.h).min(1140) - y;
-        Rect { x, y, w, h }
-    };
-    let expected_left_zone = planor::stack_zone(clip_to_work(tile_rect(1376768)), 50, true);
-    let expected_right_zone = planor::stack_zone(clip_to_work(tile_rect(11339466)), 50, true);
     assert_eq!(
         tile_rect(1376768),
         Rect {
@@ -4092,11 +4164,6 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
             h: 1140
         }
     );
-    assert_eq!(
-        drag_scene.zones.iter().map(|z| z.rect).collect::<Vec<_>>(),
-        vec![expected_left_zone, expected_right_zone],
-        "each drop zone must match stack_zone(clip(own_tile, work_area), 50) exactly"
-    );
 
     // 1. Exact recorded drop from bundle 225940320: cursor near (1401, 633) over 11339466 (471..1920).
     h.desktop.0.lock().unwrap().cursor = (1401, 633);
@@ -4109,13 +4176,13 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         let s = &h.engine.strips[&key];
         assert_eq!(
             s.locate(26216776).unwrap().0,
-            1,
-            "recorded drop at (1401,633) groups onto 11339466 at col 1"
+            2,
+            "recorded drop at (1401,633): without a perpendicular swipe it tiles after 11339466, never stacks"
         );
         assert_eq!(s.locate(11339466).unwrap().0, 1);
         assert_eq!(
-            s.offset, 1926,
-            "full-width 1920px group reveals at offset 1926 so focused window is unparked"
+            s.offset, 3852,
+            "tiled full-width 1920px window at col 2 is revealed at offset 3852"
         );
         assert_eq!(
             s.locate(1376768).unwrap().0,
@@ -4124,10 +4191,12 @@ fn repro_225940320_pad_drag_zones_match_drawn_tiles_and_left_drop_groups() {
         );
     }
     // Scrolling/focusing left immediately restores the left window at x = 0.
-    h.cmd(Command::Key {
-        name: "focus_left".into(),
-    });
-    h.settle();
+    for _ in 0..2 {
+        h.cmd(Command::Key {
+            name: "focus_left".into(),
+        });
+        h.settle();
+    }
     assert_eq!(h.engine.strips[&key].offset, 0);
     assert_eq!(
         h.rect(1376768),
@@ -4225,8 +4294,8 @@ fn fast_tick_drives_smooth_refresh_paced_edge_scroll() {
     let speed = total_px / elapsed_s;
     assert_eq!(steps, 4);
     assert!(
-        (500.0..=1300.0).contains(&speed),
-        "fast_tick edge-scroll speed should be ~900 px/s (got {speed:.1} px/s over {elapsed_s:.3}s)"
+        (150.0..=1300.0).contains(&speed),
+        "edge-scroll eases in: slower than the 1400 px/s cap over the first ~80 ms (got {speed:.1} px/s over {elapsed_s:.3}s)"
     );
 
     // Moving cursor away from the edge disarms wants_fast_tick().
@@ -5174,7 +5243,7 @@ fn snapped_drag_restore_and_cross_dpi_and_back_do_not_resize() {
             w: r1.w - 180,
             h: r1.h - 200,
         };
-        d.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+        d.cursor = (r2.x + r2.w * 19 / 20, r2.y + r2.h / 2);
     }
     h.engine.tick().unwrap();
     assert!(
@@ -5186,10 +5255,11 @@ fn snapped_drag_restore_and_cross_dpi_and_back_do_not_resize() {
     );
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
+    let s = &h.engine.strips[&key0];
     assert_eq!(
-        h.engine.strips[&key0].locate(101).unwrap().0,
-        h.engine.strips[&key0].locate(102).unwrap().0,
-        "snapped drag-restore over neighbour stack zone must group, not resize"
+        s.locate(102).unwrap().0 + 1,
+        s.locate(101).unwrap().0,
+        "snapped drag-restore dropped past 3/4 of 102 must tile after it, not resize"
     );
     h.stop_clean();
 
@@ -5229,14 +5299,15 @@ fn snapped_drag_restore_and_cross_dpi_and_back_do_not_resize() {
             w: r1.w + 240,
             h: r1.h + 100,
         };
-        d.cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
+        d.cursor = (r2.x + r2.w * 19 / 20, r2.y + r2.h / 2);
     }
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
+    let s = &h.engine.strips[&key0];
     assert_eq!(
-        h.engine.strips[&key0].locate(101).unwrap().0,
-        h.engine.strips[&key0].locate(102).unwrap().0,
-        "cross-DPI-and-back drop must group, not resize"
+        s.locate(101).unwrap().0 + 1,
+        s.locate(102).unwrap().0,
+        "cross-DPI-and-back drop must tile before 102 (entered from the trailing edge), not resize"
     );
     h.stop_clean();
 }
@@ -5379,12 +5450,10 @@ fn same_monitor_drop_animates_and_release_near_edge_does_not_scroll() {
             ..r102
         };
         h.engine.tick().unwrap();
-        // Place cursor at x=10 (within 48px of left edge) and release immediately.
-        // Hold Shift (drag_stack_modifier_vk = 0x10) so the drop cancels cleanly and only edge-scroll could change offset.
+        // Place cursor in the leading 10% edge zone but below every tile (no drop target) and release immediately.
         {
             let mut d = h.desktop.0.lock().unwrap();
-            d.cursor = (10, 500);
-            d.keys_down.insert(0x10);
+            d.cursor = (10, 1175);
         }
         let offset_before_release = h.engine.strips[&key].offset;
         h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
@@ -6182,7 +6251,7 @@ fn issue_17_edge_resize_does_not_show_green_drop_target_border_or_zones() {
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
+        h.engine.hot.stacked_color,
         "edge resize must not draw green drop-target border on neighbor"
     );
     assert_eq!(h.engine.drag.as_ref().map(|d| d.resizing), Some(true));
@@ -6785,7 +6854,7 @@ fn issue_17_dpi_change_drag_restore_pad_drag_fling_and_corner_resizes() {
                 w: r1.w - 150,
                 h: r1.h - 200,
             };
-            g.cursor = (r2.x + r2.w / 8, r2.y + r2.h / 8);
+            g.cursor = (r2.x + r2.w * 7 / 8, r2.y + r2.h / 2);
         }
         h.engine.tick().unwrap();
         h.settle_quiet();
@@ -6979,7 +7048,7 @@ fn issue_17_tab_tearoff_and_unended_drag_clear_drag_session() {
             zones(&h).is_empty(),
             "green drop zones must clear after mismatched MOVESIZEEND"
         );
-        assert_ne!(tile_color(&h, 102), h.engine.hot.drop_target_color);
+        assert_ne!(tile_color(&h, 102), h.engine.hot.stacked_color);
         h.stop_clean();
     }
 
@@ -7028,7 +7097,7 @@ fn issue_17_tab_tearoff_and_unended_drag_clear_drag_session() {
         h.engine.tick().unwrap();
         h.settle_quiet();
         assert!(h.engine.drag.is_some());
-        assert!(!zones(&h).is_empty());
+        assert!(h.engine.drag.as_ref().is_some_and(|d| d.target.is_some()));
 
         // Release VK_LBUTTON without ever delivering EVENT_SYSTEM_MOVESIZEEND.
         h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
@@ -7204,15 +7273,7 @@ fn exercise_release_tick(sample_previous: bool, hook: HookRelease) {
     let home = h.rect(101);
     let a = h.rect(102);
     let key = (1, "MON1".to_owned());
-    let (_, _, zone) = crate::daemon::drop_zones(
-        &h.engine.strips[&key],
-        96,
-        h.engine.hot.stack_zone_percent,
-        101,
-    )
-    .into_iter()
-    .find(|z| z.0 == 201)
-    .unwrap();
+    let zone = h.rect(201);
     let a_centre = (a.x + a.w / 2, a.y + a.h / 2);
     let zone_centre = (zone.x + zone.w / 2, zone.y + zone.h / 2);
     if hook == HookRelease::Stale {
@@ -7257,7 +7318,12 @@ fn exercise_release_tick(sample_previous: bool, hook: HookRelease) {
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
     let s = &h.engine.strips[&key];
-    assert_eq!(s.locate(101).unwrap().0, s.locate(201).unwrap().0);
+    let (c1, c2) = (s.locate(101).unwrap().0, s.locate(201).unwrap().0);
+    assert_eq!(
+        c1.abs_diff(c2),
+        1,
+        "no modifier: tiles beside the target, never stacks (#113)"
+    );
     h.stop_clean();
 }
 
@@ -7304,8 +7370,8 @@ fn exercise_late_release(in_loop: Option<bool>, tick: bool, move_cursor: bool, e
     h.engine.tick().unwrap();
     h.settle_quiet();
     assert!(
-        !zones(&h).is_empty(),
-        "drop zones visible while holding mouse button"
+        h.engine.drag.as_ref().is_some_and(|d| d.target.is_some()),
+        "drag aims at a window while holding the mouse button"
     );
 
     h.desktop
@@ -7460,7 +7526,7 @@ fn issue_17_snapped_drag_restore_with_top_edge_anchored_and_off_monitor_latched_
                 w: r1.w - 200,
                 h: r1.h - 200,
             };
-            g.cursor = (r2.x + r2.w / 8, r2.y + r2.h / 8);
+            g.cursor = (r2.x + r2.w * 7 / 8, r2.y + r2.h / 2);
         }
         h.engine.tick().unwrap();
         h.settle_quiet();
@@ -7897,133 +7963,6 @@ fn sim_pad_drag_acceleration_preserves_dt_across_50ms_gap() {
     );
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
-    h.stop_clean();
-}
-
-#[test]
-fn sim_pad_drag_cross_monitor_release_commits_immediately_even_before_async_move_lands() {
-    // Regression test for #44 (bundle 001309628-still-freesez-when-release-on-anothe):
-    // Releasing a 4-finger cross-monitor drag via a tip-up HID packet must:
-    // 1) Release immediately (no 800 ms stall).
-    // 2) Transfer the window to the destination monitor even if the target app has not yet
-    //    processed the asynchronous `SetWindowPos` (window frame still reads `d.original`).
-    // 3) Mark placeholder cover (`covering`) on the transferred tile so cross-DPI resize happens
-    //    asynchronously without blocking the render thread.
-    let mut cfg = test_cfg();
-    cfg["touchpad"]["three_finger_enabled"] = toml::Value::Boolean(true);
-    cfg["touchpad"]["axis_lock_deadzone"] = toml::Value::Integer(12);
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
-    cfg["touchpad"]["swipe_drag_gain"] = toml::Value::Float(4.0);
-    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
-    cfg["animation"]["placeholder"] = toml::Value::Boolean(true);
-
-    // MON0 (0..1920), MON1 (1920..4480), MON2 (-1440..0 portrait).
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, |sim| {
-        sim.add_window(SimWindow::new(
-            101,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 960,
-                h: 1152,
-            },
-        ));
-        sim.add_window(SimWindow::new(
-            201,
-            Rect {
-                x: -1440,
-                y: 0,
-                w: 1440,
-                h: 2512,
-            },
-        ));
-    });
-    focus(&mut h, 101);
-    let orig_101 = h.rect(101);
-
-    let mut cf = planor::ContactFrame::default();
-    let feed = |h: &mut SimHarness,
-                cf: &mut planor::ContactFrame,
-                count: u32,
-                pts: &[(u32, (f64, f64))]| {
-        if let Some(frame) = cf.packet_with_slots(count, 5, pts.iter().copied()) {
-            h.engine.event(Event::Contacts(frame));
-        }
-    };
-
-    // Start 4-finger drag on MON0 (window 101) and carry cursor left onto portrait MON2 (x < 0).
-    feed(
-        &mut h,
-        &mut cf,
-        4,
-        &[
-            (1, (500.0, 100.0)),
-            (2, (520.0, 100.0)),
-            (3, (540.0, 100.0)),
-            (4, (560.0, 100.0)),
-        ],
-    );
-    feed(
-        &mut h,
-        &mut cf,
-        4,
-        &[
-            (1, (480.0, 100.0)),
-            (2, (500.0, 100.0)),
-            (3, (520.0, 100.0)),
-            (4, (540.0, 100.0)),
-        ],
-    );
-    assert!(h.engine.pad.is_some());
-    // Move far enough left to land in MON2 (-1440..0).
-    feed(
-        &mut h,
-        &mut cf,
-        4,
-        &[
-            (1, (100.0, 100.0)),
-            (2, (120.0, 100.0)),
-            (3, (140.0, 100.0)),
-            (4, (160.0, 100.0)),
-        ],
-    );
-    assert!(
-        h.desktop.cursor_pos().0 < 0,
-        "cursor should have crossed onto MON2"
-    );
-
-    // Simulate a slow cross-DPI app whose OS frame has not yet moved from `orig_101`.
-    h.desktop
-        .0
-        .lock()
-        .unwrap()
-        .windows
-        .get_mut(&101)
-        .unwrap()
-        .rect = orig_101;
-
-    // Release all 4 fingers simultaneously (count=4, 0 tip-down).
-    feed(&mut h, &mut cf, 4, &[]);
-    assert!(
-        h.engine.pad.is_none(),
-        "cross-monitor tip-up lift must release immediately"
-    );
-    assert!(
-        h.engine.drag.is_none(),
-        "cross-monitor drag session must end immediately"
-    );
-    assert!(
-        h.engine.covering.contains_key(&101),
-        "cross-monitor drop must engage placeholder cover while app handles WM_DPICHANGED"
-    );
-    h.settle();
-
-    let desk = h.engine.desktop.unwrap();
-    let mon2_strip = &h.engine.strips[&(desk, "MON2".to_string())];
-    assert!(
-        mon2_strip.locate(101).is_some(),
-        "window 101 must be transferred to MON2 even if async OS move had not landed yet"
-    );
     h.stop_clean();
 }
 
@@ -9214,267 +9153,6 @@ fn sim_three_finger_scroll_autofocus_default_off_and_opt_in() {
     h2.stop_clean();
 }
 
-#[test]
-fn sim_drag_ingroup_edge_dropboxes_ungroup_to_closest_side() {
-    // (a) Landscape single-column group [101, 102]: left & right edge dropboxes ungroup onto left / right side (#79).
-    let mut h = SimHarness::with_setup(primary_only_rig(), test_cfg(), |sim| {
-        sim.add_window(SimWindow::new(
-            101,
-            Rect {
-                x: 0,
-                y: 0,
-                w: 800,
-                h: 1000,
-            },
-        ));
-        sim.add_window(SimWindow::new(
-            102,
-            Rect {
-                x: 400,
-                y: 0,
-                w: 800,
-                h: 1000,
-            },
-        ));
-    });
-    let desk = h.engine.desktop.unwrap();
-    let key = (desk, "MON0".to_string());
-    let area = h.engine.strips[&key].area;
-    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(area, true);
-
-    // Dragging a non-grouped window must NOT show ungroup edge dropboxes.
-    focus(&mut h, 101);
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.cursor = (400, 400);
-    }
-    h.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.windows.get_mut(&101).unwrap().rect.x += 50;
-        sim.cursor = (left_box.x + 20, left_box.y + 100);
-    }
-    h.engine.tick().unwrap();
-    h.settle_quiet();
-    let scene_lone = h
-        .desktop
-        .0
-        .lock()
-        .unwrap()
-        .scenes
-        .last()
-        .cloned()
-        .expect("scene");
-    assert!(
-        !scene_lone
-            .zones
-            .iter()
-            .any(|z| z.rect == left_box || z.rect == right_box),
-        "lone window drag must not render ungroup edge dropboxes"
-    );
-    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
-    h.settle();
-
-    // Group [101, 102] into one column and drag 101 into the LEFT edge dropbox.
-    h.engine.strips.get_mut(&key).unwrap().group(101, 102);
-    h.engine.dirty = true;
-    h.settle();
-    assert_eq!(h.engine.strips[&key].columns.len(), 1);
-    assert_eq!(h.engine.strips[&key].columns[0].members, vec![102, 101]);
-    let (left_box, right_box) = crate::daemon::ungroup_edge_zones(
-        crate::daemon::group_column_rect(
-            &h.engine.strips[&key],
-            101,
-            h.engine
-                .hot
-                .stack_peek_px
-                .unwrap_or(crate::daemon::DEFAULT_STACK_PEEK),
-        ),
-        true,
-    );
-    assert!(left_box.x >= area.x && right_box.x + right_box.w <= area.x + area.w);
-
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.cursor = (area.x + area.w / 2, area.y + area.h / 2);
-    }
-    h.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.windows.get_mut(&101).unwrap().rect.x += 40;
-        sim.cursor = (left_box.x + left_box.w / 2, left_box.y + left_box.h / 2);
-    }
-    h.engine.tick().unwrap();
-    h.settle_quiet();
-    assert_eq!(
-        h.engine.drag.as_ref().and_then(|d| d.ungroup_edge),
-        Some(false)
-    );
-    let scene_left = h
-        .desktop
-        .0
-        .lock()
-        .unwrap()
-        .scenes
-        .last()
-        .cloned()
-        .expect("scene");
-    assert!(
-        scene_left
-            .zones
-            .iter()
-            .any(|z| z.rect == left_box && (z.alpha - 0.85).abs() < 1e-3),
-        "left edge dropbox must render highlighted when hovered"
-    );
-    assert!(
-        scene_left
-            .zones
-            .iter()
-            .any(|z| z.rect == right_box && (z.alpha - 0.35).abs() < 1e-3),
-        "right edge dropbox must also render when dragging an in-group window"
-    );
-    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
-    h.settle();
-    assert_eq!(h.engine.strips[&key].columns.len(), 2);
-    assert_eq!(
-        h.engine.strips[&key].columns[0].members,
-        vec![101],
-        "left dropbox puts 101 on left"
-    );
-    assert_eq!(h.engine.strips[&key].columns[1].members, vec![102]);
-
-    // Re-group [101, 102] and drag 101 into the RIGHT edge dropbox.
-    h.engine.strips.get_mut(&key).unwrap().group(101, 102);
-    h.engine.dirty = true;
-    h.settle();
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.cursor = (area.x + area.w / 2, area.y + area.h / 2);
-    }
-    h.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 101));
-    {
-        let mut sim = h.desktop.0.lock().unwrap();
-        sim.windows.get_mut(&101).unwrap().rect.x += 40;
-        sim.cursor = (right_box.x + right_box.w / 2, right_box.y + right_box.h / 2);
-    }
-    h.engine.tick().unwrap();
-    assert_eq!(
-        h.engine.drag.as_ref().and_then(|d| d.ungroup_edge),
-        Some(true)
-    );
-    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
-    h.settle();
-    assert_eq!(h.engine.strips[&key].columns.len(), 2);
-    assert_eq!(h.engine.strips[&key].columns[0].members, vec![102]);
-    assert_eq!(
-        h.engine.strips[&key].columns[1].members,
-        vec![101],
-        "right dropbox puts 101 on right"
-    );
-    h.stop_clean();
-
-    // (b) Portrait monitor: top & bottom edge dropboxes ungroup onto top / bottom side (#79).
-    let mut hp = SimHarness::with_setup(three_monitor_rig(), test_cfg(), |sim| {
-        sim.add_window(SimWindow::new(
-            301,
-            Rect {
-                x: -1440,
-                y: 0,
-                w: 1440,
-                h: 1200,
-            },
-        ));
-        sim.add_window(SimWindow::new(
-            302,
-            Rect {
-                x: -1440,
-                y: 600,
-                w: 1440,
-                h: 1200,
-            },
-        ));
-    });
-    let desk_p = hp.engine.desktop.unwrap();
-    let key_p = (desk_p, "MON2".to_string());
-    let area_p = hp.engine.strips[&key_p].area;
-    assert!(!area_p.horizontal());
-    hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
-    let (top_box, bot_box) = crate::daemon::ungroup_edge_zones(
-        crate::daemon::group_column_rect(
-            &hp.engine.strips[&key_p],
-            301,
-            hp.engine
-                .hot
-                .stack_peek_px
-                .unwrap_or(crate::daemon::DEFAULT_STACK_PEEK),
-        ),
-        false,
-    );
-    hp.engine.dirty = true;
-    hp.settle();
-
-    // Drop 301 onto TOP edge dropbox.
-    {
-        let mut sim = hp.desktop.0.lock().unwrap();
-        sim.cursor = (area_p.x + area_p.w / 2, area_p.y + area_p.h / 2);
-    }
-    hp.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 301));
-    {
-        let mut sim = hp.desktop.0.lock().unwrap();
-        sim.windows.get_mut(&301).unwrap().rect.y += 40;
-        sim.cursor = (top_box.x + top_box.w / 2, top_box.y + top_box.h / 2);
-    }
-    hp.engine.tick().unwrap();
-    assert_eq!(
-        hp.engine.drag.as_ref().and_then(|d| d.ungroup_edge),
-        Some(false)
-    );
-    hp.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
-    hp.settle();
-    assert_eq!(
-        hp.engine.strips[&key_p].columns[0].members,
-        vec![301],
-        "top dropbox puts 301 first"
-    );
-    assert_eq!(hp.engine.strips[&key_p].columns[1].members, vec![302]);
-
-    // Re-group and drop 301 onto BOTTOM edge dropbox.
-    hp.engine.strips.get_mut(&key_p).unwrap().group(301, 302);
-    hp.engine.dirty = true;
-    hp.settle();
-    {
-        let mut sim = hp.desktop.0.lock().unwrap();
-        sim.cursor = (area_p.x + area_p.w / 2, area_p.y + area_p.h / 2);
-    }
-    hp.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 301));
-    {
-        let mut sim = hp.desktop.0.lock().unwrap();
-        sim.windows.get_mut(&301).unwrap().rect.y += 40;
-        sim.cursor = (bot_box.x + bot_box.w / 2, bot_box.y + bot_box.h / 2);
-    }
-    hp.engine.tick().unwrap();
-    assert_eq!(
-        hp.engine.drag.as_ref().and_then(|d| d.ungroup_edge),
-        Some(true)
-    );
-    hp.engine
-        .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 301));
-    hp.settle();
-    assert_eq!(hp.engine.strips[&key_p].columns[0].members, vec![302]);
-    assert_eq!(
-        hp.engine.strips[&key_p].columns[1].members,
-        vec![301],
-        "bottom dropbox puts 301 last"
-    );
-    hp.stop_clean();
-}
-
 /// Four fingers at `(x, y)` (centroid-ish: a row of four points 20 apart).
 fn four(x: f64, y: f64) -> Vec<(f64, f64)> {
     (0..4).map(|i| (x + 20. * i as f64, y)).collect()
@@ -9484,7 +9162,6 @@ fn four(x: f64, y: f64) -> Vec<(f64, f64)> {
 fn axis_lock_drag(lock: Option<bool>, focus_id: isize, step: (f64, f64)) -> (bool, (f64, f64)) {
     let mut cfg = note_cfg();
     cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(false);
     if let Some(v) = lock {
         cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(v);
     }
@@ -9522,17 +9199,27 @@ fn axis_lock_is_on_by_default_and_listed_in_settings() {
 }
 
 #[test]
-fn axis_lock_ignores_cross_axis_start_and_keeps_carry_on_axis() {
+fn axis_lock_cross_axis_start_picks_up_only_toward_a_monitor_and_keeps_carry_on_axis() {
     // Landscape (MON0, window 101): the strip runs sideways. Portrait (MON2, window 301): up and down.
     for (win, along, cross, name) in [
         (101, (30., 0.), (0., 30.), "landscape"),
         (301, (0., 30.), (30., 0.), "portrait"),
     ] {
-        let (picked, _) = axis_lock_drag(None, win, cross);
-        assert!(
-            !picked,
-            "{name}: a cross-axis start must not pick the window up"
-        );
+        // Cross-axis start: picked up only when a monitor lies that way. The rig is a row (MON2, MON0, MON1):
+        // nothing above or below the landscape MON0, MON0 (and MON1) to the right of the portrait MON2, nothing
+        // to its left.
+        let (toward, away) = if win == 101 {
+            (None, (0., -30.))
+        } else {
+            (Some((30., 0.)), (-30., 0.))
+        };
+        if let Some(t) = toward {
+            let (picked, _) = axis_lock_drag(None, win, t);
+            assert!(picked, "{name}: a swipe toward a monitor is recognised");
+        }
+        let (picked, _) = axis_lock_drag(None, win, away);
+        assert!(!picked, "{name}: a swipe toward nothing is ignored");
+        let _ = cross;
         let (picked, t) = axis_lock_drag(None, win, along);
         assert!(picked, "{name}: an along-axis start picks the window up");
         let (cx, cy) = (t.0.abs(), t.1.abs());
@@ -9580,39 +9267,6 @@ fn feed_steps(h: &mut SimHarness, steps: &[(f64, f64)]) {
         y += s.1;
         h.engine.event(Event::Contacts(four(x, y)));
     }
-}
-
-#[test]
-fn axis_lock_releases_for_a_cross_monitor_carry_from_portrait_onto_landscape() {
-    let mut cfg = note_cfg();
-    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
-    focus(&mut h, 301); // MON2: portrait, left of MON0
-    // Start up/down (along the portrait strip), then push sideways past 3x the dead zone: the lock lets go.
-    let mut steps = vec![(0., 5.); 4];
-    steps.extend(vec![(10., 0.); 20]);
-    feed_steps(&mut h, &mut steps.clone());
-    let p = h.engine.pad.as_ref().expect("carrying");
-    assert!(
-        p.lock.is_none(),
-        "pushing across the axis releases the lock"
-    );
-    assert!(
-        p.cursor.0 > 0.,
-        "carried sideways onto MON0, cursor at {:?}",
-        p.cursor
-    );
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    assert!(h.engine.pad.is_none() && h.engine.drag.is_none());
-    let moved = h
-        .engine
-        .strips
-        .iter()
-        .find(|(_, s)| s.locate(301).is_some())
-        .map(|(k, _)| k.clone());
-    assert!(moved.is_some(), "window still managed after the drop");
 }
 
 #[test]
@@ -9872,8 +9526,7 @@ fn axis_lock_pad_drag_swaps_with_a_sibling_across_the_axis() {
 
 #[test]
 fn axis_lock_keeps_the_lock_on_a_side_with_no_monitor_and_ignores_a_flick_there() {
-    let mut cfg = note_cfg();
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
+    let cfg = note_cfg();
     let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
     focus(&mut h, 102);
     let (mut x, mut y) = (500., 500.);
@@ -9906,127 +9559,6 @@ fn axis_lock_keeps_the_lock_on_a_side_with_no_monitor_and_ignores_a_flick_there(
         .find(|(_, s)| s.locate(102).is_some())
         .map(|(k, _)| k.1.clone());
     assert_eq!(on.as_deref(), Some("MON0"), "window stays on MON0");
-}
-
-/// Rig where a landscape monitor lies above MON0 and a portrait one sits left (the owner's desk, #87 #88 #89 #92).
-fn stacked_rig() -> Vec<(String, Rect, Rect)> {
-    vec![
-        (
-            "MON0".into(),
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1152,
-            },
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1200,
-            },
-        ),
-        (
-            "MON1".into(),
-            Rect {
-                x: 0,
-                y: -1440,
-                w: 1920,
-                h: 1392,
-            },
-            Rect {
-                x: 0,
-                y: -1440,
-                w: 1920,
-                h: 1440,
-            },
-        ),
-        (
-            "MON2".into(),
-            Rect {
-                x: -1440,
-                y: -400,
-                w: 1440,
-                h: 2512,
-            },
-            Rect {
-                x: -1440,
-                y: -400,
-                w: 1440,
-                h: 2560,
-            },
-        ),
-    ]
-}
-
-fn cross_start_drag(
-    focus_id: isize,
-    step: (f64, f64),
-    cross_monitors: bool,
-) -> (bool, Option<bool>) {
-    let mut cfg = note_cfg();
-    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(cross_monitors);
-    let mut h = SimHarness::with_setup(stacked_rig(), cfg, three_per_monitor);
-    focus(&mut h, focus_id);
-    h.engine.event(Event::Contacts(four(500., 500.)));
-    for i in 1..=8 {
-        h.engine.event(Event::Contacts(four(
-            500. + step.0 * i as f64,
-            500. + step.1 * i as f64,
-        )));
-    }
-    let r = h.engine.pad.as_ref().map(|p| p.lock.is_some());
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    (r.is_some(), r)
-}
-
-#[test]
-fn axis_lock_cross_start_towards_a_monitor_picks_up_unlocked() {
-    // Landscape MON0 has MON1 above (push up works, push down has nothing there); portrait MON2 has MON0 to its right.
-    let (picked, lock) = cross_start_drag(101, (0., -30.), true);
-    assert!(
-        picked && lock == Some(false),
-        "landscape: up towards MON1 picks up unlocked ({picked}, {lock:?})"
-    );
-    let (picked, _) = cross_start_drag(101, (0., 30.), true);
-    assert!(!picked, "landscape: down has no monitor, stays ignored");
-    let (picked, lock) = cross_start_drag(301, (30., 0.), true);
-    assert!(
-        picked && lock == Some(false),
-        "portrait: right towards MON0 picks up unlocked ({picked}, {lock:?})"
-    );
-    let (picked, _) = cross_start_drag(301, (-30., 0.), true);
-    assert!(!picked, "portrait: left has no monitor, stays ignored");
-    let (picked, _) = cross_start_drag(101, (0., -30.), false);
-    assert!(
-        !picked,
-        "with cross-monitor drags off the cross start is still ignored"
-    );
-}
-
-#[test]
-fn ungroup_edge_zones_sit_inside_the_group_column_both_orientations() {
-    // #90: the zones live within the sides of the dragged window's own column, not the monitor edges.
-    let col = Rect {
-        x: 500,
-        y: 0,
-        w: 800,
-        h: 1000,
-    };
-    let (l, t) = crate::daemon::ungroup_edge_zones(col, true);
-    assert_eq!((l.x, t.x + t.w), (500, 1300));
-    assert!(l.w < col.w / 2 && t.w < col.w / 2 && l.h == 1000 && t.h == 1000);
-    let colp = Rect {
-        x: 0,
-        y: 300,
-        w: 1000,
-        h: 800,
-    };
-    let (a, b) = crate::daemon::ungroup_edge_zones(colp, false);
-    assert_eq!((a.y, b.y + b.h), (300, 1100));
-    assert!(a.h < colp.h / 2 && a.w == 1000 && b.w == 1000);
 }
 
 fn drag_group_beyond_border(
@@ -10191,155 +9723,6 @@ fn sim_real_click_on_another_window_inside_self_activated_ttl_is_not_swallowed()
         "real click within the TTL must select the clicked window"
     );
     h.stop_clean();
-}
-
-#[test]
-fn ungroup_band_suppressed_on_edge_bordering_a_monitor() {
-    // #80: MON0 has MON1 on its right (landscape) and MON2 on its left; MON1 has nothing to its right.
-    let rig = three_monitor_rig();
-    assert!(crate::daemon::edge_borders_monitor(
-        &rig, "MON0", true, true
-    ));
-    assert!(crate::daemon::edge_borders_monitor(
-        &rig, "MON0", true, false
-    ));
-    assert!(!crate::daemon::edge_borders_monitor(
-        &rig, "MON1", true, true
-    ));
-    assert!(crate::daemon::edge_borders_monitor(
-        &rig, "MON1", true, false
-    ));
-    assert!(!crate::daemon::edge_borders_monitor(
-        &rig, "MON0", false, true
-    ));
-    assert!(!crate::daemon::edge_borders_monitor(
-        &rig, "MON2", false, false
-    ));
-}
-
-#[test]
-fn ungroup_bands_only_hidden_at_strip_edge_bordering_a_monitor() {
-    // #80/#90: MON0 has monitors on both sides. A group in a middle column keeps both bands; a column
-    // flush with a strip edge that borders a monitor loses that side's band.
-    let rig = three_monitor_rig();
-    let area = rig[0].2;
-    let middle = Rect {
-        x: 500,
-        y: area.y,
-        w: 800,
-        h: area.h,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, middle);
-    assert!(l.is_some() && t.is_some(), "middle column keeps both bands");
-    let left = Rect {
-        x: area.x,
-        y: area.y,
-        w: 800,
-        h: area.h,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, left);
-    assert!(
-        l.is_none() && t.is_some(),
-        "leading edge next to MON2 suppressed"
-    );
-    let right = Rect {
-        x: area.x + area.w - 800,
-        y: area.y,
-        w: 800,
-        h: area.h,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "MON0", area, right);
-    assert!(
-        l.is_some() && t.is_none(),
-        "trailing edge next to MON1 suppressed"
-    );
-    // MON1 has nothing on its right: a flush trailing column keeps its band.
-    let a1 = rig[1].2;
-    let flush = Rect {
-        x: a1.x + a1.w - 800,
-        y: a1.y,
-        w: 800,
-        h: a1.h,
-    };
-    let (_, t) = crate::daemon::ungroup_bands(&rig, "MON1", a1, flush);
-    assert!(t.is_some());
-}
-
-#[test]
-fn ungroup_bands_portrait_stacked_pair() {
-    // Two portrait monitors stacked vertically: TOP above BOT.
-    let top_area = Rect {
-        x: 0,
-        y: 0,
-        w: 1440,
-        h: 2512,
-    };
-    let top_bounds = Rect {
-        x: 0,
-        y: 0,
-        w: 1440,
-        h: 2560,
-    };
-    let bot_area = Rect {
-        x: 0,
-        y: 2560,
-        w: 1440,
-        h: 2512,
-    };
-    let bot_bounds = Rect {
-        x: 0,
-        y: 2560,
-        w: 1440,
-        h: 2560,
-    };
-    let rig = vec![
-        ("TOP".into(), top_area, top_bounds),
-        ("BOT".into(), bot_area, bot_bounds),
-    ];
-    let mid = Rect {
-        x: top_area.x,
-        y: 600,
-        w: top_area.w,
-        h: 900,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, mid);
-    assert!(
-        l.is_some() && t.is_some(),
-        "middle portrait row keeps both bands"
-    );
-    let bot_flush = Rect {
-        x: top_area.x,
-        y: top_area.y + top_area.h - 900,
-        w: top_area.w,
-        h: 900,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, bot_flush);
-    assert!(
-        l.is_some() && t.is_none(),
-        "bottom edge next to BOT suppressed"
-    );
-    let top_flush = Rect {
-        x: top_area.x,
-        y: top_area.y,
-        w: top_area.w,
-        h: 900,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "TOP", top_area, top_flush);
-    assert!(
-        l.is_some() && t.is_some(),
-        "top edge with no monitor above keeps both bands"
-    );
-    let bot_top_flush = Rect {
-        x: bot_area.x,
-        y: bot_area.y,
-        w: bot_area.w,
-        h: 900,
-    };
-    let (l, t) = crate::daemon::ungroup_bands(&rig, "BOT", bot_area, bot_top_flush);
-    assert!(
-        l.is_none() && t.is_some(),
-        "top edge on BOT next to TOP suppressed"
-    );
 }
 
 #[test]
@@ -10583,7 +9966,6 @@ fn axis_lock_cross_travel_over_the_group_column_does_not_count_towards_release()
     // own group column must not release the lock towards a monitor that lies that way (#84).
     // MON2 (portrait) has MON0 to its right; with cross-monitor drags on, enough cross travel would release.
     let mut cfg = note_cfg();
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
     cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
     let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
     make_group(&mut h, "MON2", &[301, 302]);
@@ -10610,156 +9992,6 @@ fn axis_lock_cross_travel_over_the_group_column_does_not_count_towards_release()
     assert!(
         p.lock.is_some(),
         "lock must survive cross travel over the group column"
-    );
-    assert!(
-        p.cross.abs() < 7. * 12.,
-        "cross travel over the column is not accumulated: {}",
-        p.cross
-    );
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-}
-
-fn cross_cfg() -> toml::Value {
-    let mut cfg = note_cfg();
-    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
-    cfg["touchpad"]["swipe_drag_cross_monitors"] = toml::Value::Boolean(true);
-    cfg
-}
-
-#[test]
-fn axis_lock_stays_released_on_a_monitor_of_the_other_orientation_and_re_engages_at_home() {
-    // (#84) After the lock releases, the home axis means nothing on a monitor whose strip runs the other
-    // way: it stays released there (landscape->portrait and portrait->landscape). Back on the home
-    // monitor it re-engages with the home axis on the line the cursor re-entered at.
-    // portrait MON2 (301) -> landscape MON0 -> back.
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 301);
-    let mut steps = vec![(0., 5.); 4];
-    steps.extend(vec![(10., 0.); 20]);
-    feed_steps(&mut h, &steps);
-    let p = h.engine.pad.as_ref().expect("carrying");
-    assert!(
-        p.lock.is_none() && p.cursor.0 > 0.,
-        "released and on landscape MON0: {:?} {:?}",
-        p.lock,
-        p.cursor
-    );
-    assert_eq!(
-        p.home_lock,
-        Some(false),
-        "home axis is the portrait (vertical) strip"
-    );
-    let mut back = steps.clone();
-    back.extend(vec![(-10., 0.); 40]);
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 301);
-    feed_steps(&mut h, &back);
-    let p = h.engine.pad.as_ref().expect("carrying");
-    assert!(p.cursor.0 < 0., "back on portrait MON2: {:?}", p.cursor);
-    assert_eq!(p.lock, Some(false), "lock re-engages on the home monitor");
-    let line = p.line;
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let _ = line;
-
-    // landscape MON0 (101) carried along its own axis onto portrait MON2 (nothing lies across MON0's axis,
-    // so the lock is never released): the lock switches to the portrait strip's (vertical) axis.
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 101);
-    let mut steps = vec![(5., 0.); 4];
-    steps.extend(vec![(-10., 0.); 60]);
-    feed_steps(&mut h, &steps);
-    let p = h.engine.pad.as_ref().expect("carrying");
-    assert_eq!(p.home_lock, Some(true));
-    assert!(
-        p.cursor.0 < 0.,
-        "carried onto portrait MON2: {:?}",
-        p.cursor
-    );
-    assert_eq!(
-        p.lock,
-        Some(false),
-        "lock follows the portrait strip axis: cross {} line {} cur {:?} lh {}",
-        p.cross,
-        p.line,
-        p.cursor,
-        p.left_home
-    );
-    assert_eq!(
-        p.line, p.cursor.0,
-        "pick-up line re-based onto the destination monitor"
-    );
-    // ...and back on the landscape home monitor the home axis returns.
-    let mut back = steps.clone();
-    back.extend(vec![(10., 0.); 80]);
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 101);
-    feed_steps(&mut h, &back);
-    let p = h.engine.pad.as_ref().expect("carrying");
-    assert!(p.cursor.0 > 0., "back on MON0: {:?}", p.cursor);
-    assert_eq!(p.lock, Some(true), "home lock returns on the home monitor");
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-}
-
-#[test]
-fn axis_lock_cross_start_re_engages_on_return_home() {
-    // (#94) A four-finger drag started across the axis towards an adjacent monitor begins unlocked
-    // (`lock = None`), carries onto that monitor (`left_home = true`), and re-engages the home axis
-    // lock when the cursor returns to the home monitor.
-    // Portrait MON2 (301) -> cross-axis rightward start towards landscape MON0 -> back onto MON2.
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 301);
-    let mut steps = vec![(10., 0.); 25];
-    feed_steps(&mut h, &steps);
-    let p = h
-        .engine
-        .pad
-        .as_ref()
-        .expect("carrying after cross-axis start");
-    assert_eq!(
-        p.home_lock,
-        Some(false),
-        "home_lock preserves portrait home axis"
-    );
-    assert!(
-        p.lock.is_none(),
-        "cross-axis start stays unlocked on destination MON0"
-    );
-    assert!(
-        p.cursor.0 > 0. && p.left_home,
-        "carried onto MON0: cur={:?} lh={}",
-        p.cursor,
-        p.left_home
-    );
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-
-    // Now carry back onto portrait MON2: home lock must re-engage at the re-entry line.
-    steps.extend(vec![(-10., 0.); 45]);
-    let mut h = SimHarness::with_setup(three_monitor_rig(), cross_cfg(), three_per_monitor);
-    focus(&mut h, 301);
-    feed_steps(&mut h, &steps);
-    let p = h.engine.pad.as_ref().expect("carrying back on MON2");
-    assert!(
-        p.cursor.0 < 0. && !p.left_home,
-        "back on portrait MON2: cur={:?} lh={}",
-        p.cursor,
-        p.left_home
-    );
-    assert_eq!(
-        p.lock,
-        Some(false),
-        "home axis lock re-engages on returning to MON2"
-    );
-    assert_eq!(
-        p.line, p.cursor.0,
-        "re-engaged lock line anchored at re-entry x"
     );
     h.engine.event(Event::Contacts(vec![]));
     h.settle();
@@ -10825,563 +10057,10 @@ fn spawn_on_cursor_monitor_false_lands_on_default_monitor() {
     );
 }
 
-/// Exact layout of the owner's 3-monitor desk (#102): laptop primary (MON0), upper landscape (MON1),
-/// and portrait up-left (MON2).
-fn owner_three_monitor_rig() -> Vec<(String, Rect, Rect)> {
-    vec![
-        (
-            "MON0".into(),
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1140,
-            },
-            Rect {
-                x: 0,
-                y: 0,
-                w: 1920,
-                h: 1200,
-            },
-        ),
-        (
-            "MON1".into(),
-            Rect {
-                x: 0,
-                y: -1440,
-                w: 2560,
-                h: 1392,
-            },
-            Rect {
-                x: 0,
-                y: -1440,
-                w: 2560,
-                h: 1440,
-            },
-        ),
-        (
-            "MON2".into(),
-            Rect {
-                x: -1440,
-                y: -1859,
-                w: 1440,
-                h: 2512,
-            },
-            Rect {
-                x: -1440,
-                y: -1859,
-                w: 1440,
-                h: 2560,
-            },
-        ),
-    ]
-}
-
-fn owner_three_per_monitor(sim: &mut SimDesktop) {
-    for (id, x, y, w, h) in [
-        (101, 0, 0, 960, 1140),
-        (102, 960, 0, 960, 1140),
-        (201, 0, -1440, 1280, 1392),
-        (202, 1280, -1440, 1280, 1392),
-        (301, -1440, -1859, 1440, 1256),
-        (302, -1440, -603, 1440, 1256),
-    ] {
-        sim.add_window(SimWindow::new(id, Rect { x, y, w, h }));
-    }
-}
-
 #[test]
-fn axis_lock_linear_rays_on_owner_rig_up_left_and_diagonal_up_left() {
-    // (#102) On the owner's desk from laptop MON0:
-    // - straight up carries linearly along MON1's ray and drops onto MON1
-    // - straight left carries linearly along MON0's strip axis and drops onto MON2
-    // - diagonal up-left carries linearly along MON2's diagonal ray and drops onto MON2
-    // - straight down / down-right (non-adjacent) are rejected
-    let cfg = cross_cfg();
-
-    // 1. Straight up -> MON1 (stays on MON1's ray even with slight finger jitter while on MON0; on MON1
-    // the ray is dropped and the destination strip axis takes over (#102 review))
-    let mut h = SimHarness::with_setup(
-        owner_three_monitor_rig(),
-        cfg.clone(),
-        owner_three_per_monitor,
-    );
-    focus(&mut h, 101);
-    let mut steps = vec![(0., -12.); 8];
-    for i in 0..8 {
-        steps.push((if i % 2 == 0 { 3. } else { -3. }, -15.));
-    }
-    let (mut x, mut y) = (500., 500.);
-    h.engine.event(Event::Contacts(four(x, y)));
-    let mut home_ray = None;
-    for s in &steps {
-        x += s.0;
-        y += s.1;
-        h.engine.event(Event::Contacts(four(x, y)));
-        if let Some(p) = h.engine.pad.as_ref().filter(|p| !p.left_home) {
-            home_ray = home_ray.or(p.ray);
-        }
-    }
-    let p = h.engine.pad.as_ref().expect("carrying up toward MON1");
-    let ray = home_ray.expect("locked onto MON1 ray on the home monitor");
-    assert!(ray.1 < -0.9, "MON1 ray points up: {ray:?}");
-    assert!(p.cursor.1 < 0., "cursor reached MON1: {:?}", p.cursor);
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let landed = h
-        .engine
-        .strips
-        .iter()
-        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
-    assert_eq!(
-        landed,
-        Some("MON1"),
-        "upward linear carry drops onto MON1 (cursor={:?})",
-        h.desktop.0.lock().unwrap().cursor
-    );
-
-    // 2. Straight left -> horizontal strip axis onto MON2 (y stays fixed on pick-up line)
-    let mut h = SimHarness::with_setup(
-        owner_three_monitor_rig(),
-        cfg.clone(),
-        owner_three_per_monitor,
-    );
-    focus(&mut h, 101);
-    let steps = vec![(-12., 0.); 55];
-    feed_steps(&mut h, &steps);
-    let p = h.engine.pad.as_ref().expect("carrying left toward MON2");
-    assert!(
-        p.cursor.0 < 0.,
-        "cursor crossed left onto MON2: {:?}",
-        p.cursor
-    );
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let landed = h
-        .engine
-        .strips
-        .iter()
-        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
-    assert_eq!(
-        landed,
-        Some("MON2"),
-        "leftward linear carry drops onto MON2"
-    );
-
-    // 3. Diagonal up-left -> MON2 diagonal ray; trajectory stays strictly collinear with ray
-    let mut h = SimHarness::with_setup(
-        owner_three_monitor_rig(),
-        cfg.clone(),
-        owner_three_per_monitor,
-    );
-    focus(&mut h, 101);
-    let (mut x, mut y) = (500., 500.);
-    h.engine.event(Event::Contacts(four(x, y)));
-    let mut origin = None;
-    let mut active_ray = None;
-    let mut max_perp_err = 0.0f64;
-    for i in 0..70 {
-        // Diagonal up-left with alternating perpendicular wobble to prove projection onto the ray
-        let wobble = if i % 2 == 0 { 2.5 } else { -2.5 };
-        x += -12. + wobble * 0.57;
-        y += -8.5 - wobble * 0.82;
-        h.engine.event(Event::Contacts(four(x, y)));
-        if let Some(p) = h.engine.pad.as_ref() {
-            if origin.is_none() {
-                origin = Some(p.cursor);
-                active_ray = p.ray;
-            }
-            // Linear while on the home monitor; once the ray delivered the window onto MON2 it is
-            // dropped and the carry is free (#102 review), so wobble there is no longer projected.
-            if let (Some(o), Some((rx, ry)), true) = (origin, active_ray, p.cursor.0 >= 0.) {
-                let (dx, dy) = (p.cursor.0 - o.0, p.cursor.1 - o.1);
-                let perp = (dx * ry - dy * rx).abs();
-                max_perp_err = max_perp_err.max(perp);
-            }
-            if p.cursor.0 < -500. {
-                break;
-            }
-        }
-    }
-    let ray = active_ray.expect("diagonal up-left carry locks onto MON2 diagonal ray");
-    assert!(
-        ray.0 < -0.5 && ray.1 < -0.3,
-        "MON2 ray is diagonal up-left: {ray:?}"
-    );
-    assert!(
-        max_perp_err < 2.0,
-        "diagonal carry stayed linear on its ray (max perp err {max_perp_err:.2}px)"
-    );
-    let p = h.engine.pad.as_ref().expect("still carrying on MON2");
-    assert!(p.cursor.0 < 0., "diagonal ray reached MON2: {:?}", p.cursor);
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let landed = h
-        .engine
-        .strips
-        .iter()
-        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
-    assert_eq!(
-        landed,
-        Some("MON2"),
-        "diagonal up-left carry drops onto MON2"
-    );
-
-    // 4. Non-adjacent directions (straight down and down-right) are NOT offered
-    for step in [(0., 25.), (20., 20.)] {
-        let mut h = SimHarness::with_setup(
-            owner_three_monitor_rig(),
-            cfg.clone(),
-            owner_three_per_monitor,
-        );
-        focus(&mut h, 101);
-        let (mut x, mut y) = (500., 500.);
-        h.engine.event(Event::Contacts(four(x, y)));
-        for _ in 0..8 {
-            x += step.0;
-            y += step.1;
-            h.engine.event(Event::Contacts(four(x, y)));
-        }
-        assert!(
-            h.engine.pad.is_none(),
-            "non-adjacent direction {step:?} must not pick up"
-        );
-    }
-}
-
-#[test]
-fn owner_rig_rays_start_at_the_dragged_window_and_end_on_the_destination() {
-    // (#102 review) 1. Rays start at the picked-up window, not the monitor centre. From window 102 (right
-    // half of MON0, centre (1440, 570)) the line to MON2 crosses MON1 first, so no up-left ray is offered:
-    // carrying along it would enter MON1 and the drop would land there instead of on MON2.
-    let cfg = cross_cfg();
-    let mut h = SimHarness::with_setup(
-        owner_three_monitor_rig(),
-        cfg.clone(),
-        owner_three_per_monitor,
-    );
-    focus(&mut h, 102);
-    feed_steps(&mut h, &[(0., -12.); 8]);
-    let rays = h.engine.gesture.monitor_rays.clone();
-    assert!(
-        !rays.is_empty(),
-        "MON1 above is still offered from window 102"
-    );
-    assert!(
-        rays.iter().all(|r| r.0 > -0.25),
-        "no up-left ray toward MON2 through MON1 from window 102: {rays:?}"
-    );
-
-    // 2. Once the diagonal ray has delivered window 101 onto MON2 it is dropped: travel down MON2's
-    // vertical strip moves the window down instead of being projected back onto the up-left ray.
-    let mut h = SimHarness::with_setup(owner_three_monitor_rig(), cfg, owner_three_per_monitor);
-    focus(&mut h, 101);
-    let (mut x, mut y) = (500., 500.);
-    h.engine.event(Event::Contacts(four(x, y)));
-    for _ in 0..80 {
-        x -= 12.;
-        y -= 8.5;
-        h.engine.event(Event::Contacts(four(x, y)));
-        if h.engine.pad.as_ref().is_some_and(|p| p.cursor.0 < -200.) {
-            break;
-        }
-    }
-    let p = h.engine.pad.as_ref().expect("carried diagonally onto MON2");
-    assert!(p.cursor.0 < -200., "reached MON2: {:?}", p.cursor);
-    assert!(p.left_home, "the carry left the home monitor");
-    assert_eq!(p.ray, None, "the ray is dropped on the destination monitor");
-    let before = p.cursor;
-    // A short move: MON2 ends at y=701, and travel past it would leave MON2 again.
-    for _ in 0..4 {
-        y += 8.;
-        h.engine.event(Event::Contacts(four(x, y)));
-    }
-    let after = h
-        .engine
-        .pad
-        .as_ref()
-        .expect("still carrying on MON2")
-        .cursor;
-    assert!(
-        after.1 > before.1 + 50. && after.1 < 650. && after.0 < 0.,
-        "finger travel down MON2 moves the window down within MON2: {before:?} -> {after:?}"
-    );
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let landed = h
-        .engine
-        .strips
-        .iter()
-        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
-    assert_eq!(
-        landed,
-        Some("MON2"),
-        "the window drops on MON2 (carry {before:?} -> {after:?})"
-    );
-}
-#[test]
-fn axis_lock_linear_rays_on_stacked_rig_and_non_adjacent_excluded() {
-    // (#102) On stacked_rig(): MON0->MON1 is exact straight up (0, -1), MON2->MON1 is diagonal up-right,
-    // and non-adjacent monitors (MON2->MON1 in three_monitor_rig where MON0 sits between them) are excluded.
-    let cfg = cross_cfg();
-
-    // MON0 straight up -> exact vertical ray (x stays fixed) and drops onto MON1
-    let mut h = SimHarness::with_setup(stacked_rig(), cfg.clone(), three_per_monitor);
-    focus(&mut h, 101);
-    let (mut x, mut y) = (500., 500.);
-    h.engine.event(Event::Contacts(four(x, y)));
-    let mut start_x = None;
-    for i in 0..60 {
-        x += if i % 2 == 0 { 2. } else { -2. };
-        y -= 15.;
-        h.engine.event(Event::Contacts(four(x, y)));
-        if let Some(p) = h.engine.pad.as_ref() {
-            let sx = *start_x.get_or_insert(p.cursor.0);
-            // On the home monitor only: once on MON1 the ray is dropped and MON1's strip axis takes
-            // over (#102 review).
-            assert!(
-                p.left_home || (p.cursor.0 - sx).abs() < 1.0,
-                "straight-up ray keeps x fixed on the home monitor: {} vs {}",
-                p.cursor.0,
-                sx
-            );
-        }
-    }
-    let p = h.engine.pad.as_ref().expect("carrying up on stacked_rig");
-    assert!(p.cursor.1 < 0., "reached MON1: {:?}", p.cursor);
-    h.engine.event(Event::Contacts(vec![]));
-    h.settle();
-    let landed = h
-        .engine
-        .strips
-        .iter()
-        .find_map(|((_, m), s)| s.locate(101).map(|_| m.as_str()));
-    assert_eq!(
-        landed,
-        Some("MON1"),
-        "stacked_rig straight-up carry drops onto MON1"
-    );
-
-    // Non-adjacent monitor exclusion: in three_monitor_rig(), MON2 (-1440..0) and MON1 (1920..4480)
-    // do not touch; monitor_rays from MON2 only offers MON0 (1 ray), never MON1.
-    let rig = three_monitor_rig();
-    let bounds: Vec<Rect> = rig.iter().map(|m| m.2).collect();
-    let mon2_rays = planor::monitor_rays(
-        bounds[2],
-        &bounds,
-        false,
-        (
-            bounds[2].x as f64 + bounds[2].w as f64 * 0.5,
-            bounds[2].y as f64 + bounds[2].h as f64 * 0.5,
-        ),
-    );
-    assert_eq!(
-        mon2_rays.len(),
-        1,
-        "MON2 only touches MON0, not MON1: {mon2_rays:?}"
-    );
-}
-
-#[test]
-fn merge_and_leave_zones_span_full_cross_axis_both_orientations() {
-    // (#103) Merge (stack) zones and leave (ungroup) edge zones span the full window height on
-    // landscape and full window width on portrait, and render + hit-test agree on the exact rect.
-    for (mon, ids, horizontal) in [
-        ("MON0", [101, 102, 103], true),
-        ("MON2", [301, 302, 303], false),
-    ] {
-        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
-        make_group(&mut h, mon, &[ids[0], ids[1]]);
-        let key = (1, mon.to_string());
-        let dragged = ids[0];
-        let neighbour = ids[2];
-        // Start a mouse drag on `dragged` (grouped) and move it slightly so zones appear.
-        let orig = h.rect(dragged);
-        let target_rect = h.rect(neighbour);
-        let col_rect = crate::daemon::group_column_rect(&h.engine.strips[&key], dragged, 96);
-        let (lead_band, trail_band) = crate::daemon::ungroup_bands(
-            &h.engine.displays,
-            mon,
-            h.engine.strips[&key].area,
-            col_rect,
-        );
-        let expected_merge = planor::stack_zone(target_rect, 50, horizontal);
-
-        if horizontal {
-            assert_eq!(
-                (expected_merge.y, expected_merge.h),
-                (target_rect.y, target_rect.h),
-                "landscape merge full height"
-            );
-            assert_eq!(
-                expected_merge.w,
-                target_rect.w / 2,
-                "landscape merge middle half width"
-            );
-            for band in [lead_band, trail_band].into_iter().flatten() {
-                assert_eq!(
-                    (band.y, band.h),
-                    (col_rect.y, col_rect.h),
-                    "landscape leave band full height"
-                );
-            }
-        } else {
-            assert_eq!(
-                (expected_merge.x, expected_merge.w),
-                (target_rect.x, target_rect.w),
-                "portrait merge full width"
-            );
-            assert_eq!(
-                expected_merge.h,
-                target_rect.h / 2,
-                "portrait merge middle half height"
-            );
-            for band in [lead_band, trail_band].into_iter().flatten() {
-                assert_eq!(
-                    (band.x, band.w),
-                    (col_rect.x, col_rect.w),
-                    "portrait leave band full width"
-                );
-            }
-        }
-
-        // Hover near the cross-axis extreme (5 px from top edge on landscape, 5 px from left edge on portrait)
-        // inside the middle 50% along the strip axis: must hit Stack!
-        let probe = if horizontal {
-            (
-                expected_merge.x + expected_merge.w / 2,
-                expected_merge.y + 5,
-            )
-        } else {
-            (
-                expected_merge.x + 5,
-                expected_merge.y + expected_merge.h / 2,
-            )
-        };
-        h.engine
-            .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, dragged));
-        {
-            let mut sim = h.desktop.0.lock().unwrap();
-            sim.cursor = probe;
-            sim.windows.get_mut(&dragged).unwrap().rect = Rect {
-                x: orig.x + 20,
-                y: orig.y + 20,
-                ..orig
-            };
-        }
-        h.engine.tick().unwrap();
-        h.settle_quiet();
-        assert_eq!(
-            h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
-            Some((Some(neighbour), planor::Drag::Stack)),
-            "{mon}: cross-axis edge probe {probe:?} inside full-extent merge zone must hit Stack"
-        );
-        let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-        assert!(
-            scene.zones.iter().any(|z| z.rect == expected_merge),
-            "{mon}: rendered zones {:?} must include full-extent merge zone {expected_merge:?}",
-            scene.zones.iter().map(|z| z.rect).collect::<Vec<_>>()
-        );
-        for band in [lead_band, trail_band].into_iter().flatten() {
-            assert!(
-                scene.zones.iter().any(|z| z.rect == band),
-                "{mon}: rendered zones must include full-extent leave zone {band:?}"
-            );
-        }
-        h.engine
-            .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, dragged));
-        h.settle();
-    }
-}
-
-#[test]
-fn merge_and_leave_zone_icons_emitted_centred_scaled_and_theme_aware() {
-    // (#104) Every merge (stack) zone emits a Merge icon and every leave (ungroup) zone emits a
-    // directional Leave icon into the scene summary, centred in the zone, scaled to zone size,
-    // and using theme.rs colours.
-    assert_ne!(
-        crate::theme::zone_icon_color(true),
-        crate::theme::zone_icon_color(false),
-        "dark and light themes must pick distinct zone icon colours"
-    );
-    for (mon, ids, horizontal) in [
-        ("MON0", [101, 102, 103], true),
-        ("MON2", [301, 302, 303], false),
-    ] {
-        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
-        make_group(&mut h, mon, &[ids[0], ids[1]]);
-        let dragged = ids[0];
-        let neighbour = ids[2];
-        let orig = h.rect(dragged);
-        let nr = h.rect(neighbour);
-        h.engine
-            .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, dragged));
-        {
-            let mut sim = h.desktop.0.lock().unwrap();
-            sim.cursor = (nr.x + nr.w / 2, nr.y + nr.h / 2);
-            sim.windows.get_mut(&dragged).unwrap().rect = Rect {
-                x: orig.x + 20,
-                y: orig.y + 20,
-                ..orig
-            };
-        }
-        h.engine.tick().unwrap();
-        h.settle_quiet();
-        let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-        assert!(!scene.zones.is_empty(), "{mon}: drag must emit zones");
-        assert_eq!(
-            scene.zone_icons.len(),
-            scene.zones.len(),
-            "{mon}: every zone must emit one icon"
-        );
-        let mut saw_merge = false;
-        let mut saw_leave = false;
-        let expected_color = crate::theme::zone_icon_color(crate::theme::system_is_dark());
-        for (z, icon) in scene.zones.iter().zip(&scene.zone_icons) {
-            assert_eq!(icon.kind, z.kind, "{mon}: icon kind matches zone kind");
-            assert_eq!(icon.color, expected_color, "{mon}: icon uses theme colour");
-            assert_eq!(icon.rect.w, icon.rect.h, "{mon}: icon bounds are square");
-            assert!(
-                icon.rect.w >= 20 && icon.rect.w <= 64 && icon.rect.w <= z.rect.w.min(z.rect.h),
-                "{mon}: icon size {} scaled to zone {:?}",
-                icon.rect.w,
-                z.rect
-            );
-            let zcx = z.rect.x + z.rect.w / 2;
-            let zcy = z.rect.y + z.rect.h / 2;
-            let icx = icon.rect.x + icon.rect.w / 2;
-            let icy = icon.rect.y + icon.rect.h / 2;
-            assert!(
-                (icx - zcx).abs() <= 1 && (icy - zcy).abs() <= 1,
-                "{mon}: icon {:?} centred in zone {:?}",
-                icon.rect,
-                z.rect
-            );
-            match icon.kind {
-                render::ZoneKind::Merge => saw_merge = true,
-                render::ZoneKind::Leave {
-                    horizontal: h_flag, ..
-                } => {
-                    assert_eq!(
-                        h_flag, horizontal,
-                        "{mon}: leave icon orientation matches strip"
-                    );
-                    saw_leave = true;
-                }
-            }
-        }
-        assert!(saw_merge, "{mon}: merge zone icon emitted");
-        assert!(saw_leave, "{mon}: leave zone icon emitted");
-        h.engine
-            .event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, dragged));
-        h.settle();
-    }
-}
-
-#[test]
-fn drag_hover_suppresses_green_border_while_keeping_zones_and_icons() {
-    // (#105) While dragging a window over another window (swap or stack hover), the target window
-    // must not get the green drop_target_color highlight border, while drop zones and icons stay.
+fn drag_hover_never_draws_the_stack_border_before_group_mode() {
+    // (#105, reworked in 4.8) While dragging over another window the target must not get the mauve stacked
+    // border (nor any other drop colour) unless the drop would STACK: neither a swap-region nor a middle hover does.
     let mut h = SimHarness::with_setup(primary_only_rig(), note_cfg(), |sim| {
         sim.add_window(SimWindow::new(
             101,
@@ -11424,24 +10103,16 @@ fn drag_hover_suppresses_green_border_while_keeping_zones_and_icons() {
     h.settle_quiet();
     assert_eq!(
         h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
-        Some((Some(102), planor::Drag::Swap)),
-        "outer edge hover must be Swap"
+        Some((Some(102), planor::Drag::None)),
+        "outer edge hover is before 1/4: no tile mode yet"
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
-        "target window must not draw green border during Swap hover (#105)"
+        h.engine.hot.stacked_color,
+        "target window must not show the stack border during a before-quarter hover"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
-    assert!(
-        !scene.zones.is_empty(),
-        "drop zones must stay visible during Swap hover"
-    );
-    assert_eq!(
-        scene.zone_icons.len(),
-        scene.zones.len(),
-        "zone icons must stay visible during Swap hover"
-    );
+    assert!(scene.cue.is_none(), "no cue card exists any more");
 
     // 2. Hover in Stack (merge) region (centre of target 102)
     h.desktop.0.lock().unwrap().cursor = (r2.x + r2.w / 2, r2.y + r2.h / 2);
@@ -11449,25 +10120,1398 @@ fn drag_hover_suppresses_green_border_while_keeping_zones_and_icons() {
     h.settle_quiet();
     assert_eq!(
         h.engine.drag.as_ref().map(|d| (d.target, d.mode)),
-        Some((Some(102), planor::Drag::Stack)),
-        "centre hover must be Stack"
+        Some((Some(102), planor::Drag::Before)),
+        "centre hover waits for the dwell and previews the midpoint side"
     );
     assert_ne!(
         tile_color(&h, 102),
-        h.engine.hot.drop_target_color,
-        "target window must not draw green border during Stack hover (#105)"
+        h.engine.hot.stacked_color,
+        "target window must not show the stack border during a plain middle hover (no modifier)"
     );
     let scene = h.desktop.0.lock().unwrap().scenes.last().unwrap().clone();
     assert!(
-        !scene.zones.is_empty(),
-        "drop zones must stay visible during Stack hover"
+        scene
+            .cue
+            .as_ref()
+            .is_some_and(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
+        "the middle hover shows the small drop box (and no stack border)"
     );
-    assert_eq!(
-        scene.zone_icons.len(),
-        scene.zones.len(),
-        "zone icons must stay visible during Stack hover"
-    );
-
     h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 101));
     h.settle();
+}
+
+// ---- Milestone 4.8 (#111-#116) ----
+
+/// Start a mouse drag of `id`, then put the cursor at `to` (no release). Returns after one tick.
+fn mouse_hold(h: &mut SimHarness, id: isize, to: (i32, i32)) {
+    let r = h.rect(id);
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.keys_down.insert(0x01);
+        g.cursor = (r.x + r.w / 2, r.y + 10);
+    }
+    h.engine
+        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, id));
+    h.settle_quiet();
+    let mut g = h.desktop.0.lock().unwrap();
+    let w = g.windows.get_mut(&id).unwrap();
+    w.rect.x = to.0 - r.w / 2;
+    w.rect.y = to.1 - 10;
+    g.cursor = to;
+    drop(g);
+    h.engine.tick().unwrap();
+}
+
+fn phase(h: &SimHarness) -> Option<crate::daemon::DragPhase> {
+    h.engine.drag.as_ref().map(|d| d.phase)
+}
+
+/// Middle of a neighbour (1/4..3/4 from the entry edge) that is not yet in dwell: waiting, no cue.
+/// After the dwell: preview with the cue; with the modifier: group mode and the committed cue (#113).
+#[test]
+fn dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        let key = (1, mon.to_string());
+        focus(&mut h, ids[0]);
+        let s = &h.engine.strips[&key];
+        let horizontal = s.area.horizontal();
+        let (a, b) = (ids[0], ids[1]);
+        let rb = crate::daemon::clip(
+            s.rects(96).into_iter().find(|x| x.0 == b).unwrap().1,
+            s.area,
+        )
+        .unwrap();
+        // Enter b from its leading edge, then settle at 3/8 (middle range, left of midpoint).
+        let at = |f: f64| {
+            if horizontal {
+                (rb.x + (rb.w as f64 * f) as i32, rb.y + rb.h / 2)
+            } else {
+                (rb.x + rb.w / 2, rb.y + (rb.h as f64 * f) as i32)
+            }
+        };
+        mouse_hold(&mut h, a, at(0.05));
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::BeforeQuarter { .. })
+            ),
+            "{mon}: before 1/4: {:?}",
+            phase(&h)
+        );
+        assert!(zones(&h).is_empty(), "{mon}: no cue before 1/4");
+        h.desktop.0.lock().unwrap().cursor = at(0.375);
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleWaiting { .. })
+            ),
+            "{mon}: middle range waits for the dwell: {:?}",
+            phase(&h)
+        );
+        h.engine
+            .advance_drag_timers_for_test(Duration::from_millis(300));
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddlePreview { after: false, .. })
+            ),
+            "{mon}: dwell elapsed: preview on the pointer's side of the midpoint: {:?}",
+            phase(&h)
+        );
+        assert_ne!(
+            tile_color(&h, b),
+            h.engine.hot.stacked_color,
+            "{mon}: a tile-beside preview never shows the stack border"
+        );
+        assert!(
+            zones(&h)
+                .iter()
+                .all(|c| matches!(c.kind, crate::cue::CueKind::DropBox { .. })),
+            "{mon}: only the small drop box is ever drawn (no cue card)"
+        );
+        // Press the setting-selected modifier (Shift by default): group mode.
+        h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ),
+            "{mon}: modifier -> group mode: {:?}",
+            phase(&h)
+        );
+        assert_eq!(
+            tile_color(&h, b),
+            h.engine.hot.stacked_color,
+            "{mon}: group mode lights the target in the mauve stacked border"
+        );
+        // Group mode latches once activated: releasing Shift with the button still groups on the drop.
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+        h.engine.tick().unwrap();
+        assert!(matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ));
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+        drop_now(&mut h, a);
+        let s = &h.engine.strips[&key];
+        assert!(
+            s.columns[s.locate(a).unwrap().0].members.contains(&b),
+            "{mon}: group mode latched -> grouped on the drop"
+        );
+        h.stop_clean();
+    }
+}
+
+/// Moving again before the dwell elapses restarts it; reversing out of the neighbour cancels (#113).
+#[test]
+fn dwell_restarts_on_movement_and_reversal_out_of_the_neighbour_cancels() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&key];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    mouse_hold(&mut h, 101, (rb.x + rb.w * 3 / 8, rb.y + rb.h / 2));
+    h.engine
+        .advance_drag_timers_for_test(Duration::from_millis(200));
+    // Move 40 px: the dwell restarts, so another 200 ms is still waiting.
+    h.desktop.0.lock().unwrap().cursor = (rb.x + rb.w * 3 / 8 + 40, rb.y + rb.h / 2);
+    h.engine.tick().unwrap();
+    h.engine
+        .advance_drag_timers_for_test(Duration::from_millis(200));
+    h.engine.tick().unwrap();
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleWaiting { .. })
+        ),
+        "movement restarted the dwell: {:?}",
+        phase(&h)
+    );
+    h.engine
+        .advance_drag_timers_for_test(Duration::from_millis(100));
+    h.engine.tick().unwrap();
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { .. })
+    ));
+    // Reverse back out into the gap/own tile: preview ends, no cue.
+    h.desktop.0.lock().unwrap().cursor = (rb.x - 30, rb.y + rb.h / 2);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(
+        !matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ),
+        "reversal cancels the preview: {:?}",
+        phase(&h)
+    );
+    assert!(zones(&h).is_empty(), "no cue after cancelling");
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// A zero dwell previews immediately; a changed setting is honoured (#113 configurable dwell).
+#[test]
+fn zero_dwell_previews_on_the_first_middle_range_sample() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&key];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    mouse_hold(&mut h, 101, (rb.x + rb.w * 5 / 8, rb.y + rb.h / 2));
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { after: true, .. })
+    ));
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// The vacated slot stays reserved for the whole drag: neighbours never slide into it, however long the
+/// held window is carried or scrolled (owner decision after the 2 s jump; #114 timer removed).
+#[test]
+fn vacated_slot_stays_reserved_for_the_whole_drag() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let r1 = h.rect(101);
+    let r102 = h.rect(102);
+    let r103 = h.rect(103);
+    mouse_hold(&mut h, 101, (r1.x + 20, 1190)); // below every tile: no target
+    for secs in [3u64, 6, 12] {
+        h.engine
+            .advance_drag_timers_for_test(Duration::from_secs(secs));
+        h.engine.tick().unwrap();
+        h.settle_quiet();
+        assert_eq!(
+            (h.rect(102), h.rect(103)),
+            (r102, r103),
+            "after {secs} s more: neighbours stay where they were (no closing jump)"
+        );
+    }
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// Mouse edge-scroll uses the monitor under the cursor and its own configured percentage (#116):
+/// the zone is 10% of that monitor's span, the old monitor stops scrolling after crossing, and 0 disables.
+#[test]
+fn mouse_edge_scroll_uses_the_cursor_monitor_percent_and_zero_disables() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    let off0 = h.engine.strips[&key].offset;
+    assert!(off0 > 0, "103 is scrolled into view");
+    // 10% of 1920 = 192 px: x=150 is inside the zone, x=250 is not.
+    mouse_hold(&mut h, 103, (250, 600));
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, off0,
+        "outside the 10% zone: no scroll"
+    );
+    h.desktop.0.lock().unwrap().cursor = (150, 600);
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert!(
+        h.engine.strips[&key].offset < off0,
+        "inside the 10% zone: leading edge scrolls the strip back"
+    );
+    // Cross onto MON1 (x >= 1920): MON0 stops scrolling.
+    let now = h.engine.strips[&key].offset;
+    h.desktop.0.lock().unwrap().cursor = (2500, 600);
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, now,
+        "old monitor no longer scrolls"
+    );
+    // Disabled: 0 means no edge scrolling anywhere.
+    h.engine.hot.drag_edge_scroll_percent = 0;
+    h.desktop.0.lock().unwrap().cursor = (5, 600);
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(h.engine.strips[&key].offset, now, "0 disables edge scroll");
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// Portrait monitors edge-scroll vertically with their own percentage of height (#116).
+#[test]
+fn mouse_edge_scroll_on_a_portrait_monitor_follows_the_vertical_axis() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON2".to_string());
+    focus(&mut h, 303);
+    let off0 = h.engine.strips[&key].offset;
+    assert!(off0 > 0);
+    // MON2 is x -1440..0, y 0..2512: top 10% = 251 px.
+    mouse_hold(&mut h, 303, (-700, 100));
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert!(
+        h.engine.strips[&key].offset < off0,
+        "top zone scrolls the portrait strip"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// A four-finger drag never leaves its starting monitor unless it flings (#111).
+#[test]
+fn non_fling_four_finger_drag_stays_on_its_monitor_even_pushed_across_the_boundary() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    for (focus_id, home, step) in [
+        (102, "MON0", (10., 0.)),
+        (302, "MON2", (0., 10.)),
+        (302, "MON2", (10., 0.)),
+    ] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg.clone(), three_per_monitor);
+        focus(&mut h, focus_id);
+        h.engine.event(Event::Contacts(four(500., 500.)));
+        for i in 1..=60 {
+            h.engine.event(Event::Contacts(four(
+                500. + step.0 * i as f64,
+                500. + step.1 * i as f64,
+            )));
+        }
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle();
+        let k = (1, home.to_string());
+        assert!(
+            h.engine.strips[&k].locate(focus_id).is_some(),
+            "{home}: window {focus_id} must stay on its starting monitor"
+        );
+        h.stop_clean();
+    }
+}
+
+/// A mouse drag released while still before 1/4 of a neighbour on its own monitor returns to its slot (#113),
+/// and crossing to another monitor and releasing still transfers (mouse drags keep monitor hopping).
+#[test]
+fn release_before_a_quarter_returns_home_and_mouse_still_crosses_monitors() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    let layout = |h: &SimHarness| {
+        h.engine.strips[&key]
+            .columns
+            .iter()
+            .map(|c| c.members.clone())
+            .collect::<Vec<_>>()
+    };
+    let before = layout(&h);
+    let s = &h.engine.strips[&key];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    mouse_hold(&mut h, 101, (rb.x + rb.w / 10, rb.y + rb.h / 2));
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, 101);
+    assert_eq!(before, layout(&h), "release before 1/4: layout unchanged");
+    // Mouse drag onto MON1 and release: transferred.
+    focus(&mut h, 101);
+    to_start(&mut h, "MON1");
+    focus(&mut h, 101);
+    let r201 = h.rect(201);
+    mouse_hold(&mut h, 101, (r201.x + r201.w / 2, r201.y + r201.h / 2));
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, 101);
+    assert!(
+        h.engine.strips[&(1, "MON1".to_string())]
+            .locate(101)
+            .is_some(),
+        "mouse drag keeps free monitor hopping"
+    );
+    h.stop_clean();
+}
+
+/// Stack exit: a quarter-span pull along the stack axis ungroups the member; a shorter pull keeps the
+/// group (#115). Landscape pulls sideways, portrait pulls vertically.
+#[test]
+fn stack_exit_needs_a_quarter_pull_both_orientations() {
+    for (mon, ids) in [("MON0", [101, 102, 103]), ("MON2", [301, 302, 303])] {
+        for (frac, exits) in [(0.05_f64, false), (0.20, false), (0.30, true), (0.60, true)] {
+            let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+            let key = (1, mon.to_string());
+            focus(&mut h, ids[1]);
+            h.cmd(Command::Key {
+                name: "stack_toggle".into(),
+            });
+            h.settle();
+            let s = &h.engine.strips[&key];
+            let active = s.active().unwrap();
+            assert_eq!(s.columns[s.locate(active).unwrap().0].members.len(), 2);
+            let horizontal = s.area.horizontal();
+            let span = s.columns[s.locate(active).unwrap().0].length;
+            let pull = (span as f64 * frac) as i32;
+            let r = h.rect(active);
+            let start = (r.x + r.w / 2, r.y + 10);
+            let to = if horizontal {
+                (start.0 + pull, start.1)
+            } else {
+                (start.0, start.1 + pull)
+            };
+            mouse_hold(&mut h, active, start);
+            {
+                let mut g = h.desktop.0.lock().unwrap();
+                let w = g.windows.get_mut(&active).unwrap();
+                w.rect.x += if horizontal { pull } else { 0 };
+                w.rect.y += if horizontal { 0 } else { pull };
+                g.cursor = to;
+            }
+            h.engine.tick().unwrap();
+
+            h.settle_quiet();
+            h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+            drop_now(&mut h, active);
+            let s = &h.engine.strips[&key];
+            let grouped = s.columns[s.locate(active).unwrap().0].members.len() == 2;
+            assert_eq!(
+                !grouped,
+                exits,
+                "{mon}: pull {frac} of span {span} = {pull}px, phase {:?} cols {:?}",
+                h.engine.drag.as_ref().map(|d| d.phase),
+                s.columns
+                    .iter()
+                    .map(|c| (c.length, c.members.len()))
+                    .collect::<Vec<_>>()
+            );
+            h.stop_clean();
+        }
+    }
+}
+
+/// Review #1: a topology change mid four-finger drag cancels both the session and the pad carry.
+#[test]
+fn topology_change_during_a_pad_drag_clears_session_and_pad() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=12 {
+        h.engine
+            .event(Event::Contacts(four(500. + 10. * i as f64, 500.)));
+    }
+    assert!(h.engine.pad.is_some(), "carrying");
+    h.desktop.0.lock().unwrap().monitors = primary_only_rig();
+    h.engine.event(Event::Topology);
+    h.engine.expire_timers_for_test();
+    h.engine.tick().unwrap();
+    assert!(h.engine.drag.is_none(), "session cancelled");
+    assert!(h.engine.pad.is_none(), "pad carry cancelled too");
+}
+
+/// #113: after a pad preview, a perpendicular swipe commits group mode, a reverse swipe reverts it,
+/// and the swipe direction picks the stack position.
+#[test]
+fn pad_perpendicular_swipe_commits_group_mode_and_reverse_reverts() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let mut x = 500.;
+    let mut seen_preview = false;
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            seen_preview = true;
+            break;
+        }
+    }
+    assert!(seen_preview, "pad drag reached a preview: {:?}", phase(&h));
+    let mut y = 500.;
+    for _ in 0..30 {
+        y -= 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { direction: -1, .. })
+        ),
+        "perpendicular swipe commits: {:?}",
+        phase(&h)
+    );
+    for _ in 0..40 {
+        y += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ),
+        "reverse swipe reverts: {:?}",
+        phase(&h)
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+/// The group key is the one chosen in settings: Ctrl and Alt work through the daemon, Shift does not
+/// activate it then (#113, #112 modifier cue).
+#[test]
+fn configured_group_modifier_ctrl_and_alt_activate_group_mode_and_shift_does_not() {
+    for (name, vk, other) in [("Ctrl", 0x11, 0x10), ("Alt", 0x12, 0x10)] {
+        let mut cfg = note_cfg();
+        cfg["layout"]["drag_stack_modifier"] = toml::Value::String(name.into());
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        focus(&mut h, 101);
+        let s = &h.engine.strips[&(1, "MON0".to_string())];
+        let rb = crate::daemon::clip(
+            s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+            s.area,
+        )
+        .unwrap();
+        mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+        h.engine.tick().unwrap();
+        assert!(matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ));
+        h.settle_quiet();
+        assert_ne!(
+            tile_color(&h, 102),
+            h.engine.hot.stacked_color,
+            "{name}: a plain preview never shows the stack border"
+        );
+        h.desktop.0.lock().unwrap().keys_down.insert(other);
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddlePreview { .. })
+            ),
+            "{name}: the other modifier does nothing"
+        );
+        h.desktop.0.lock().unwrap().keys_down.insert(vk);
+        h.engine.tick().unwrap();
+        assert!(
+            matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ),
+            "{name}: configured key activates group mode"
+        );
+        h.desktop.0.lock().unwrap().keys_down.clear();
+        h.stop_clean();
+    }
+}
+
+/// A modifier already held when the dwell completes shows the preview and does NOT group (review #13): group
+/// mode needs a fresh press after the preview started.
+#[test]
+fn modifier_held_before_the_dwell_still_previews_first() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&(1, "MON0".to_string())];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+    mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+    h.engine
+        .advance_drag_timers_for_test(Duration::from_millis(300));
+    h.engine.tick().unwrap();
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ),
+        "{:?}",
+        phase(&h)
+    );
+    // Edge semantics (review #13): a key held since before the preview never groups on its own ...
+    h.engine.tick().unwrap();
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { .. })
+    ));
+    // ... it must be released and pressed again.
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x10);
+    h.engine.tick().unwrap();
+    h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+    h.engine.tick().unwrap();
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddleGroup { .. })
+    ));
+    h.desktop.0.lock().unwrap().keys_down.clear();
+    h.stop_clean();
+}
+
+/// Pulling a stack member toward the leading side exits to the leading side (#115, both directions).
+#[test]
+fn stack_exit_toward_the_leading_side_places_the_member_before_the_stack() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 102);
+    h.cmd(Command::Key {
+        name: "stack_toggle".into(),
+    });
+    h.settle();
+    let s = &h.engine.strips[&key];
+    let active = s.active().unwrap();
+    let col = s.locate(active).unwrap().0;
+    assert_eq!(s.columns[col].members.len(), 2);
+    let r = h.rect(active);
+    // Grab at the member's centre so a leftward pull stays on screen; pull 40% of the window width.
+    let start = (r.x + r.w / 2, r.y + 10);
+    let pull = -(r.w * 4 / 10);
+    mouse_hold(&mut h, active, start);
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&active).unwrap().rect.x += pull;
+        g.cursor = (start.0 + pull, start.1);
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::StackExit { trailing: false })
+        ),
+        "pull left is a leading exit: {:?}",
+        phase(&h)
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, active);
+    let s = &h.engine.strips[&key];
+    let (i, _) = s.locate(active).expect("member still managed");
+    assert_eq!(s.columns[i].members.len(), 1, "left the stack");
+    let rest = s.columns.iter().position(|c| c.members.len() > 1);
+    if let Some(o) = rest {
+        assert!(
+            i < o,
+            "pulled left: the member sits before the remaining stack"
+        );
+    }
+    h.stop_clean();
+}
+
+/// Settings: the three new keys are listed, validated against their bounds and clamped when stepped.
+#[test]
+fn new_drag_settings_are_validated_with_documented_bounds() {
+    let int = toml::Value::Integer;
+    for (k, ok, bad) in [
+        ("drag_dwell_ms", 5000, 5001),
+        ("drag_edge_scroll_percent", 40, 41),
+    ] {
+        assert!(crate::valid_value(k, &int(1), &int(0)), "{k}: 0 is valid");
+        assert!(crate::valid_value(k, &int(1), &int(ok)), "{k}: max valid");
+        assert!(!crate::valid_value(k, &int(1), &int(bad)), "{k}: over max");
+        assert!(!crate::valid_value(k, &int(1), &int(-1)), "{k}: negative");
+    }
+    let m = crate::settings_model::Model::from_text(std::path::Path::new("p.toml"), crate::EXAMPLE)
+        .unwrap();
+    for k in ["drag_dwell_ms", "drag_edge_scroll_percent"] {
+        assert!(
+            m.entries.iter().any(|e| e.key == k),
+            "{k} appears in the settings window"
+        );
+    }
+    // Removed keys never warn and never become entries.
+    assert!(crate::REMOVED_KEYS.contains(&"stack_zone_percent"));
+    assert!(!m.entries.iter().any(|e| e.key == "stack_zone_percent"));
+}
+
+/// A pad drag cancelled mid-preview restores everything at once: no session, no pad carry, no cue (#113/#114).
+#[test]
+fn pad_drag_cancel_during_preview_clears_session_cue_and_layout() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 101);
+    let before: Vec<_> = h.engine.strips[&key]
+        .columns
+        .iter()
+        .map(|c| c.members.clone())
+        .collect();
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let mut x = 500.;
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddlePreview { .. })
+    ));
+    // A fifth finger / lift mid-gesture is the recogniser's cancel.
+    h.engine.event(Event::Contacts(five(x, 500.)));
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert!(h.engine.drag.is_none() && h.engine.pad.is_none());
+    assert!(zones(&h).is_empty(), "no cue left behind");
+    let after: Vec<_> = h.engine.strips[&key]
+        .columns
+        .iter()
+        .map(|c| c.members.clone())
+        .collect();
+    assert_eq!(before, after, "layout untouched by a cancelled gesture");
+    h.stop_clean();
+}
+
+fn five(x: f64, y: f64) -> Vec<(f64, f64)> {
+    (0..5).map(|i| (x + 20. * i as f64, y)).collect()
+}
+
+/// A mouse drag whose window vanishes mid-gesture ends cleanly: no session, no cue, no stale vacancy (#113).
+#[test]
+fn closing_the_dragged_window_mid_preview_clears_the_gesture() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let s = &h.engine.strips[&(1, "MON0".to_string())];
+    let rb = crate::daemon::clip(
+        s.rects(96).into_iter().find(|x| x.0 == 102).unwrap().1,
+        s.area,
+    )
+    .unwrap();
+    mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+    h.desktop.0.lock().unwrap().windows.remove(&101);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(h.engine.drag.is_none(), "session ended with its window");
+    assert!(zones(&h).is_empty(), "no cue for a window that is gone");
+    h.desktop.0.lock().unwrap().keys_down.clear();
+    h.stop_clean();
+}
+
+/// Mouse group entry onto a neighbour of another monitor: the modifier groups there and the window
+/// transfers with it; without the modifier it tiles beside the target (#113 + monitor hopping).
+#[test]
+fn mouse_group_across_monitors_transfers_and_stacks_only_with_the_modifier() {
+    for with_modifier in [false, true] {
+        let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        to_start(&mut h, "MON1");
+        focus(&mut h, 101);
+        let s = &h.engine.strips[&(1, "MON1".to_string())];
+        let rb = crate::daemon::clip(
+            s.rects(96).into_iter().find(|x| x.0 == 201).unwrap().1,
+            s.area,
+        )
+        .unwrap();
+        mouse_hold(&mut h, 101, (rb.x + rb.w / 2, rb.y + rb.h / 2));
+        h.engine.tick().unwrap();
+        if with_modifier {
+            h.desktop.0.lock().unwrap().keys_down.insert(0x10);
+            h.engine.tick().unwrap();
+        }
+        h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+        drop_now(&mut h, 101);
+        h.desktop.0.lock().unwrap().keys_down.clear();
+        let s1 = &h.engine.strips[&(1, "MON1".to_string())];
+        let (i, _) = s1.locate(101).expect("transferred to MON1");
+        assert_eq!(
+            s1.columns[i].members.contains(&201),
+            with_modifier,
+            "modifier={with_modifier}"
+        );
+        assert!(
+            h.engine.strips[&(1, "MON0".to_string())]
+                .locate(101)
+                .is_none()
+        );
+        h.stop_clean();
+    }
+}
+
+/// Edge scroll must not be starved or doubled by a changed setting during a live drag (#116 live reload).
+#[test]
+fn edge_scroll_percent_changes_apply_to_the_running_drag() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    let off0 = h.engine.strips[&key].offset;
+    mouse_hold(&mut h, 103, (300, 600)); // 15.6%: outside the default 10%
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(h.engine.strips[&key].offset, off0);
+    h.engine.hot.drag_edge_scroll_percent = 20; // now inside
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert!(
+        h.engine.strips[&key].offset < off0,
+        "the larger zone applies at once"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// A mouse pull ACROSS the strip (down in a landscape strip, sideways in a portrait one) of a quarter of
+/// the column depth also leaves a vertical group; a short pull keeps it.
+#[test]
+fn mouse_pull_along_the_stack_axis_exits_a_vertical_group() {
+    for (mon, id) in [("MON0", 102), ("MON2", 302)] {
+        for (frac, exits) in [(0.10_f64, false), (0.40, true)] {
+            let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+            let key = (1, mon.to_string());
+            focus(&mut h, id);
+            h.cmd(Command::Key {
+                name: "stack_toggle".into(),
+            });
+            h.settle();
+            let s = &h.engine.strips[&key];
+            let active = s.active().unwrap();
+            assert_eq!(s.columns[s.locate(active).unwrap().0].members.len(), 2);
+            let horizontal = s.area.horizontal();
+            let depth = if horizontal { s.area.h } else { s.area.w };
+            let pull = (depth as f64 * frac) as i32;
+            let r = h.rect(active);
+            let start = (r.x + r.w / 2, r.y + 10);
+            let to = if horizontal {
+                (start.0, start.1 + pull)
+            } else {
+                (start.0 + pull, start.1)
+            };
+            mouse_hold(&mut h, active, to);
+            h.engine.tick().unwrap();
+            h.settle_quiet();
+            h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+            drop_now(&mut h, active);
+            let s = &h.engine.strips[&key];
+            let grouped = s.columns[s.locate(active).unwrap().0].members.len() == 2;
+            assert_eq!(
+                !grouped,
+                exits,
+                "{mon}: pull {frac} of depth {depth} = {pull}px, phase {:?}",
+                h.engine.drag.as_ref().map(|d| d.phase)
+            );
+            h.stop_clean();
+        }
+    }
+}
+
+/// Edge scroll accelerates smoothly: slow at first, faster with time held and with depth into the zone,
+/// never above the cap (owner item: fluid like the trackpad).
+#[test]
+fn edge_scroll_speed_eases_in_with_hold_time_and_depth() {
+    use crate::daemon::edge_scroll_speed;
+    let start = edge_scroll_speed(1.0, 0.0);
+    let mid = edge_scroll_speed(1.0, 0.2);
+    let full = edge_scroll_speed(1.0, 0.4);
+    assert!(
+        start > 0.0 && start < mid && mid < full,
+        "{start} {mid} {full}"
+    );
+    assert!(edge_scroll_speed(1.0, 5.0) <= 1400.0 + 1e-9, "capped");
+    assert!(
+        edge_scroll_speed(0.1, 0.4) < edge_scroll_speed(1.0, 0.4),
+        "deeper is faster"
+    );
+    assert!(
+        edge_scroll_speed(0.0, 0.4) > 0.0,
+        "the zone's inner edge still moves"
+    );
+    assert_eq!(
+        edge_scroll_speed(-3.0, 9.0),
+        edge_scroll_speed(0.0, 9.0),
+        "depth clamps"
+    );
+}
+
+/// While a window is dragged or edge-resized it is a real window above the overlay's stand-ins: its live
+/// frame is cut out of the overlay (a hole) so it is never painted over by neighbours (owner item 3).
+#[test]
+fn the_dragged_or_resized_window_gets_an_overlay_hole() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let r = h.rect(102);
+    h.desktop.0.lock().unwrap().cursor = (r.x + r.w / 2, r.y + 10);
+    h.desktop.0.lock().unwrap().keys_down.insert(0x01);
+    h.engine
+        .event(Event::Window(EVENT_SYSTEM_MOVESIZESTART, 102));
+    h.settle_quiet();
+    // Resize by the right edge: the frame grows, so the session latches `resizing`.
+    {
+        let mut g = h.desktop.0.lock().unwrap();
+        g.windows.get_mut(&102).unwrap().rect.w += 120;
+    }
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(h.engine.drag.as_ref().is_some_and(|d| d.resizing));
+    h.engine.holes_stale = true;
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let frame = h.desktop.0.lock().unwrap().windows[&102].rect;
+    assert!(
+        h.engine.last_holes.iter().any(|hole| *hole == frame),
+        "dragged window frame {frame:?} is a hole in {:?}",
+        h.engine.last_holes
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.engine.event(Event::Window(EVENT_SYSTEM_MOVESIZEEND, 102));
+    h.settle_quiet();
+    assert!(h.engine.drag.is_none());
+    assert!(
+        !h.engine.last_holes.iter().any(|hole| *hole == frame),
+        "the hole goes away with the drag"
+    );
+    h.stop_clean();
+}
+
+/// #116: moving back toward the centre while still inside the edge zone stops the scroll promptly.
+#[test]
+fn edge_scroll_stops_when_the_pointer_reverses_inside_the_zone() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    mouse_hold(&mut h, 103, (60, 600)); // inside the leading 10 % zone
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    let moving = h.engine.strips[&key].offset;
+    h.desktop.0.lock().unwrap().cursor = (140, 600); // back toward the centre, still inside the zone
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    thread::sleep(Duration::from_millis(30));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, moving,
+        "reversal stops the scroll even inside the zone"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// Review #2: a brisk lift after a committed perpendicular group swipe stacks the window; it is not flung.
+#[test]
+fn fling_does_not_hijack_a_committed_group_entry() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let before = h.engine.drag.is_none();
+    assert!(before);
+    h.engine.hot.swipe_fling_speed = 1.0; // any lift qualifies as a fling
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=40 {
+        h.engine
+            .event(Event::Contacts(four(500. + 10. * i as f64, 500.)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    if let Some(d) = h.engine.drag.as_mut() {
+        d.phase = crate::daemon::DragPhase::MiddleGroup {
+            target: 102,
+            direction: 1,
+        };
+        d.target = Some(102);
+        d.mode = planor::Drag::Stack;
+    }
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    assert!(
+        h.engine.strips[&(1, "MON0".to_string())]
+            .locate(101)
+            .is_some(),
+        "the window stayed on its monitor (not flung away)"
+    );
+    h.stop_clean();
+}
+
+/// Port of the #44 regression to the 4.8 model (review #7): a qualifying four-finger fling released onto
+/// another monitor ends the pad and drag sessions at once, engages the placeholder cover, and transfers the
+/// window even though the asynchronous OS move has not landed yet.
+#[test]
+fn fling_release_onto_another_monitor_commits_immediately_even_before_async_move_lands() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_fling_speed"] = toml::Value::Integer(100);
+    cfg["animation"]["placeholder"] = toml::Value::Boolean(true);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 301);
+    let orig = h.rect(301);
+    let mut steps = vec![(0., 5.); 4];
+    steps.extend(vec![(10., 0.); 6]);
+    feed_steps(&mut h, &mut steps);
+    assert!(h.engine.pad.is_some(), "carrying");
+    // A slow cross-DPI app: its OS frame has not left the original rect yet.
+    h.desktop
+        .0
+        .lock()
+        .unwrap()
+        .windows
+        .get_mut(&301)
+        .unwrap()
+        .rect = orig;
+    h.engine.event(Event::Contacts(vec![]));
+    assert!(h.engine.pad.is_none(), "tip-up releases the pad at once");
+    assert!(h.engine.drag.is_none(), "the drag session ends at once");
+    assert!(
+        h.engine.covering.contains_key(&301),
+        "the transfer engages the placeholder cover"
+    );
+    h.settle();
+    let on = h
+        .engine
+        .strips
+        .iter()
+        .find(|(_, s)| s.locate(301).is_some())
+        .map(|(k, _)| k.1.clone());
+    assert_eq!(
+        on,
+        Some("MON0".to_string()),
+        "transferred before the OS move landed"
+    );
+    h.stop_clean();
+}
+
+/// Win+W note 220321078: with `reveal_on_focus = false`, focus landing on an off-screen window selects
+/// it without scrolling the strip; the default still reveals it.
+#[test]
+fn reveal_on_focus_false_keeps_the_strip_where_it_is() {
+    let run = |reveal: bool| {
+        let mut cfg = test_cfg();
+        cfg["layout"]["reveal_on_focus"] = toml::Value::Boolean(reveal);
+        let mut h = SimHarness::with_setup(primary_only_rig(), cfg, |sim| {
+            for i in 0..6 {
+                sim.add_window(SimWindow::new(
+                    101 + i,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        w: 900,
+                        h: 1000,
+                    },
+                ));
+            }
+        });
+        focus(&mut h, 101);
+        let before = h.engine.strips[&(1, h.engine.active.clone())].offset;
+        focus(&mut h, 106);
+        let after = h.engine.strips[&(1, h.engine.active.clone())].offset;
+        let active = h.engine.strips[&(1, h.engine.active.clone())].active();
+        h.stop_clean();
+        (before, after, active)
+    };
+    let (b, a, act) = run(false);
+    assert_eq!(act, Some(106), "focus still selects the window");
+    assert_eq!(b, a, "strip did not scroll");
+    let (b, a, _) = run(true);
+    assert_ne!(b, a, "default reveals the off-screen window");
+}
+
+/// Win+W note 220256952 ("window do not want to pair virtically"): on the portrait monitor the strip runs
+/// vertically, so the perpendicular swipe is horizontal and must still commit group mode.
+#[test]
+fn pad_perpendicular_swipe_groups_on_a_portrait_monitor() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 301);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    let (x, mut y) = (500., 500.);
+    let mut seen_preview = false;
+    for _ in 0..120 {
+        y += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            seen_preview = true;
+            break;
+        }
+    }
+    assert!(seen_preview, "portrait pad drag previews: {:?}", phase(&h));
+    let mut xx = x;
+    for _ in 0..40 {
+        xx += 8.;
+        h.engine.event(Event::Contacts(four(xx, y)));
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ),
+        "horizontal swipe commits group mode on a vertical strip: {:?}",
+        phase(&h)
+    );
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+/// Win+W "cant pair" x3: the owner's fingers drift along the strip while swiping across it. A perpendicular
+/// swipe with along-axis drift (landscape and portrait) must still commit group mode.
+#[test]
+fn pad_perpendicular_swipe_with_along_axis_drift_still_groups() {
+    for (win, horizontal) in [(101, true), (301, false)] {
+        let mut cfg = note_cfg();
+        cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+        cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+        let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+        h.engine.hot.drag_dwell_ms = 0;
+        focus(&mut h, win);
+        let (mut x, mut y) = (500., 500.);
+        h.engine.event(Event::Contacts(four(x, y)));
+        let mut seen_preview = false;
+        for _ in 0..200 {
+            if horizontal {
+                x += 8.;
+            } else {
+                y += 8.;
+            }
+            h.engine.event(Event::Contacts(four(x, y)));
+            h.engine.tick().unwrap();
+            if matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddlePreview { .. })
+            ) {
+                seen_preview = true;
+                break;
+            }
+        }
+        assert!(seen_preview, "{win}: preview reached: {:?}", phase(&h));
+        let mut grouped = false;
+        for _ in 0..60 {
+            // 8 across, 3 along (the drift), both signs of drift tried in turn.
+            if horizontal {
+                y -= 4.;
+                x -= 2.;
+            } else {
+                x -= 4.;
+                y -= 2.;
+            }
+            h.engine.event(Event::Contacts(four(x, y)));
+            h.engine.tick().unwrap();
+            if matches!(
+                phase(&h),
+                Some(crate::daemon::DragPhase::MiddleGroup { .. })
+            ) {
+                grouped = true;
+                break;
+            }
+        }
+        assert!(
+            grouped,
+            "{win}: a drifting perpendicular swipe commits group mode: {:?}",
+            phase(&h)
+        );
+        h.engine.event(Event::Contacts(vec![]));
+        h.settle();
+    }
+}
+
+/// #117 matrix: lifting a four-finger drag sends a single non-live scene (no extra scene or placement burst).
+#[test]
+fn lifting_a_pad_drag_sends_one_final_scene() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=10 {
+        h.engine
+            .event(Event::Contacts(four(500. + 6. * i as f64, 500.)));
+        h.engine.tick().unwrap();
+    }
+    assert!(h.engine.pad.is_some(), "carrying");
+    let before = h.desktop.0.lock().unwrap().scenes.len();
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let g = h.desktop.0.lock().unwrap();
+    let added = &g.scenes[before..];
+    assert!(
+        !added.is_empty() && added.len() <= 2,
+        "lift sends at most two scenes, got {}",
+        added.len()
+    );
+    assert!(!added.last().unwrap().live, "the last scene is non-live");
+}
+
+/// #117 matrix: corners. A pointer in the corner where two edge zones overlap scrolls only along the strip
+/// axis of the monitor under it, and the cross-axis zone never scrolls a landscape strip.
+#[test]
+fn edge_scroll_in_a_corner_follows_only_the_strip_axis() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    let off0 = h.engine.strips[&key].offset;
+    // Top-left corner of MON0: inside both the left zone (x) and the top zone (y).
+    mouse_hold(&mut h, 103, (5, 5));
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    let after_corner = h.engine.strips[&key].offset;
+    assert!(after_corner < off0, "the left zone scrolls in the corner");
+    // The top zone alone (x in the middle) must not scroll a landscape strip.
+    h.desktop.0.lock().unwrap().cursor = (960, 5);
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, after_corner,
+        "the cross-axis zone does not scroll a landscape strip"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// #117 matrix: a perpendicular-swipe stack trigger animates as a drag reflow at once (not instant, not delayed).
+#[test]
+fn stack_trigger_requests_the_drag_reflow_animation_at_once() {
+    let mut cfg = note_cfg();
+    cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    let before = h.desktop.0.lock().unwrap().scenes.len();
+    for _ in 0..30 {
+        y -= 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddleGroup { .. })
+    ));
+    h.settle_quiet();
+    let g = h.desktop.0.lock().unwrap();
+    let s = g.scenes[before..]
+        .iter()
+        .find(|s| s.action == "drag_reflow")
+        .unwrap_or_else(|| {
+            panic!(
+                "no drag_reflow scene; actions: {:?}",
+                g.scenes[before..]
+                    .iter()
+                    .map(|s| (s.action.clone(), s.duration))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        s.duration > 0,
+        "the stack animates (duration {})",
+        s.duration
+    );
+    drop(g);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
+
+/// Owner request: a small filled drop box shows in the target while the pointer is between 1/4 and 3/4 of it,
+/// not before 1/4, and never after the drop.
+#[test]
+fn drop_box_shows_only_in_the_middle_range_and_clears_on_drop() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    focus(&mut h, 101);
+    let b = visible_rect(
+        &h,
+        102,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+    );
+    let at = |frac: f64| (b.x + (b.w as f64 * frac) as i32, b.y + b.h / 2);
+    // Before a quarter: no box.
+    mouse_hold(&mut h, 101, at(0.1));
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    assert!(zones(&h).is_empty(), "no drop box before 1/4");
+    // Middle range: the small box, inside the target and much smaller than it.
+    h.desktop.0.lock().unwrap().cursor = at(0.5);
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let boxes = zones(&h);
+    assert_eq!(boxes.len(), 1, "one drop box in the middle range");
+    let c = &boxes[0];
+    assert!(matches!(c.kind, crate::cue::CueKind::DropBox { .. }));
+    let svg =
+        crate::cue::evaluate_cue(c, 0, crate::cue::CuePalette::from_system(true, 0), &[], 1.0);
+    assert!(
+        svg.rect.w * 2 <= b.w && svg.rect.h * 2 <= b.h,
+        "the box is way smaller than the target: {:?} vs {b:?}",
+        svg.rect
+    );
+    // Drop: no box left behind.
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    drop_now(&mut h, 101);
+    assert!(zones(&h).is_empty(), "no drop box after the drop");
+    h.stop_clean();
+}
+
+/// Owner request: when the window crosses to another monitor the box leaves the first one and appears on the other.
+#[test]
+fn drop_box_follows_the_window_to_the_other_monitor() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let b = visible_rect(
+        &h,
+        202,
+        Rect {
+            x: 0,
+            y: 0,
+            w: 0,
+            h: 0,
+        },
+    );
+    mouse_hold(&mut h, 101, (b.x + b.w / 2, b.y + b.h / 2));
+    h.engine.tick().unwrap();
+    h.settle_quiet();
+    let boxes = zones(&h);
+    assert!(
+        boxes.iter().all(|c| c.monitor == "MON1"),
+        "the box is only on the monitor the window is over: {:?}",
+        boxes.iter().map(|c| c.monitor.clone()).collect::<Vec<_>>()
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
 }

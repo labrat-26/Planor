@@ -248,6 +248,23 @@ impl Strip {
             c.length = self.area.length().max(c.minimum)
         }
     }
+    /// Like `group`, but `leading` puts the joiner before the target's members (up on landscape, left on
+    /// portrait) instead of after them; it becomes the active member either way (#113 swipe direction).
+    pub fn group_at(&mut self, id: WindowId, target: WindowId, leading: bool) {
+        self.group(id, target);
+        if leading
+            && let Some((i, _)) = self.locate(id)
+            && self.columns[i].members.len() > 1
+        {
+            let c = &mut self.columns[i];
+            let Some(at) = c.members.iter().position(|m| *m == id) else {
+                return;
+            };
+            let m = c.members.remove(at);
+            c.members.insert(0, m);
+            c.active = 0;
+        }
+    }
     pub fn ungroup(&mut self, id: WindowId) {
         if let Some((i, _)) = self.locate(id)
             && self.columns[i].members.len() > 1
@@ -545,45 +562,154 @@ pub enum Drag {
     /// Exchange places with the target.
     Swap,
 }
-/// The stack (merge) zone: spans the full cross-axis extent of the window (full height on
-/// landscape, full width on portrait, #103) and the middle `percent` along the strip axis
-/// (owner's choice 2026-11-22: 50 %, after a 120 px box was hit by 5 of 12 real four-finger
-/// drops). Shown filled while a window is being dragged.
-pub fn stack_zone(r: Rect, percent: i32, horizontal: bool) -> Rect {
-    let p = percent.clamp(5, 95);
-    if horizontal {
-        let w = (r.w * p / 100).max(1);
-        Rect {
-            x: r.x + (r.w - w) / 2,
-            y: r.y,
-            w,
-            h: r.h,
+/// Which edge of a neighbour overlay a dragged window entered from (#113).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum EntryEdge {
+    /// Entered from the leading edge (left in landscape, top in portrait).
+    Leading,
+    /// Entered from the trailing edge (right in landscape, bottom in portrait).
+    Trailing,
+}
+
+/// Threshold band across a neighbour tile measured from the entry edge (#113).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum NeighbourBand {
+    /// Entry progress < 1/4: neighbours remain fixed; release returns held window to origin.
+    BeforeQuarter,
+    /// Entry progress in [1/4, 3/4): stationary dwell triggers preview; `after` is midpoint-selected side.
+    Middle { after: bool },
+    /// Entry progress >= 3/4: release animates into destination side without premature neighbour reflow.
+    PastThreeQuarters { after: bool },
+}
+
+/// Determine which edge of a neighbour overlay `[target_lo, target_lo + target_span]` the held
+/// window entered from (#113).
+///
+/// Uses the previous strip-axis pointer coordinate when it lay outside the neighbour, then falls
+/// back to strip column order (`origin_col < target_col` => `Leading`), and finally the pointer's
+/// half inside the neighbour (`pos < midpoint` => `Leading`).
+pub fn infer_entry_edge(
+    prev_pos: Option<i32>,
+    target_lo: i32,
+    target_span: i32,
+    origin_col: Option<usize>,
+    target_col: Option<usize>,
+    pos: i32,
+) -> EntryEdge {
+    let span = target_span.max(1);
+    let target_hi = target_lo + span;
+    if let Some(prev) = prev_pos {
+        if prev < target_lo {
+            return EntryEdge::Leading;
         }
-    } else {
-        let h = (r.h * p / 100).max(1);
-        Rect {
-            x: r.x,
-            y: r.y + (r.h - h) / 2,
-            w: r.w,
-            h,
+        if prev >= target_hi {
+            return EntryEdge::Trailing;
         }
     }
-}
-/// What a drop does. Purely positional (no speed or dwell), so it never flickers:
-/// in the stack zone it groups; elsewhere over a window on the same monitor a lone window swaps places
-/// with it, while a window dragged out of a group swaps with a sibling or is pulled out beside any other
-/// window. Arriving from another monitor (`crossing`) it goes beside the target, never swaps: a monitor
-/// filled by one window must still be able to take another.
-/// `fraction` is the cursor position along the strip axis inside the target (0..1).
-pub fn drag(in_zone: bool, fraction: f64, grouped: bool, sibling: bool, crossing: bool) -> Drag {
-    if in_zone && !sibling {
-        Drag::Stack
-    } else if !crossing && (!grouped || sibling) {
-        Drag::Swap
-    } else if fraction < 0.5 {
-        Drag::Before
+    if let (Some(oc), Some(tc)) = (origin_col, target_col)
+        && oc != tc
+    {
+        return if oc < tc {
+            EntryEdge::Leading
+        } else {
+            EntryEdge::Trailing
+        };
+    }
+    if (pos - target_lo) as i64 * 2 < span as i64 {
+        EntryEdge::Leading
     } else {
-        Drag::After
+        EntryEdge::Trailing
+    }
+}
+
+/// Classify a pointer position along a neighbour overlay `[target_lo, target_lo + target_span]`
+/// measured from `entry_edge` (#113).
+///
+/// Uses exact integer cross-multiplication so boundary values at 1/4, 1/2, and 3/4 never suffer
+/// from floating-point rounding drift. Returns `(entry_progress, band)`.
+pub fn classify_neighbour_entry(
+    pos: i32,
+    target_lo: i32,
+    target_span: i32,
+    entry_edge: EntryEdge,
+) -> (f64, NeighbourBand) {
+    let span = target_span.max(1) as i64;
+    let raw_num = ((pos - target_lo) as i64).clamp(0, span);
+    let progress_num = match entry_edge {
+        EntryEdge::Leading => raw_num,
+        EntryEdge::Trailing => span - raw_num,
+    };
+    let progress = progress_num as f64 / span as f64;
+    let band = if progress_num * 4 < span {
+        NeighbourBand::BeforeQuarter
+    } else if progress_num * 4 >= span * 3 {
+        NeighbourBand::PastThreeQuarters {
+            after: entry_edge == EntryEdge::Leading,
+        }
+    } else {
+        NeighbourBand::Middle {
+            after: raw_num * 2 >= span,
+        }
+    };
+    (progress, band)
+}
+
+/// Evaluate whether a drag of a stack member has reached the 1/4 directional stack-exit threshold
+/// along the strip axis (#115).
+///
+/// - `delta_along`: signed gesture projection along the strip axis (left/up < 0, right/down > 0).
+/// - `delta_cross`: signed gesture projection across the strip axis.
+/// - `relevant_span`: usable overlay span of the neighbour in the pulled direction (or own column).
+/// - `in_own_column`: true while the pointer is still inside the stack's own column (guards
+///   cross-axis sibling reordering from triggering stack exit).
+///
+/// Returns `Some(trailing)` (`false` = leading/left/up, `true` = trailing/right/down) when at or
+/// beyond 1/4 of `relevant_span`, or `None` when below threshold.
+pub fn classify_stack_exit(
+    delta_along: i32,
+    delta_cross: i32,
+    relevant_span: i32,
+    in_own_column: bool,
+) -> Option<bool> {
+    if delta_along == 0 {
+        return None;
+    }
+    let span = relevant_span.max(1) as i64;
+    let along = (delta_along as i64).abs();
+    let cross = (delta_cross as i64).abs();
+    if along * 4 >= span && (along >= cross || !in_own_column) {
+        Some(delta_along > 0)
+    } else {
+        None
+    }
+}
+
+/// Compute the drag edge-scroll activation band in pixels from the monitor's usable strip-axis
+/// span and the configured percentage (`0` = disabled, `1..=40` = rounded up to at least 1 px so
+/// small monitors never truncate to an unusable zero-pixel band, #116).
+pub fn edge_scroll_zone_px(usable_span: i32, percent: i32) -> i32 {
+    if percent <= 0 || usable_span <= 0 {
+        return 0;
+    }
+    let pct = percent.clamp(0, 40) as f64;
+    ((usable_span as f64) * pct / 100.0).ceil().max(1.0) as i32
+}
+
+/// Return `-1` (leading edge), `+1` (trailing edge), or `0` (middle or disabled) for a cursor
+/// strip-axis coordinate `pos` on a monitor whose usable strip-axis range is `[usable_lo, usable_hi]`
+/// (#116).
+pub fn edge_scroll_direction(pos: i32, usable_lo: i32, usable_hi: i32, percent: i32) -> i32 {
+    let span = usable_hi - usable_lo;
+    let zone = edge_scroll_zone_px(span, percent);
+    if zone <= 0 {
+        return 0;
+    }
+    if pos < usable_lo + zone {
+        -1
+    } else if pos >= usable_hi - zone {
+        1
+    } else {
+        0
     }
 }
 /// Multi-finger swipe recogniser. Three or four fingers moving together lock to one axis (after the
@@ -855,6 +981,57 @@ pub fn adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize
                 ),
                 i,
             ))
+        })
+        .min()
+        .map(|(_, i)| i)
+}
+/// Reachable adjacent monitor in direction `(dx, dy)` sharing an edge with `source` (#111, #116):
+/// requires a boundary gap `<= 2` px and positive perpendicular overlap (`overlap > 0`), so
+/// disconnected display gaps and corner-only touches are excluded.
+pub fn connected_adjacent(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize> {
+    others
+        .iter()
+        .enumerate()
+        .filter_map(|(i, b)| {
+            let (gap, a0, a1, b0, b1) = match (dx, dy) {
+                (1, 0) => (
+                    b.x - source.x - source.w,
+                    source.y,
+                    source.y + source.h,
+                    b.y,
+                    b.y + b.h,
+                ),
+                (-1, 0) => (
+                    source.x - b.x - b.w,
+                    source.y,
+                    source.y + source.h,
+                    b.y,
+                    b.y + b.h,
+                ),
+                (0, 1) => (
+                    b.y - source.y - source.h,
+                    source.x,
+                    source.x + source.w,
+                    b.x,
+                    b.x + b.w,
+                ),
+                (0, -1) => (
+                    source.y - b.y - b.h,
+                    source.x,
+                    source.x + source.w,
+                    b.x,
+                    b.x + b.w,
+                ),
+                _ => return None,
+            };
+            if !(0..=2).contains(&gap) {
+                return None;
+            }
+            let overlap = a1.min(b1) - a0.max(b0);
+            if overlap <= 0 {
+                return None;
+            }
+            Some(((gap, -overlap, (a0 + a1 - b0 - b1).abs()), i))
         })
         .min()
         .map(|(_, i)| i)
@@ -1688,4 +1865,48 @@ mod contact_frame_tests {
         assert_eq!(rec.packet(0, [(2, (9.0, 5.0))]).unwrap().len(), 2);
         assert_eq!(rec.packet(1, []), Some(vec![]));
     }
+}
+
+/// Monitor a fling in direction `(dx, dy)` (unit axis step) throws a window to: any other monitor lying on
+/// that side of `source` (its rect starts past the source edge, within 2 px of overlap), even offset or across
+/// a small gap. When several qualify, the one whose centre is nearest the source centre wins.
+pub fn fling_target(source: Rect, others: &[Rect], dx: i32, dy: i32) -> Option<usize> {
+    let sc = (
+        source.x as f64 + source.w as f64 / 2.,
+        source.y as f64 + source.h as f64 / 2.,
+    );
+    others
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| **b != source)
+        .filter(|(_, b)| match (dx, dy) {
+            (1, 0) => b.x >= source.x + source.w - 2,
+            (-1, 0) => b.x + b.w <= source.x + 2,
+            (0, 1) => b.y >= source.y + source.h - 2,
+            (0, -1) => b.y + b.h <= source.y + 2,
+            _ => false,
+        })
+        .map(|(i, b)| {
+            let c = (b.x as f64 + b.w as f64 / 2., b.y as f64 + b.h as f64 / 2.);
+            let d = (c.0 - sc.0).powi(2) + (c.1 - sc.1).powi(2);
+            ((d * 1000.) as i64, i)
+        })
+        .min()
+        .map(|(_, i)| i)
+}
+
+/// Lift-off velocity (units/s) of a flick from `(age_secs, dx, dy)` samples: the travel of the last 120 ms
+/// divided by the time that travel actually took (at least 40 ms), so a short quick flick is not diluted by a
+/// fixed 120 ms divisor.
+pub fn fling_velocity(samples: &[(f64, f64, f64)]) -> (f64, f64) {
+    let (mut vx, mut vy, mut oldest) = (0., 0., None::<f64>);
+    for &(age, dx, dy) in samples {
+        if age <= 0.12 {
+            vx += dx;
+            vy += dy;
+            oldest = Some(oldest.map_or(age, |o: f64| o.max(age)));
+        }
+    }
+    let span = oldest.unwrap_or(0.12).clamp(0.04, 0.12);
+    (vx / span, vy / span)
 }

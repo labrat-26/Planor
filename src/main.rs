@@ -1,5 +1,6 @@
 mod backend;
 mod config_watch;
+mod cue;
 mod daemon;
 mod diag;
 mod gpu;
@@ -83,11 +84,29 @@ pub(crate) fn choices(key: &str) -> Option<&'static [&'static str]> {
         _ => None,
     }
 }
+/// Keys removed in Milestone 4.8 (#111, #112): an old config that still sets them loads without a warning.
+pub(crate) const REMOVED_KEYS: &[&str] = &[
+    "stack_zone_percent",
+    "swipe_drag_cross_monitors",
+    "drop_target_color",
+    "group_hover_color",
+    "drag_vacancy_delay_ms",
+];
+
+/// Largest accepted integer for setting `k` (the single source for validation, stepping and range hints).
+pub(crate) fn int_max(k: &str) -> i64 {
+    match k {
+        "drag_dwell_ms" => 5000,
+        "drag_edge_scroll_percent" => 40,
+        _ => 100000,
+    }
+}
 /// Whether `v` may replace the default `old` for setting `k`: same type, sane range, a known word, a
 /// `#RRGGBB` colour. Shared by the daemon config merge and the settings window.
 pub(crate) fn valid_value(k: &str, old: &toml::Value, v: &toml::Value) -> bool {
+    let int_ok = |n: i64| (0..=int_max(k)).contains(&n);
     let typed = old.type_str() == v.type_str()
-        && v.as_integer().is_none_or(|n| (0..=100000).contains(&n))
+        && v.as_integer().is_none_or(int_ok)
         && v.as_float()
             .is_none_or(|n| n.is_finite() && n > 0. && (k != "default_tile_share" || n <= 1.));
     let known = match (choices(k), k) {
@@ -132,6 +151,9 @@ fn parse(s: &str) -> Result<toml::Value> {
                 {
                     *old = v.clone();
                     continue;
+                }
+                if REMOVED_KEYS.contains(&k.as_str()) {
+                    continue; // removed in 4.8: dropped silently, never an error
                 }
                 eprintln!("ignored invalid config key in {section}")
             }

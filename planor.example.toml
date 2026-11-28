@@ -6,18 +6,25 @@ gap_px = 6
 peek_enabled = true
 peek_width_px = 48
 stack_peek_px = 96
-# While a window is dragged, every window on the monitor under the cursor shows a filled stack zone: the middle
-# of the window along the strip covering this percentage of it, at its full height (full width on a portrait
-# monitor). Dropping in it joins that group;
-# dropping anywhere else on a window swaps the two (a window dragged out of a group goes beside it).
-stack_zone_percent = 50
+# Stationary dwell time in milliseconds inside a neighbour's middle range (1/4..3/4) before
+# previewing neighbour shift and showing the group-entry cue (0..=5000 ms; 0 = immediate).
+drag_dwell_ms = 250
+# Drag edge-scroll activation distance as a percentage of the active monitor's usable strip-axis
+# span (0..=40 %; 0 = disabled). Applies to both mouse and four-finger touchpad drags.
+drag_edge_scroll_percent = 10
 
 # A new window opens on the monitor under the mouse cursor.
 spawn_on_cursor_monitor = true
-# Held while dropping: no swap or stack, the window goes back to its slot.
+# Group modifier key for mouse drags ("Shift", "Ctrl", or "Alt"): after dwelling in a neighbour's
+# middle range (1/4..3/4), pressing this key activates mouse group mode and starts the stack animation
+# immediately. Releasing the mouse without pressing it tiles on the midpoint-selected side. Does not
+# control four-finger trackpad group entry (which uses a perpendicular swipe instead).
 drag_stack_modifier = "Shift"
 focus_follows_mouse = false
 warp_cursor_to_focused = false
+# Scroll the strip to a window that takes focus while off screen (alt-tab, taskbar, a dialog closing).
+# Off: focus moves to it but the strip stays where it is.
+reveal_on_focus = true
 
 [borders]
 enabled = true
@@ -26,9 +33,6 @@ corner_radius_px = 8
 focused_color = "#3B82F6"
 stacked_color = "#A855F7"
 pinned_color = "#F59E0B"
-drop_target_color = "#10B981"
-# A dragged window over a group lights the group in a lighter shade of the focus colour.
-group_hover_color = "#93C5FD"
 
 [animation]
 enabled = true
@@ -54,11 +58,9 @@ swipe_natural_direction = true
 # swipe_drag_gain: window travel per unit of finger travel.
 swipe_drag_gain = 7.0
 # Drag axis lock: a four-finger drag only starts along the strip axis (sideways on landscape, up and down on portrait);
-# a cross-axis start does nothing. The carried window then slides only along that axis. Limits: over the window's
-# own group column it moves freely (to reorder the group); leaving the column puts it back on its line. Pushing
-# the fingers across the axis by 7x axis_lock_deadzone releases the lock only when swipe_drag_cross_monitors is on
-# and another monitor lies that way. The axis stays that of the strip it was picked up from, and a fling still goes
-# in any direction. Off: free drag in any direction.
+# a cross-axis start does nothing. The carried window slides along that axis on its starting monitor (only a qualifying
+# fling crosses monitors). Over the window's own group column it moves freely to reorder siblings; after dwelling in a
+# neighbour's middle range (1/4..3/4), a perpendicular swipe activates stack entry. Off: free drag on the starting monitor.
 drag_axis_lock = true
 # Acceleration: extra gain per 1000 units/s of smoothed finger speed, capped at 1.6x (0 = linear). Kept small so one swipe always moves the window about the same.
 swipe_drag_accel = 0.15
@@ -73,8 +75,6 @@ scroll_autofocus = false
 # neighbouring screen in that direction. The owner's recorded flicks ran at about 1000-1100 units/s.
 swipe_fling_enabled = true
 swipe_fling_speed = 900
-# Carry the window across monitors while dragging (off: stay on its monitor, a fling crosses).
-swipe_drag_cross_monitors = true
 
 [mouse]
 # Win + MOUSE wheel (not the touchpad) scrolls the strip under the cursor along its axis (sideways on landscape, up and down on

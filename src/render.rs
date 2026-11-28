@@ -52,8 +52,8 @@ pub struct Scene {
     pub radius: f32,
     /// Rectangles of unmanaged app windows (desktop coordinates): cut out of the overlay.
     pub holes: std::sync::Arc<[Rect]>,
-    /// Filled boxes drawn under the borders: the stack drop zones while a window is carried.
-    pub zones: Vec<Zone>,
+    /// Non-interactive animated SVG guidance cue shown during drag gestures (#112, #113, #115).
+    pub cue: Option<crate::cue::GestureCue>,
     /// What caused this scene (scroll, drag_reflow, open_close, stack_switch, resize, ...): animation frame
     /// timings are reported per action.
     pub action: &'static str,
@@ -65,65 +65,17 @@ pub struct Scene {
     /// snap-back, cancelled drag, or reload).
     pub force_place: bool,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ZoneKind {
-    Merge,
-    Leave { trailing: bool, horizontal: bool },
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ZoneIcon {
-    pub kind: ZoneKind,
-    pub rect: Rect,
-    pub color: u32,
-}
-
-#[derive(Clone, Debug)]
-pub struct Zone {
-    pub rect: Rect,
-    pub monitor: String,
-    pub color: u32,
-    pub alpha: f32,
-    pub kind: ZoneKind,
-}
-
-/// Compute the centred, zone-scaled, theme-aware icon specification for a drop-zone rect (#104).
-/// The renderer's glyph draw uses this same maths (with its DPI scale), so the tests that check
-/// the spec cover what is actually drawn (#102 review).
-pub(crate) fn zone_icon_rect(rect: &Rect, kind: ZoneKind, dark: bool, dpi: f32) -> ZoneIcon {
-    let min_dim = rect.w.min(rect.h).max(1) as f32;
-    let side = (min_dim * 0.32)
-        .clamp(20.0 * dpi, 64.0 * dpi)
-        .min(min_dim * 0.85)
-        .round()
-        .max(1.0) as i32;
-    ZoneIcon {
-        kind,
-        rect: Rect {
-            x: rect.x + (rect.w - side) / 2,
-            y: rect.y + (rect.h - side) / 2,
-            w: side,
-            h: side,
-        },
-        color: crate::theme::zone_icon_color(dark),
-    }
-}
-/// Compute the centred, zone-scaled, theme-aware icon specification for a drop zone (#104).
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn zone_icon_spec(z: &Zone, dark: bool, dpi: f32) -> ZoneIcon {
-    zone_icon_rect(&z.rect, z.kind, dark, dpi)
-}
 pub enum Message {
     Scene(Scene),
-    /// Holes and tile border colour patch that must not interrupt an in-flight animation or
-    /// `open_close` handoff (no new epoch, no motion reset).
+    /// Holes, tile border colour, and gesture-cue patch that must not interrupt an in-flight
+    /// animation or `open_close` handoff (no new epoch, no motion reset).
     OverlayUpdate {
         seq: u64,
         #[cfg_attr(not(test), allow(dead_code))]
         update_id: u64,
         holes: std::sync::Arc<[Rect]>,
         colors: Vec<(isize, Option<u32>)>,
+        cue: Option<crate::cue::GestureCue>,
     },
     /// Monitors (name, bounds) to build overlay hosts for ahead of the first scene.
     Warm(Vec<(String, Rect)>),
@@ -136,8 +88,10 @@ pub(crate) fn apply_overlay_update(
     scene: &mut Scene,
     holes: std::sync::Arc<[Rect]>,
     colors: &[(isize, Option<u32>)],
+    cue: Option<crate::cue::GestureCue>,
 ) {
     scene.holes = holes;
+    scene.cue = cue;
     for tile in &mut scene.tiles {
         if let Some(&(_, c)) = colors.iter().find(|&&(id, _)| id == tile.id) {
             tile.color = c;
@@ -385,7 +339,7 @@ fn record_visible_frame_state(
     last_draw: &mut DrawSig,
     want_visible: &mut bool,
     last_draw_valid: &mut bool,
-    fills: &[(Rect, u32, f32, ZoneKind)],
+    cue: Option<&CueDraw>,
     cards: &[CardDraw],
     lines: &[BorderLine],
     holes: &[Rect],
@@ -396,7 +350,7 @@ fn record_visible_frame_state(
     draw_succeeded: bool,
 ) {
     *want_visible = true;
-    last_draw.set_from(fills, cards, lines, holes, width, radius, dpi);
+    last_draw.set_from(cue, cards, lines, holes, width, radius, dpi);
     *last_draw_valid = draw_succeeded && !has_pictures;
 }
 fn clear_hidden_frame_state(
@@ -418,28 +372,24 @@ pub(crate) fn idle_scene_from_settled(mut settled: Scene) -> Scene {
     settled.duration = 0;
     settled.live = false;
     settled.force_place = false;
-    settled.zones.clear();
+    settled.cue = None;
     settled
 }
-/// A redraw of the last live scene (the fingers rest mid-swipe, so no new scene arrives) after a parked
-/// window's picture got a new frame: same epoch and layout, no animation and no OS placement (its targets
-/// already match), but still live so the stand-ins keep being drawn instead of the windows being unparked.
+/// A redraw of the last live or cue-bearing scene (no new layout arrived): same epoch and layout,
+/// no animation and no OS placement (its targets already match), preserving `live` and `cue`.
 pub(crate) fn live_redraw_scene(mut settled: Scene) -> Scene {
     settled.action = "idle";
     settled.duration = 0;
     settled.force_place = false;
     settled
 }
-/// The frame an `OverlayUpdate` (holes or border colours) re-arms from the settled scene. A live scene stays
-/// live: between a slow lift and its queued settle the stand-ins are still what is drawn and the real windows
-/// are still parked, and clearing `live` here would unpark them at the mid-scroll position only for the settle
-/// to move them again (#108 re-review F1). The settle's own scene ends the live state.
-pub(crate) fn overlay_patched_settled_scene(settled: Scene) -> Scene {
-    if settled.live {
-        live_redraw_scene(settled)
-    } else {
-        idle_scene_from_settled(settled)
-    }
+/// The frame an `OverlayUpdate` (holes, border colours, or gesture cue) re-arms from the settled
+/// scene. Keeps `live` and `cue` intact without moving windows (#108 re-review F1, #112).
+pub(crate) fn overlay_patched_settled_scene(mut settled: Scene) -> Scene {
+    settled.action = "idle";
+    settled.duration = 0;
+    settled.force_place = false;
+    settled
 }
 /// #67: whether a recovered surface needs the settled scene re-armed to rebuild its WGC pictures. A still-dead
 /// device, a scene already queued, or no settled scene means there is nothing to do.
@@ -609,9 +559,24 @@ pub(crate) fn border_line(drawn: Rect, color: u32, bound: Rect, host: Rect) -> B
         clip: local(bound),
     }
 }
+#[derive(Clone, Debug)]
+struct CueDraw {
+    cue: crate::cue::GestureCue,
+    host_origin: (i32, i32),
+    world_holes: Vec<Rect>,
+    phase_ms: u64,
+    phase_bucket: u64,
+}
 #[derive(Clone, Default, PartialEq, Eq)]
 struct DrawSig {
-    fills: Vec<(Rect, u32, u32, ZoneKind)>,
+    cue: Option<(
+        Rect,
+        Option<Rect>,
+        bool,
+        crate::cue::CueInput,
+        crate::cue::CueKind,
+        u64,
+    )>,
     cards: Vec<(Rect, u32, u32)>,
     lines: Vec<BorderLine>,
     holes: Vec<Rect>,
@@ -620,9 +585,29 @@ struct DrawSig {
     dpi_bits: u32,
 }
 impl DrawSig {
+    fn cue_key(
+        c: &CueDraw,
+    ) -> (
+        Rect,
+        Option<Rect>,
+        bool,
+        crate::cue::CueInput,
+        crate::cue::CueKind,
+        u64,
+    ) {
+        (
+            c.cue.held_rect,
+            c.cue.target_rect,
+            c.cue.horizontal,
+            c.cue.input,
+            c.cue.kind,
+            c.phase_bucket,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
     fn matches(
         &self,
-        fills: &[(Rect, u32, f32, ZoneKind)],
+        cue: Option<&CueDraw>,
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -633,17 +618,10 @@ impl DrawSig {
         self.width_bits == width.to_bits()
             && self.radius_bits == radius.to_bits()
             && self.dpi_bits == dpi.to_bits()
-            && self.fills.len() == fills.len()
+            && self.cue == cue.map(Self::cue_key)
             && self.cards.len() == cards.len()
             && self.lines.len() == lines.len()
             && self.holes.as_slice() == holes
-            && self
-                .fills
-                .iter()
-                .zip(fills)
-                .all(|(&(r1, c1, a1, k1), &(r2, c2, a2, k2))| {
-                    r1 == r2 && c1 == c2 && a1 == a2.to_bits() && k1 == k2
-                })
             && self.cards.iter().zip(cards).all(|(&(r1, a1, ang1), c2)| {
                 r1 == c2.rect
                     && a1 == c2.spinner_alpha.to_bits()
@@ -651,9 +629,10 @@ impl DrawSig {
             })
             && self.lines.as_slice() == lines
     }
+    #[allow(clippy::too_many_arguments)]
     fn set_from(
         &mut self,
-        fills: &[(Rect, u32, f32, ZoneKind)],
+        cue: Option<&CueDraw>,
         cards: &[CardDraw],
         lines: &[BorderLine],
         holes: &[Rect],
@@ -661,9 +640,7 @@ impl DrawSig {
         radius: f32,
         dpi: f32,
     ) {
-        self.fills.clear();
-        self.fills
-            .extend(fills.iter().map(|&(r, c, a, k)| (r, c, a.to_bits(), k)));
+        self.cue = cue.map(Self::cue_key);
         self.cards.clear();
         self.cards.extend(cards.iter().map(|c| {
             (
@@ -681,7 +658,7 @@ impl DrawSig {
         self.dpi_bits = dpi.to_bits();
     }
     fn clear(&mut self) {
-        self.fills.clear();
+        self.cue = None;
         self.cards.clear();
         self.lines.clear();
         self.holes.clear();
@@ -690,12 +667,12 @@ impl DrawSig {
         self.dpi_bits = 0;
     }
     fn is_empty(&self) -> bool {
-        self.fills.is_empty() && self.cards.is_empty() && self.lines.is_empty()
+        self.cue.is_none() && self.cards.is_empty() && self.lines.is_empty()
     }
 }
 struct DrawFrame<'a> {
     pictures: &'a [(Rect, Rect, ID2D1Bitmap1)],
-    fills: &'a [(Rect, u32, f32, ZoneKind)],
+    cue: Option<&'a CueDraw>,
     cards: &'a [CardDraw],
     lines: &'a [BorderLine],
     holes: &'a [Rect],
@@ -713,9 +690,10 @@ struct Surface {
     brushes: HashMap<u32, ID2D1SolidColorBrush>,
     clear_brush: Option<ID2D1SolidColorBrush>,
     timer: crate::gpu::GpuTimer,
-    /// Cached `theme::system_is_dark()` (a registry read): refreshed at most once a second and
-    /// only while drop zones are drawn (#102 review).
+    /// Cached `theme::system_is_dark()` and `theme::accent_color()` (registry/DWM reads):
+    /// refreshed at most once a second and only while a gesture cue is drawn (#102, #112).
     dark: bool,
+    accent: u32,
     dark_at: Instant,
 }
 impl Surface {
@@ -768,6 +746,7 @@ impl Surface {
                 clear_brush: None,
                 timer: Default::default(),
                 dark: crate::theme::system_is_dark(),
+                accent: crate::theme::accent_color(),
                 dark_at: Instant::now(),
             })
         }
@@ -775,7 +754,7 @@ impl Surface {
     fn draw(&mut self, frame: &DrawFrame<'_>) -> Result<()> {
         let DrawFrame {
             pictures,
-            fills,
+            cue,
             cards,
             lines,
             holes,
@@ -826,164 +805,6 @@ impl Surface {
                             bottom: (src.y + src.h) as f32,
                         }),
                     )
-                }
-                // The theme is a registry read: cached on the surface, refreshed at most once a
-                // second, and only while drop zones are drawn (#102 review).
-                let dark = if fills.is_empty() {
-                    false
-                } else {
-                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
-                        self.dark = crate::theme::system_is_dark();
-                        self.dark_at = Instant::now();
-                    }
-                    self.dark
-                };
-                let icon_color = if fills.is_empty() {
-                    0
-                } else {
-                    crate::theme::zone_icon_color(dark)
-                };
-                let pt = |px: f32, py: f32| {
-                    let mut p = D2D1_ELLIPSE::default().point;
-                    p.X = px;
-                    p.Y = py;
-                    p
-                };
-                for &(r, c, alpha, kind) in *fills {
-                    let brush = Self::brush_for(&mut self.brushes, rt, c)?;
-                    let x = (r.x + off.x) as f32;
-                    let y = (r.y + off.y) as f32;
-                    brush.SetOpacity(alpha);
-                    rt.FillRoundedRectangle(
-                        &D2D1_ROUNDED_RECT {
-                            rect: D2D_RECT_F {
-                                left: x,
-                                top: y,
-                                right: x + r.w as f32,
-                                bottom: y + r.h as f32,
-                            },
-                            radiusX: radius,
-                            radiusY: radius,
-                        },
-                        brush,
-                    );
-                    // #104: centred, scaled, theme-aware vector icon on merge and leave zones.
-                    // Sized through zone_icon_rect, the same maths the spec tests check (#102 review).
-                    let icon = zone_icon_rect(&r, kind, dark, dpi);
-                    let size = icon.rect.w as f32;
-                    let cx = (icon.rect.x + off.x) as f32 + size * 0.5;
-                    let cy = (icon.rect.y + off.y) as f32 + size * 0.5;
-                    let stroke = (size * 0.085).clamp(2.0 * dpi, 4.0 * dpi);
-                    let glyph = Self::brush_for(&mut self.brushes, rt, icon_color)?;
-                    glyph.SetOpacity(if alpha > 0.5 { 0.95 } else { 0.80 });
-                    match kind {
-                        ZoneKind::Merge => {
-                            // Stacked-windows glyph: two overlapping rounded window frames.
-                            let cw = size * 0.64;
-                            let ch = size * 0.52;
-                            let shift = size * 0.16;
-                            let cr = (size * 0.08).max(2.0 * dpi);
-                            let back = D2D_RECT_F {
-                                left: cx - cw * 0.5 + shift,
-                                top: cy - ch * 0.5 - shift,
-                                right: cx + cw * 0.5 + shift,
-                                bottom: cy + ch * 0.5 - shift,
-                            };
-                            let front = D2D_RECT_F {
-                                left: cx - cw * 0.5 - shift,
-                                top: cy - ch * 0.5 + shift,
-                                right: cx + cw * 0.5 - shift,
-                                bottom: cy + ch * 0.5 + shift,
-                            };
-                            rt.DrawRoundedRectangle(
-                                &D2D1_ROUNDED_RECT {
-                                    rect: back,
-                                    radiusX: cr,
-                                    radiusY: cr,
-                                },
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            rt.DrawRoundedRectangle(
-                                &D2D1_ROUNDED_RECT {
-                                    rect: front,
-                                    radiusX: cr,
-                                    radiusY: cr,
-                                },
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            let bar_y = front.top + ch * 0.28;
-                            rt.DrawLine(
-                                pt(front.left + stroke, bar_y),
-                                pt(front.right - stroke, bar_y),
-                                glyph,
-                                stroke * 0.75,
-                                None,
-                            );
-                        }
-                        ZoneKind::Leave {
-                            trailing,
-                            horizontal,
-                        } => {
-                            // Arrow-out-of-group glyph: open bracket on inner side + outward arrow.
-                            let half = size * 0.42;
-                            let (dx, dy) = match (horizontal, trailing) {
-                                (true, false) => (-1.0f32, 0.0f32),
-                                (true, true) => (1.0, 0.0),
-                                (false, false) => (0.0, -1.0),
-                                (false, true) => (0.0, 1.0),
-                            };
-                            let (px_u, py_u) = (-dy, dx);
-                            let p_at = |along: f32, perp: f32| {
-                                pt(cx + dx * along + px_u * perp, cy + dy * along + py_u * perp)
-                            };
-                            let b_back = -half;
-                            let b_front = -half * 0.2;
-                            let b_half = half * 0.78;
-                            rt.DrawLine(
-                                p_at(b_front, -b_half),
-                                p_at(b_back, -b_half),
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            rt.DrawLine(
-                                p_at(b_back, -b_half),
-                                p_at(b_back, b_half),
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            rt.DrawLine(
-                                p_at(b_back, b_half),
-                                p_at(b_front, b_half),
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            let a_start = -half * 0.35;
-                            let a_tip = half;
-                            let head = half * 0.48;
-                            rt.DrawLine(p_at(a_start, 0.0), p_at(a_tip, 0.0), glyph, stroke, None);
-                            rt.DrawLine(
-                                p_at(a_tip, 0.0),
-                                p_at(a_tip - head, -head * 0.75),
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                            rt.DrawLine(
-                                p_at(a_tip, 0.0),
-                                p_at(a_tip - head, head * 0.75),
-                                glyph,
-                                stroke,
-                                None,
-                            );
-                        }
-                    }
                 }
                 for card in *cards {
                     let x = (card.rect.x + off.x) as f32;
@@ -1122,6 +943,99 @@ impl Surface {
                     }
                     self.context
                         .SetPrimitiveBlend(D2D1_PRIMITIVE_BLEND_SOURCE_OVER);
+                }
+                // Drawn AFTER the holes are punched: the box sits under the dragged window, whose own hole would erase it.
+                // The theme and accent are registry/DWM reads: cached on the surface, refreshed at
+                // most once a second, and only while an animated SVG cue is drawn (#102, #112).
+                if let Some(cd) = *cue {
+                    if self.dark_at.elapsed() >= Duration::from_secs(1) {
+                        self.dark = crate::theme::system_is_dark();
+                        self.accent = crate::theme::accent_color();
+                        self.dark_at = Instant::now();
+                    }
+                    let palette = crate::cue::CuePalette::from_system(self.dark, self.accent);
+                    let svg = crate::cue::evaluate_cue(
+                        &cd.cue,
+                        cd.phase_ms,
+                        palette,
+                        &cd.world_holes,
+                        dpi,
+                    );
+                    let ox = (svg.rect.x - cd.host_origin.0 + off.x) as f32;
+                    let oy = (svg.rect.y - cd.host_origin.1 + off.y) as f32;
+                    let pt = |px: f32, py: f32| {
+                        let mut p = D2D1_ELLIPSE::default().point;
+                        p.X = ox + px;
+                        p.Y = oy + py;
+                        p
+                    };
+                    for elem in &svg.elements {
+                        match elem {
+                            crate::cue::SvgElem::RoundedRect {
+                                x,
+                                y,
+                                w,
+                                h,
+                                rx,
+                                fill,
+                                stroke,
+                            } => {
+                                let rr = D2D1_ROUNDED_RECT {
+                                    rect: D2D_RECT_F {
+                                        left: ox + *x,
+                                        top: oy + *y,
+                                        right: ox + *x + *w,
+                                        bottom: oy + *y + *h,
+                                    },
+                                    radiusX: *rx,
+                                    radiusY: *rx,
+                                };
+                                if let Some((c, alpha)) = *fill {
+                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
+                                    b.SetOpacity(alpha);
+                                    rt.FillRoundedRectangle(&rr, b);
+                                }
+                                if let Some((c, alpha, sw)) = *stroke {
+                                    let b = Self::brush_for(&mut self.brushes, rt, c)?;
+                                    b.SetOpacity(alpha);
+                                    rt.DrawRoundedRectangle(&rr, b, sw, None);
+                                }
+                            }
+                            crate::cue::SvgElem::Line {
+                                x1,
+                                y1,
+                                x2,
+                                y2,
+                                color,
+                                alpha,
+                                width: sw,
+                            } => {
+                                let b = Self::brush_for(&mut self.brushes, rt, *color)?;
+                                b.SetOpacity(*alpha);
+                                rt.DrawLine(pt(*x1, *y1), pt(*x2, *y2), b, *sw, None);
+                            }
+                            crate::cue::SvgElem::Polyline {
+                                points,
+                                color,
+                                alpha,
+                                width: sw,
+                            } => {
+                                if points.len() >= 2 {
+                                    let b = Self::brush_for(&mut self.brushes, rt, *color)?;
+                                    b.SetOpacity(*alpha);
+                                    for seg in points.windows(2) {
+                                        rt.DrawLine(
+                                            pt(seg[0].0, seg[0].1),
+                                            pt(seg[1].0, seg[1].1),
+                                            b,
+                                            *sw,
+                                            None,
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
                 let end = rt.EndDraw(None, None);
                 self.context.SetTarget(None);
@@ -1674,6 +1588,9 @@ pub(crate) fn park_y_for_monitor(
     all_monitors: &[Rect],
 ) -> i32 {
     let y = park_y_unclamped(park_x, monitor, bound, all_monitors);
+    // Windows clamps top-level window y to the 16-bit range; a target beyond it is never reached, so the
+    // window looked misplaced every tick and was re-placed forever (flicker, 22:05 bundle).
+    let y = y.max(-32768);
     let lim = WIN32_COORD_LIMIT;
     if y.saturating_add(monitor.h.max(1)) > lim || y < -lim {
         return bound.y.clamp(-lim, (lim - monitor.h.max(1)).max(-lim));
@@ -2150,7 +2067,7 @@ struct FrameScratch {
     cards: Vec<CardDraw>,
     keep: HashSet<isize>,
     host_hits: Vec<(Rect, isize)>,
-    fills: Vec<(Rect, u32, f32, ZoneKind)>,
+    cue: Option<CueDraw>,
     mine: Vec<Rect>,
     local_holes: Vec<Rect>,
     thumb_rects: Vec<Rect>,
@@ -2354,12 +2271,6 @@ impl RenderState {
                 Ok(mut s) => {
                     host.last_draw_valid = false;
                     if should_draw_on_recovery(host.want_visible, &host.last_draw) {
-                        let fills: Vec<(Rect, u32, f32, ZoneKind)> = host
-                            .last_draw
-                            .fills
-                            .iter()
-                            .map(|&(r, c, a, k)| (r, c, f32::from_bits(a), k))
-                            .collect();
                         let cards: Vec<CardDraw> = host
                             .last_draw
                             .cards
@@ -2372,7 +2283,7 @@ impl RenderState {
                             .collect();
                         let frame = DrawFrame {
                             pictures: &[],
-                            fills: &fills,
+                            cue: None,
                             cards: &cards,
                             lines: &host.last_draw.lines,
                             holes: &host.last_draw.holes,
@@ -3108,23 +3019,16 @@ impl RenderState {
                         }
                     }
                 }
-                scratch.fills.clear();
-                for z in &s.zones {
-                    if &z.monitor == name
-                        && let Some(r) = intersect(z.rect, host.b)
-                    {
-                        scratch.fills.push((
-                            Rect {
-                                x: r.x - host.b.x,
-                                y: r.y - host.b.y,
-                                ..r
-                            },
-                            z.color,
-                            z.alpha,
-                            z.kind,
-                        ));
+                scratch.cue = s.cue.as_ref().filter(|c| &c.monitor == name).map(|c| {
+                    let phase_ms = c.started_at.elapsed().as_millis() as u64;
+                    CueDraw {
+                        cue: c.clone(),
+                        host_origin: (host.b.x, host.b.y),
+                        world_holes: scratch.mine.clone(),
+                        phase_ms,
+                        phase_bucket: phase_ms / 33,
                     }
-                }
+                });
                 if let Some(dead_gen) = source_device_lost {
                     reset_shared_devices_if_generation(dead_gen);
                     invalidated_device_gen = Some(dead_gen);
@@ -3135,7 +3039,7 @@ impl RenderState {
                 let width = s.width * dpi;
                 let radius = s.radius * dpi;
                 let has_d2d = !scratch.lines.is_empty()
-                    || !scratch.fills.is_empty()
+                    || scratch.cue.is_some()
                     || !scratch.cards.is_empty()
                     || !scratch.backing.is_empty();
                 let want_visible = !full && (!scratch.keep.is_empty() || has_d2d);
@@ -3178,7 +3082,7 @@ impl RenderState {
                             &mut host.last_draw,
                             &mut host.want_visible,
                             &mut host.last_draw_valid,
-                            &scratch.fills,
+                            scratch.cue.as_ref(),
                             &scratch.cards,
                             &scratch.lines,
                             &scratch.local_holes,
@@ -3194,7 +3098,7 @@ impl RenderState {
                         let sig_matches = scratch.backing.is_empty()
                             && host.last_draw_valid
                             && host.last_draw.matches(
-                                &scratch.fills,
+                                scratch.cue.as_ref(),
                                 &scratch.cards,
                                 &scratch.lines,
                                 &scratch.local_holes,
@@ -3207,7 +3111,7 @@ impl RenderState {
                         if !sig_matches || removed_before_skip {
                             let frame = DrawFrame {
                                 pictures: &scratch.backing,
-                                fills: &scratch.fills,
+                                cue: scratch.cue.as_ref(),
                                 cards: &scratch.cards,
                                 lines: &scratch.lines,
                                 holes: &scratch.local_holes,
@@ -3263,7 +3167,7 @@ impl RenderState {
                                 }
                                 let retry_frame = DrawFrame {
                                     pictures: &[],
-                                    fills: &scratch.fills,
+                                    cue: scratch.cue.as_ref(),
                                     cards: &scratch.cards,
                                     lines: &scratch.lines,
                                     holes: &scratch.local_holes,
@@ -3303,7 +3207,7 @@ impl RenderState {
                                     &mut host.last_draw,
                                     &mut host.want_visible,
                                     &mut host.last_draw_valid,
-                                    &scratch.fills,
+                                    scratch.cue.as_ref(),
                                     &scratch.cards,
                                     &scratch.lines,
                                     &scratch.local_holes,
@@ -3343,7 +3247,7 @@ impl RenderState {
                                     &mut host.last_draw,
                                     &mut host.want_visible,
                                     &mut host.last_draw_valid,
-                                    &scratch.fills,
+                                    scratch.cue.as_ref(),
                                     &scratch.cards,
                                     &scratch.lines,
                                     &scratch.local_holes,
@@ -3764,8 +3668,12 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
             }
             let timeout = if state.scene.is_some() {
                 Duration::ZERO
-            } else if state.last_settled_scene.as_ref().is_some_and(|s| s.live) {
-                // Live stand-ins at the display refresh rate while the fingers rest.
+            } else if state
+                .last_settled_scene
+                .as_ref()
+                .is_some_and(|s| s.live || s.cue.is_some())
+            {
+                // Live stand-ins or animated SVG cues at display refresh cadence without driving layout.
                 Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64)
                     .saturating_sub(live_polled.elapsed())
             } else if state.has_active_sources() || state.verify.is_some() {
@@ -3793,17 +3701,21 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                     continue;
                 }
                 Ok(Message::OverlayUpdate {
-                    seq, holes, colors, ..
+                    seq,
+                    holes,
+                    colors,
+                    cue,
+                    ..
                 }) => {
                     if seq != EPOCH.load(std::sync::atomic::Ordering::Acquire) {
                         continue;
                     }
                     if let Some(active) = state.scene.as_mut().filter(|s| s.epoch == seq) {
-                        apply_overlay_update(active, holes, &colors);
+                        apply_overlay_update(active, holes, &colors, cue);
                     } else if let Some(mut settled) =
                         state.last_settled_scene.take().filter(|s| s.epoch == seq)
                     {
-                        apply_overlay_update(&mut settled, holes, &colors);
+                        apply_overlay_update(&mut settled, holes, &colors, cue);
                         state.scene = Some(overlay_patched_settled_scene(settled));
                     }
                 }
@@ -3816,10 +3728,14 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                         match next_msg {
                             Message::Scene(newer) => s = newer,
                             Message::OverlayUpdate {
-                                seq, holes, colors, ..
+                                seq,
+                                holes,
+                                colors,
+                                cue,
+                                ..
                             } => {
                                 if s.epoch == seq {
-                                    apply_overlay_update(&mut s, holes, &colors);
+                                    apply_overlay_update(&mut s, holes, &colors, cue);
                                 }
                             }
                             Message::Warm(monitors) => {
@@ -3858,14 +3774,19 @@ pub fn start() -> crossbeam_channel::Sender<Message> {
                 // Fingers resting mid-swipe: the parked windows' stand-ins must keep playing. Redraw
                 // only when one of them actually delivered a new frame (a static window costs nothing).
                 let live = state.last_settled_scene.as_ref().is_some_and(|s| s.live);
+                let has_cue = state
+                    .last_settled_scene
+                    .as_ref()
+                    .is_some_and(|s| s.cue.is_some());
                 let period =
                     Duration::from_micros(state.live_refresh_us.clamp(4_000., 33_000.) as u64);
                 // Woken early by a message: wait for the period instead of polling again.
-                let due = live && live_polled.elapsed() + Duration::from_micros(500) >= period;
+                let due = (live || has_cue)
+                    && live_polled.elapsed() + Duration::from_micros(500) >= period;
                 if due {
                     live_polled = Instant::now();
                 }
-                if due && state.refresh_live_pictures() {
+                if due && ((live && state.refresh_live_pictures()) || has_cue) {
                     state.scene = state.last_settled_scene.take().map(live_redraw_scene);
                     continue;
                 }
@@ -4819,9 +4740,9 @@ mod tests {
             w: 400,
             h: 400,
         }];
-        sig.set_from(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0);
-        assert!(sig.matches(&[], &[], &lines, &holes_a, 2.0, 8.0, 1.0));
-        assert!(!sig.matches(&[], &[], &lines, &holes_b, 2.0, 8.0, 1.0));
+        sig.set_from(None, &[], &lines, &holes_a, 2.0, 8.0, 1.0);
+        assert!(sig.matches(None, &[], &lines, &holes_a, 2.0, 8.0, 1.0));
+        assert!(!sig.matches(None, &[], &lines, &holes_b, 2.0, 8.0, 1.0));
     }
 
     #[test]
@@ -4892,7 +4813,7 @@ mod tests {
             &mut sig,
             &mut want_visible,
             &mut valid,
-            &[],
+            None,
             &[],
             &lines,
             &[],
@@ -4908,7 +4829,7 @@ mod tests {
             "frames with WGC backing pictures keep last_draw_valid=false"
         );
         assert!(should_draw_on_recovery(want_visible, &sig));
-        assert!(sig.matches(&[], &[], &lines, &[], 2.0, 8.0, 1.0));
+        assert!(sig.matches(None, &[], &lines, &[], 2.0, 8.0, 1.0));
 
         // Host hides (fullscreen or #48 unfocused) -> clears want_visible, DrawSig, and rgn_holes.
         clear_hidden_frame_state(&mut sig, &mut want_visible, &mut valid, &mut rgn_holes);
@@ -5633,7 +5554,7 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: vec![],
+            cue: None,
             action: "open_close",
             live: false,
             force_place: false,
@@ -5648,6 +5569,7 @@ mod tests {
             &mut scene,
             std::sync::Arc::clone(&new_holes),
             &[(101, None)],
+            None,
         );
         assert_eq!(scene.epoch, 42);
         assert_eq!(scene.action, "open_close");
@@ -5710,18 +5632,26 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: vec![Zone {
-                rect: Rect {
+            cue: Some(crate::cue::GestureCue {
+                monitor: "MON0".into(),
+                monitor_area: Rect {
+                    x: 0,
+                    y: 0,
+                    w: 1920,
+                    h: 1140,
+                },
+                held_rect: Rect {
                     x: 0,
                     y: 0,
                     w: 100,
                     h: 100,
                 },
-                monitor: "MON0".into(),
-                color: 0xA855F7,
-                alpha: 0.5,
-                kind: ZoneKind::Merge,
-            }],
+                target_rect: None,
+                horizontal: true,
+                input: crate::cue::CueInput::Trackpad,
+                kind: crate::cue::CueKind::StackEntryPreview { after: false },
+                started_at: Instant::now(),
+            }),
             action: "open_close",
             live: true,
             force_place: true,
@@ -5735,8 +5665,8 @@ mod tests {
         );
         assert!(!idle.force_place, "windows are already placed; no OS move");
         assert!(
-            idle.zones.is_empty(),
-            "stale drop zones must not be redrawn"
+            idle.cue.is_none(),
+            "stale gesture cues must not be redrawn after recovery"
         );
         assert_eq!(
             idle.epoch, 77,
@@ -5768,7 +5698,7 @@ mod tests {
             width: 2.0,
             radius: 8.0,
             holes: std::sync::Arc::from([]),
-            zones: Vec::new(),
+            cue: None,
             action: "scroll",
             live,
             force_place: true,
@@ -5780,7 +5710,7 @@ mod tests {
             w: 50,
             h: 40,
         }]);
-        apply_overlay_update(&mut live, std::sync::Arc::clone(&holes), &[]);
+        apply_overlay_update(&mut live, std::sync::Arc::clone(&holes), &[], None);
         let live = overlay_patched_settled_scene(live);
         assert!(
             live.live,
@@ -6042,5 +5972,25 @@ mod tests {
         assert!(!super::should_register_peek_hit(
             false, false, false, false, true, false
         ));
+    }
+}
+
+#[cfg(test)]
+mod park_range_tests {
+    use super::*;
+
+    /// Windows clamps window y to -32768; a park target beyond it was re-placed every tick (flicker).
+    #[test]
+    fn park_y_never_beyond_the_16_bit_window_range() {
+        let m = |x, y, w, h| Rect { x, y, w, h };
+        let all = [
+            m(0, 0, 1920, 1200),
+            m(0, -1440, 2560, 1440),
+            m(-1440, -1859, 1440, 2560),
+        ];
+        for mon in all {
+            let y = park_y_for_monitor(3584, mon, mon, &all);
+            assert!(y >= -32768, "{mon:?} -> {y}");
+        }
     }
 }

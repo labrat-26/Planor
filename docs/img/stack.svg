@@ -56,5 +56,5 @@
 </g>
   </g>
 </g>
-<text x="400" y="285" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="15" fill="#aeb9e6">Four fingers (or the mouse) carry a window. Drop it in the green middle zone to stack, anywhere else to swap.</text>
+<text x="400" y="285" text-anchor="middle" font-family="Segoe UI, system-ui, -apple-system, Helvetica, Arial, sans-serif" font-size="15" fill="#aeb9e6">Four fingers (or the mouse) carry a window. Dwell over the middle of another, then press the group key (or swipe) to stack.</text>
 </svg>

@@ -138,14 +138,16 @@ Keyboard only? <kbd>Alt</kbd>+<kbd>←</kbd> / <kbd>→</kbd> moves focus along 
 
 Sometimes two windows belong in one place, such as a chat beside its notes. **Stacking** puts them in one slot, and you flip between them.
 
-Pick a window up with **four fingers** (or drag it with the mouse), then drop it on another window:
+Pick a window up with **four fingers** (or drag it with the mouse) and bring it over a neighbour. What happens depends on how far in you go, measured from the edge you entered:
 
-- **Green middle zone** (the middle half of the window): the two **stack**. The outline turns purple.
-- **Anywhere else on the window:** the two **swap** places.
-- **Hold <kbd>Shift</kbd> while dropping:** nothing happens and the window goes back to its slot.
+- **Less than a quarter in:** letting go puts the window back where it was (a mouse drag arriving from another monitor has no origin slot there, so it tiles beside the neighbour instead).
+- **Between a quarter and three quarters:** hold still for a moment (`drag_dwell_ms`, 250 ms) and the neighbour previews where it would move. With the **mouse**, press the group key (`drag_stack_modifier`, Shift by default) to stack; with **four fingers**, swipe across the strip (up or down on landscape, sideways on portrait). Letting go without that tiles the window on the side of the neighbour's midpoint you are on.
+- **More than three quarters in:** the window tiles on the far side.
+- **Leaving a stack:** pull a member along the strip by a quarter of the neighbour's width (height on portrait); it leaves toward the side you pulled.
 
+A four-finger drag stays on its own monitor; only a fling sends it to another one. A mouse drag can cross monitors freely. Near the strip edge (`drag_edge_scroll_percent`, 10 % of the screen) the strip scrolls while you drag.
 <p align="center">
-  <img src="docs/img/stack.svg" alt="Animation: a window dropped on the middle zone of another stacks with it" width="800">
+  <img src="docs/img/stack.svg" alt="Animation: a window dwelling over the middle of another, then stacking with the group key" width="800">
 </p>
 
 Press <kbd>Alt</kbd>+<kbd>S</kbd> to stack or unstack the focused window.
@@ -202,7 +204,6 @@ You can also slide it across slowly, or press <kbd>Alt</kbd>+<kbd>]</kbd> and <k
 | 🔵 **Blue** | This is the window you are working in |
 | 🟣 **Purple** | The window is part of a stack |
 | 🟠 **Orange** | The window is *pinned* (it stays on screen while the strip scrolls) |
-| 🟢 **Green** | A drop target while you are dragging |
 
 The thin slivers at the screen edges are **peeks**. They show that more windows wait just off-screen. Click one to bring that window in.
 
@@ -315,7 +316,7 @@ gap_px = 6                  # space between windows, in pixels
 enabled = true
 width_px = 2                # line thickness
 corner_radius_px = 8        # 0 = square corners
-focused_color = "#3B82F6"   # also: stacked_color, pinned_color, drop_target_color
+focused_color = "#3B82F6"   # also: stacked_color (also lights the drop target when a drop would stack), pinned_color
 ```
 
 Prefer no outlines at all? Set `enabled = false`.

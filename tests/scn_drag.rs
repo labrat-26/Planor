@@ -598,7 +598,12 @@ fn drop_on_center_stacks() {
         HOVER.as_millis(),
         vis(&ws[0])
     );
+    // #113: after the dwell, pressing the configured group modifier (Shift) activates group mode; a plain
+    // release would tile beside the neighbour instead of stacking.
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
     m.up();
+    m.shift(false);
     thread::sleep(SETTLE);
     println!("drop_on_center_stacks: after drop {}", describe(&ws));
     let (r0, r1) = (reachable(&ws[0]), reachable(&ws[1]));
@@ -619,7 +624,7 @@ fn drop_on_center_stacks() {
 
 #[test]
 #[ignore]
-fn shift_freezes_reflow() {
+fn before_quarter_keeps_neighbours_fixed() {
     aware();
     let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::new(i, 0)).collect();
     let mut d = Daemon::new("s4-shift");
@@ -658,7 +663,7 @@ fn shift_freezes_reflow() {
             let moved = (0..4).any(|c| (now[c] - before[k][c]).abs() > 2);
             assert!(
                 !moved,
-                "shift_freezes_reflow: Shift held while dragging window 1 over the left edge of window 0; neighbour window {i} moved before the drop (sample {sample}, ~{} ms into the hold): expected {:?} (+-2px), observed {:?}",
+                "before_quarter_keeps_neighbours_fixed: dragging window 1 over the left edge of window 0 (before the first quarter, Shift held); neighbour window {i} moved before the drop (sample {sample}, ~{} ms into the hold): expected {:?} (+-2px), observed {:?}",
                 (sample + 1) * 200,
                 before[k],
                 now
@@ -694,7 +699,15 @@ fn drag_out_of_stack() {
             describe(&ws)
         )
     });
-    m.drag(from, centre(vis(&ws[0])));
+    // Setup (#113): drag window 1 onto the middle of window 0, dwell, then press the group modifier (Shift).
+    let to_centre = centre(vis(&ws[0]));
+    m.down(from);
+    m.glide(from, to_centre);
+    thread::sleep(HOVER);
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
+    m.up();
+    m.shift(false);
     thread::sleep(SETTLE);
     let r = [reachable(&ws[0]), reachable(&ws[1])];
     assert!(
@@ -713,10 +726,21 @@ fn drag_out_of_stack() {
             describe(&ws)
         )
     });
-    let to = left_point(&ws[2], 0.10);
+    // #115: pull the active member sideways by more than 1/4 of the neighbour span: it leaves the stack.
+    let r = vis(&ws[active]);
+    // Threshold is 1/4 of the neighbour's visible span: pull 60% of the widest visible window (never marginal).
+    let widest = (0..3)
+        .map(|i| {
+            let v = vis(&ws[i]);
+            v[2] - v[0]
+        })
+        .max()
+        .unwrap_or(r[2] - r[0]);
+    let pull = (widest * 3 / 5).max(1);
+    let to = (from.0 + pull, from.1);
     assert!(
         on_any_monitor(to),
-        "precondition: left 10% of window 2 at {to:?} is off-screen; {}",
+        "precondition: pull target {to:?} is off-screen; {}",
         describe(&ws)
     );
     m.drag(from, to);
@@ -978,5 +1002,283 @@ fn resize_by_edge_drag() {
             describe(&ws)
         );
     }
+    d.stop();
+}
+
+/// #116 (landscape): holding a dragged window in the trailing edge zone scrolls the strip.
+#[test]
+#[ignore]
+fn drag_to_edge_scrolls_landscape() {
+    aware();
+    let ws: Vec<Sentinel> = (0..6).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-edge");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..6 {
+        press(&[ALT], LEFT);
+    }
+    let sum = |ws: &[Sentinel]| ws[1..].iter().map(|w| vis(w)[0] as i64).sum::<i64>();
+    let before = sum(&ws);
+    let from = grab_raised(&ws[0]).expect("window 0 caption");
+    let (_, work) = mons()[0];
+    let to = (work.right - 4, from.1);
+    m.down(from);
+    m.glide(from, to);
+    thread::sleep(Duration::from_millis(1200));
+    let during = sum(&ws);
+    m.escape();
+    m.up();
+    assert!(
+        during != before,
+        "drag_to_edge_scrolls_landscape: strip did not scroll while the cursor rested in the edge zone; before={before} during={during}; {}",
+        describe(&ws)
+    );
+}
+
+/// Owner item 4: a mouse pull ACROSS the strip (down, in landscape) of a quarter of the column depth takes a
+/// window out of its vertical group.
+#[test]
+#[ignore]
+fn drag_out_of_vertical_group_by_pulling_down() {
+    aware();
+    let ws: Vec<Sentinel> = (0..3).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-vexit");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..3 {
+        press(&[ALT], LEFT);
+    }
+    // Group windows 0 and 1 with the modifier, as in drag_out_of_stack.
+    let from = grab_raised(&ws[1]).expect("window 1 caption");
+    let to_centre = centre(vis(&ws[0]));
+    m.down(from);
+    m.glide(from, to_centre);
+    thread::sleep(HOVER);
+    m.shift(true);
+    thread::sleep(Duration::from_millis(150));
+    m.up();
+    m.shift(false);
+    thread::sleep(SETTLE);
+    let reach = |w: &Sentinel| reachable(w);
+    let grouped = reach(&ws[0]) ^ reach(&ws[1]);
+    assert!(
+        grouped,
+        "setup: windows 0 and 1 must form a stack; {}",
+        describe(&ws)
+    );
+    let active = if reach(&ws[0]) { 0 } else { 1 };
+    let from = grab_raised(&ws[active]).expect("stack member caption");
+    let (_, work) = mons()[0];
+    let pull = (work.bottom - work.top) * 2 / 5;
+    let to = (from.0, from.1 + pull);
+    assert!(
+        on_any_monitor(to),
+        "pull target {to:?} off-screen; {}",
+        describe(&ws)
+    );
+    m.drag(from, to);
+    thread::sleep(SETTLE);
+    let wh = work.bottom - work.top;
+    for i in 0..3 {
+        let h = height(vis(&ws[i]));
+        assert!(
+            (h - wh).abs() <= 3,
+            "drag_out_of_vertical_group: after the exit window {i} should be a full-height tile: expected {wh} (+-3), observed {h}; {}",
+            describe(&ws)
+        );
+    }
+}
+
+/// Owner item 3: while a window is resized by its edge it stays above its neighbours: the pixel at the middle
+/// of the grown window shows its own colour, not a neighbour's stand-in.
+#[test]
+#[ignore]
+fn resized_window_stays_above_neighbours() {
+    aware();
+    let ws: Vec<Sentinel> = (0..2).map(|i| Sentinel::new(i, 0)).collect();
+    let cap = Capture::open(0).expect("desktop duplication");
+    let mut d = Daemon::new("s4-resize-top");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..2 {
+        press(&[ALT], LEFT);
+    }
+    let r = ws[0].rect();
+    let edge = (r[2] - 4, (r[1] + r[3]) / 2);
+    m.down(edge);
+    m.glide(edge, (edge.0 + 250, edge.1));
+    thread::sleep(Duration::from_millis(300));
+    // Mid-resize (button still down): window 0's own colour must still dominate its grown area.
+    let own = count_rgb(&cap, SENTINEL_RGB[0]);
+    let other = count_rgb(&cap, SENTINEL_RGB[1]);
+    m.up();
+    assert!(
+        own > other,
+        "resized_window_stays_above_neighbours: during the resize window 0's colour ({own} px) must exceed window 1's ({other} px)"
+    );
+}
+
+/// Jumpiness probe: sample window 5's left edge every ~8 ms while the pointer rests in the edge zone. The
+/// largest single step must stay close to the median step (an even glide, not stutter).
+#[test]
+#[ignore]
+fn edge_scroll_steps_are_even() {
+    aware();
+    let ws: Vec<Sentinel> = (0..7).map(|i| Sentinel::new(i, 0)).collect();
+    let mut d = Daemon::new("s4-edge-even");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    for _ in 0..7 {
+        press(&[ALT], LEFT);
+    }
+    let from = grab_raised(&ws[0]).expect("window 0 caption");
+    let (_, work) = mons()[0];
+    let to = (work.right - 4, from.1);
+    m.down(from);
+    m.glide(from, to);
+    thread::sleep(Duration::from_millis(500)); // past the ease-in
+    let mut xs = vec![];
+    let t0 = Instant::now();
+    while t0.elapsed() < Duration::from_millis(1200) {
+        // Leftmost on-screen window edge: parked windows report the park rect, which would hide the motion.
+        let v = ws
+            .iter()
+            .map(|w| vis(w)[0])
+            .filter(|x| *x > -5000 && *x < 9000)
+            .min()
+            .unwrap_or(0);
+        xs.push(v);
+        thread::sleep(Duration::from_millis(8));
+    }
+    m.escape();
+    m.up();
+    let steps: Vec<i32> = xs
+        .windows(2)
+        .map(|w| (w[1] - w[0]).abs())
+        .filter(|s| *s > 0)
+        .collect();
+    assert!(
+        steps.len() > 20,
+        "strip barely moved: {} steps",
+        steps.len()
+    );
+    let mut sorted = steps.clone();
+    sorted.sort_unstable();
+    let med = sorted[sorted.len() / 2].max(1);
+    let p95 = sorted[sorted.len() * 95 / 100];
+    eprintln!(
+        "edge scroll steps: n={} median={med} p95={p95} max={}",
+        steps.len(),
+        sorted[sorted.len() - 1]
+    );
+    assert!(
+        p95 <= med * 3,
+        "edge_scroll_steps_are_even: stutter, p95 step {p95} px vs median {med} px ({steps:?})"
+    );
+}
+
+/// Drop box colour (src/daemon.rs DROP_BOX_RGB = #0EA5E9) as 0x00RRGGBB.
+const DROP_BOX_RGB_PX: u32 = 0x000ea5e9;
+
+/// Owner report: the small drop box never showed on landscape. Captures the real screen while a window hovers
+/// the middle of its neighbour: the box colour must be on screen during the hover, and gone after the drop.
+#[test]
+#[ignore]
+fn drop_box_is_drawn_while_hovering_the_middle_of_a_neighbour() {
+    aware();
+    let ws: Vec<Sentinel> = (0..2).map(|i| Sentinel::new(i, 0)).collect();
+    let cap = Capture::open(0).expect("desktop duplication for the drop box colour check");
+    let mut d = Daemon::new("s4-dropbox");
+    let mut m = Mouse::begin();
+    d.start();
+    assert!(
+        wait_settled(&d, 1, Duration::from_millis(2500)),
+        "drag daemon did not settle within 2.5 s"
+    );
+    thread::sleep(Duration::from_millis(120));
+    let from = grab_raised(&ws[1]).unwrap_or_else(|| {
+        panic!(
+            "precondition: window 1 has no on-screen caption to grab; {}",
+            describe(&ws)
+        )
+    });
+    let to = centre(vis(&ws[0]));
+    let mut seen_after_dwell = false;
+    let mut best_px = 0usize;
+    assert_eq!(
+        count_rgb(&cap, DROP_BOX_RGB_PX),
+        0,
+        "no drop box before the drag"
+    );
+    m.down(from);
+    m.glide(from, to);
+    // Sample at once on arrival: the dwell (250 ms) has not elapsed, so the neighbour has not moved aside yet.
+    // The box must already be there (owner report: it only appeared after the neighbour shifted).
+    let arrived = Instant::now();
+    let mut seen_before_dwell = false;
+    while arrived.elapsed() < Duration::from_millis(200) {
+        m.put((to.0 + 1, to.1));
+        if count_rgb(&cap, DROP_BOX_RGB_PX) > 0 {
+            seen_before_dwell = true;
+            break;
+        }
+    }
+    thread::sleep(Duration::from_millis(250));
+    let mut seen = false;
+    for i in 0..HOVER.as_millis() as u64 / 50 {
+        let dx: i32 = if i % 2 == 0 { 2 } else { -2 };
+        m.put((to.0 + dx, to.1));
+        thread::sleep(Duration::from_millis(50));
+        let px = count_rgb(&cap, DROP_BOX_RGB_PX);
+        best_px = best_px.max(px);
+        if px > 0 {
+            seen = true;
+            if i >= 10 {
+                seen_after_dwell = true;
+            }
+        }
+    }
+    m.up();
+    thread::sleep(SETTLE);
+    assert!(
+        seen,
+        "drop box colour #0EA5E9 never appeared on screen while hovering the middle of the neighbour; {}",
+        describe(&ws)
+    );
+    assert!(
+        seen_before_dwell,
+        "the drop box must show on arrival in the middle range, before the dwell moves the neighbour; {}",
+        describe(&ws)
+    );
+    assert!(
+        seen_after_dwell,
+        "drop box was drawn before the dwell but vanished once the neighbour moved aside (preview shift); {}",
+        describe(&ws)
+    );
+    println!("drop_box: best outline pixel count {best_px}");
+    assert!(
+        eventually(4, || count_rgb(&cap, DROP_BOX_RGB_PX) == 0),
+        "drop box left behind after the drop"
+    );
     d.stop();
 }

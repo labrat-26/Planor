@@ -106,46 +106,6 @@ fn motion_drag() {
         assert_eq!(motion(0., spring), 0.);
         assert_eq!(motion(1., spring), 1.)
     }
-    // Drop modes are positional only (N-012, N-015, N-016: no speed or dwell, so nothing flickers).
-    // drag(in_zone, fraction, dragged window is grouped, target is its sibling)
-    assert_eq!(
-        drag(true, 0.5, false, false, false),
-        Drag::Stack,
-        "in the stack zone: join"
-    );
-    assert_eq!(
-        drag(false, 0.1, false, false, false),
-        Drag::Swap,
-        "lone window on a window: swap"
-    );
-    assert_eq!(drag(false, 0.9, false, false, false), Drag::Swap);
-    assert_eq!(
-        drag(false, 0.1, true, false, false),
-        Drag::Before,
-        "grouped window pulled out: beside, left half"
-    );
-    assert_eq!(drag(false, 0.9, true, false, false), Drag::After);
-    assert_eq!(
-        drag(false, 0.5, true, true, false),
-        Drag::Swap,
-        "onto a sibling peek: reorder within the group (N-018)"
-    );
-    assert_eq!(
-        drag(false, 0.2, false, false, true),
-        Drag::Before,
-        "from another monitor: beside, never a swap"
-    );
-    assert_eq!(drag(false, 0.8, false, false, true), Drag::After);
-    assert_eq!(
-        drag(true, 0.5, false, false, true),
-        Drag::Stack,
-        "the zone works across monitors too"
-    );
-    assert_eq!(
-        drag(true, 0.5, true, true, false),
-        Drag::Swap,
-        "own group is never a stack target"
-    )
 }
 #[test]
 fn synthetic_contacts() {
@@ -1132,64 +1092,110 @@ fn mockup_spec_states_match_layout() {
 }
 
 #[test]
-fn drop_zone_is_the_middle_half_of_the_window_owner_decision() {
-    // Owner decisions: N-012 (2026-11-22) replaced the mockup's outer 20 % / middle 60 % bands with a centre box;
-    // after a 120 px box was hit by only 5 of 12 real four-finger drops, the owner chose "way bigger, like 50 %
-    // of the window in the center". Everything else on a window swaps.
-    let r = Rect {
-        x: 100,
-        y: 50,
-        w: 1200,
-        h: 900,
-    };
-    // #103: merge zones span full window height on landscape and full window width on portrait,
-    // keeping the middle 50 % along the strip axis (half of the area).
+fn neighbour_bands_are_measured_from_the_entry_edge() {
+    // span 400 at lo 100: 1/4 = 200, 3/4 = 400 from the leading edge.
+    let c = |pos, edge| classify_neighbour_entry(pos, 100, 400, edge).1;
+    assert_eq!(c(100, EntryEdge::Leading), NeighbourBand::BeforeQuarter);
+    assert_eq!(c(199, EntryEdge::Leading), NeighbourBand::BeforeQuarter);
     assert_eq!(
-        stack_zone(r, 50, true),
-        Rect {
-            x: 400,
-            y: 50,
-            w: 600,
-            h: 900
-        }
-    );
-    let zl = stack_zone(r, 50, true);
-    assert_eq!(
-        (zl.x + zl.w / 2, zl.y + zl.h / 2),
-        (r.x + r.w / 2, r.y + r.h / 2),
-        "landscape centred"
+        c(200, EntryEdge::Leading),
+        NeighbourBand::Middle { after: false }
     );
     assert_eq!(
-        (zl.y, zl.h),
-        (r.y, r.h),
-        "landscape spans full window height"
-    );
-    let half_l = (zl.w * zl.h) as f64 / (r.w * r.h) as f64;
-    assert!(
-        (half_l - 0.50).abs() < 0.01,
-        "landscape: middle half width x full height = half area"
+        c(300, EntryEdge::Leading),
+        NeighbourBand::Middle { after: true }
     );
     assert_eq!(
-        stack_zone(r, 50, false),
-        Rect {
-            x: 100,
-            y: 275,
-            w: 1200,
-            h: 450
-        }
+        c(399, EntryEdge::Leading),
+        NeighbourBand::Middle { after: true }
     );
-    let zp = stack_zone(r, 50, false);
     assert_eq!(
-        (zp.x + zp.w / 2, zp.y + zp.h / 2),
-        (r.x + r.w / 2, r.y + r.h / 2),
-        "portrait centred"
+        c(400, EntryEdge::Leading),
+        NeighbourBand::PastThreeQuarters { after: true }
     );
-    assert_eq!((zp.x, zp.w), (r.x, r.w), "portrait spans full window width");
+    // Trailing entry mirrors it.
+    assert_eq!(c(500, EntryEdge::Trailing), NeighbourBand::BeforeQuarter);
+    assert_eq!(c(401, EntryEdge::Trailing), NeighbourBand::BeforeQuarter);
     assert_eq!(
-        stack_zone(r, 500, true),
-        stack_zone(r, 95, true),
-        "never the whole window: there must be room to swap"
+        c(400, EntryEdge::Trailing),
+        NeighbourBand::Middle { after: true }
     );
+    assert_eq!(
+        c(200, EntryEdge::Trailing),
+        NeighbourBand::PastThreeQuarters { after: false }
+    );
+    // Out-of-range positions clamp; degenerate spans never panic.
+    assert_eq!(c(-9000, EntryEdge::Leading), NeighbourBand::BeforeQuarter);
+    let _ = classify_neighbour_entry(5, 5, 0, EntryEdge::Leading);
+}
+#[test]
+fn entry_edge_prefers_previous_pointer_then_column_order_then_half() {
+    use EntryEdge::*;
+    assert_eq!(
+        infer_entry_edge(Some(50), 100, 400, None, None, 300),
+        Leading
+    );
+    assert_eq!(
+        infer_entry_edge(Some(600), 100, 400, None, None, 300),
+        Trailing
+    );
+    assert_eq!(
+        infer_entry_edge(Some(300), 100, 400, Some(0), Some(2), 300),
+        Leading
+    );
+    assert_eq!(
+        infer_entry_edge(None, 100, 400, Some(3), Some(2), 150),
+        Trailing
+    );
+    assert_eq!(infer_entry_edge(None, 100, 400, None, None, 150), Leading);
+    assert_eq!(infer_entry_edge(None, 100, 400, None, None, 450), Trailing);
+}
+#[test]
+fn stack_exit_needs_a_quarter_of_the_span_along_the_axis() {
+    assert_eq!(classify_stack_exit(99, 0, 400, false), None);
+    assert_eq!(classify_stack_exit(100, 0, 400, false), Some(true));
+    assert_eq!(classify_stack_exit(-100, 0, 400, false), Some(false));
+    assert_eq!(classify_stack_exit(0, 500, 400, false), None);
+    // Diagonal: cross-dominant inside the own column is a sibling reorder, not an exit.
+    assert_eq!(classify_stack_exit(120, 300, 400, true), None);
+    assert_eq!(classify_stack_exit(120, 300, 400, false), Some(true));
+}
+#[test]
+fn edge_scroll_zone_scales_with_percent_and_never_truncates_to_zero() {
+    assert_eq!(edge_scroll_zone_px(1000, 10), 100);
+    assert_eq!(edge_scroll_zone_px(1000, 0), 0);
+    assert_eq!(edge_scroll_zone_px(5, 10), 1);
+    assert_eq!(edge_scroll_zone_px(1000, 90), 400, "clamped to 40 %");
+    assert_eq!(edge_scroll_zone_px(0, 10), 0);
+    assert_eq!(edge_scroll_direction(50, 0, 1000, 10), -1);
+    assert_eq!(edge_scroll_direction(100, 0, 1000, 10), 0);
+    assert_eq!(edge_scroll_direction(899, 0, 1000, 10), 0);
+    assert_eq!(edge_scroll_direction(900, 0, 1000, 10), 1);
+    assert_eq!(edge_scroll_direction(50, 0, 1000, 0), 0, "0 disables");
+}
+#[test]
+fn connected_adjacent_rejects_gaps_and_corner_touches() {
+    let r = |x, y, w, h| Rect { x, y, w, h };
+    let a = r(0, 0, 1000, 800);
+    assert_eq!(
+        connected_adjacent(a, &[r(1000, 100, 800, 600)], 1, 0),
+        Some(0)
+    );
+    assert_eq!(
+        connected_adjacent(a, &[r(1200, 0, 800, 800)], 1, 0),
+        None,
+        "disconnected gap"
+    );
+    assert_eq!(
+        connected_adjacent(a, &[r(1000, 800, 800, 800)], 1, 0),
+        None,
+        "corner only"
+    );
+    assert_eq!(
+        connected_adjacent(a, &[r(0, -600, 1000, 600)], 0, -1),
+        Some(0)
+    );
+    assert_eq!(connected_adjacent(a, &[r(1000, 0, 800, 800)], -1, 0), None);
 }
 #[test]
 fn replay_three_finger_scroll_pad_trace_matches_within_tolerance() {
@@ -2241,4 +2247,82 @@ fn locked_drag_start_strip_axis_wins_ties_against_a_diagonal_monitor_ray() {
         (Swipe::DragStart, false, None),
         "a straight start keeps the strip axis"
     );
+}
+#[test]
+fn group_at_places_the_joiner_by_swipe_direction() {
+    let area = Rect {
+        x: 0,
+        y: 0,
+        w: 1000,
+        h: 800,
+    };
+    for (leading, want) in [(false, vec![2, 3, 1]), (true, vec![1, 2, 3])] {
+        let mut s = Strip::new(area);
+        s.insert(1, 300);
+        s.insert(2, 300);
+        s.insert(3, 300);
+        s.group(3, 2);
+        s.group_at(1, 2, leading);
+        let (i, _) = s.locate(1).unwrap();
+        assert_eq!(s.columns[i].members, want, "leading={leading}");
+        assert_eq!(s.active(), Some(1), "joiner becomes active");
+    }
+}
+
+/// Fling targets (owner's layout): laptop with a landscape monitor above and a portrait one to the left.
+/// Up, down, left, right only; offset monitors count; several candidates pick the one nearest the centre.
+#[test]
+fn fling_target_covers_every_direction_with_an_offset_layout() {
+    let r = |x, y, w, h| Rect { x, y, w, h };
+    let laptop = r(0, 0, 1920, 1200);
+    let top = r(0, -1440, 2560, 1440);
+    let portrait = r(-1440, -1859, 1440, 2560);
+    let all = [laptop, top, portrait];
+    assert_eq!(fling_target(laptop, &all, 0, -1), Some(1), "laptop up");
+    assert_eq!(fling_target(laptop, &all, -1, 0), Some(2), "laptop left");
+    assert_eq!(fling_target(laptop, &all, 1, 0), None, "laptop right: none");
+    assert_eq!(fling_target(laptop, &all, 0, 1), None, "laptop down: none");
+    assert_eq!(fling_target(top, &all, -1, 0), Some(2), "top left");
+    assert_eq!(fling_target(top, &all, 0, 1), Some(0), "top down");
+    assert_eq!(fling_target(top, &all, 0, -1), None, "top up: none");
+    // Portrait right: laptop and top both qualify; the nearest centre wins.
+    assert_eq!(
+        fling_target(portrait, &all, 1, 0),
+        Some(1),
+        "portrait right"
+    );
+    assert_eq!(
+        fling_target(portrait, &all, -1, 0),
+        None,
+        "portrait left: none"
+    );
+    assert_eq!(
+        fling_target(laptop, &all, 1, 1),
+        None,
+        "diagonals are not directions"
+    );
+}
+
+/// Win+W "not able to fling down": a 55 ms, 54-unit flick must read as fast (>= 900/s), not 450/s.
+#[test]
+fn short_quick_flick_reads_its_true_speed() {
+    let samples = [
+        (0.055, 0., 10.),
+        (0.04, 0., 14.),
+        (0.02, 0., 16.),
+        (0.005, 0., 14.),
+    ];
+    let (vx, vy) = fling_velocity(&samples);
+    assert_eq!(vx, 0.);
+    assert!(vy >= 900., "short flick speed {vy}");
+    // A slow drag over the whole window stays slow.
+    let slow = [
+        (0.11, 0., 5.),
+        (0.08, 0., 5.),
+        (0.05, 0., 5.),
+        (0.02, 0., 5.),
+    ];
+    assert!(fling_velocity(&slow).1 < 400.);
+    // Samples older than 120 ms never count.
+    assert_eq!(fling_velocity(&[(0.5, 0., 900.)]), (0., 0.));
 }
