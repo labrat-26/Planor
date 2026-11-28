@@ -4,8 +4,6 @@ Generated from [notes.json](notes.json) via `scripts\notes.ps1 -Generate`. Raw t
 
 | ID | Time (UTC) | Note | State |
 |---|---|---|---|
-| N-002 | 22:01:35.842 (local) | no scroll vertical on the top bottom edge | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
-| N-003 | 22:02:25.039 (local) | windows still slide behind other windows | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 | N-004 | 22:02:56.952 (local) | window do not want to pair virtically | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 | N-006 | 22:03:53.079 (local) | cannot fling reliably to the right | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
 | N-007 | 22:04:05.235 (local) | cannot fling up | open: open: trace shows the parked-window re-place loop (y=-37187 beyond the 16-bit range), fixed by commit Park y never beyond the 16-bit window range; not verified live, owner to retry |
