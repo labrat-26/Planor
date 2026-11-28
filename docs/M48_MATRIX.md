@@ -5,7 +5,7 @@ live-desktop test (`tests/scn_drag.rs`); **GAP** = no test; **n/a** = removed or
 No row is covered by real trackpad hardware: every four-finger test replays simulated contacts.
 
 Last full run: `scripts\verify.ps1 -Tier all -Perf -NoDisplaySwitch`, 68 pass / 0 flaky / 0 fail, budgets all pass
-(`build/verify/20261128-011619`). The independent final-HEAD gate (Opus 5.5 review plus a run by someone other than the
+(`build/verify/20261128-012606`, run on 7cc627f plus the three new tests in this commit). The independent final-HEAD gate (Opus 5.5 review plus a run by someone other than the
 coder) has NOT been done; coder runs do not substitute for it.
 
 ## Inputs
@@ -36,10 +36,10 @@ coder) has NOT been done; coder runs do not substitute for it.
 | SVG cue per input/orientation | **n/a**: cue card retired at the owner's request (`src/cue.rs` is dead code) |
 | modifier key after dwell | sim: see modifier rows |
 | preview-to-group transition | sim: `dwell_in_the_middle_range_previews_then_modifier_groups_both_orientations` |
-| immediate stack animation on trigger | sim: `pad_perpendicular_swipe_*` (perp_triggered sets `drag_reflow`); no animation-timing assertion: **GAP** |
+| immediate stack animation on trigger | sim: `stack_trigger_requests_the_drag_reflow_animation_at_once` (a `drag_reflow` scene with a non-zero duration is sent when group mode commits) |
 | two-second vacancy timer bypass / stale timer | **n/a**: timer removed; `vacated_slot_stays_reserved_for_the_whole_drag` replaces it |
 | theme / DPI, PiP occlusion | **GAP** |
-| no extra scene/placement on lift | **GAP** (no direct test; live perf budgets only) |
+| no extra scene/placement on lift | sim: `lifting_a_pad_drag_sends_one_final_scene` (at most two scenes, last one non-live) |
 
 ## Group exit
 | Row | Coverage |
@@ -53,7 +53,7 @@ coder) has NOT been done; coder runs do not substitute for it.
 | 10 % default and configurable | core: `edge_scroll_zone_scales_with_percent_and_never_truncates_to_zero`; sim: `mouse_edge_scroll_uses_the_cursor_monitor_percent_and_zero_disables`, `edge_scroll_percent_changes_apply_to_the_running_drag` |
 | both directions | live: `drag_to_edge_scrolls_landscape`, `edge_scroll_steps_are_even`; sim portrait test above |
 | entry / exit / reversal | sim: `edge_scroll_stops_when_the_pointer_reverses_inside_the_zone`, `edge_scroll_speed_eases_in_with_hold_time_and_depth` |
-| corners | **GAP** |
+| corners | sim: `edge_scroll_in_a_corner_follows_only_the_strip_axis` |
 | mouse transfer among monitors | sim: `mouse_group_across_monitors_transfers_and_stacks_only_with_the_modifier`, `release_before_a_quarter_returns_home_and_mouse_still_crosses_monitors` |
 | pad confinement except fling | sim: `non_fling_four_finger_drag_stays_on_its_monitor_even_pushed_across_the_boundary`; core `connected_adjacent_rejects_gaps_and_corner_touches` |
 | no movement across disconnected gaps | core: `connected_adjacent_rejects_gaps_and_corner_touches`. Note: since the fling rework, `fling_target` accepts monitors across a small gap by design (owner request), so the "no gap" rule now applies only to `connected_adjacent` |

@@ -11306,3 +11306,120 @@ fn pad_perpendicular_swipe_with_along_axis_drift_still_groups() {
         h.settle();
     }
 }
+
+/// #117 matrix: lifting a four-finger drag sends a single non-live scene (no extra scene or placement burst).
+#[test]
+fn lifting_a_pad_drag_sends_one_final_scene() {
+    let mut cfg = note_cfg();
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    focus(&mut h, 101);
+    h.engine.event(Event::Contacts(four(500., 500.)));
+    for i in 1..=10 {
+        h.engine
+            .event(Event::Contacts(four(500. + 6. * i as f64, 500.)));
+        h.engine.tick().unwrap();
+    }
+    assert!(h.engine.pad.is_some(), "carrying");
+    let before = h.desktop.0.lock().unwrap().scenes.len();
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+    let g = h.desktop.0.lock().unwrap();
+    let added = &g.scenes[before..];
+    assert!(
+        !added.is_empty() && added.len() <= 2,
+        "lift sends at most two scenes, got {}",
+        added.len()
+    );
+    assert!(!added.last().unwrap().live, "the last scene is non-live");
+}
+
+/// #117 matrix: corners. A pointer in the corner where two edge zones overlap scrolls only along the strip
+/// axis of the monitor under it, and the cross-axis zone never scrolls a landscape strip.
+#[test]
+fn edge_scroll_in_a_corner_follows_only_the_strip_axis() {
+    let mut h = SimHarness::with_setup(three_monitor_rig(), note_cfg(), three_per_monitor);
+    let key = (1, "MON0".to_string());
+    focus(&mut h, 103);
+    let off0 = h.engine.strips[&key].offset;
+    // Top-left corner of MON0: inside both the left zone (x) and the top zone (y).
+    mouse_hold(&mut h, 103, (5, 5));
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    let after_corner = h.engine.strips[&key].offset;
+    assert!(after_corner < off0, "the left zone scrolls in the corner");
+    // The top zone alone (x in the middle) must not scroll a landscape strip.
+    h.desktop.0.lock().unwrap().cursor = (960, 5);
+    h.engine.tick().unwrap();
+    thread::sleep(Duration::from_millis(20));
+    h.engine.fast_tick();
+    assert_eq!(
+        h.engine.strips[&key].offset, after_corner,
+        "the cross-axis zone does not scroll a landscape strip"
+    );
+    h.desktop.0.lock().unwrap().keys_down.remove(&0x01);
+    h.stop_clean();
+}
+
+/// #117 matrix: a perpendicular-swipe stack trigger animates as a drag reflow at once (not instant, not delayed).
+#[test]
+fn stack_trigger_requests_the_drag_reflow_animation_at_once() {
+    let mut cfg = note_cfg();
+    cfg["animation"]["enabled"] = toml::Value::Boolean(true);
+    cfg["touchpad"]["swipe_fling_enabled"] = toml::Value::Boolean(false);
+    cfg["touchpad"]["drag_axis_lock"] = toml::Value::Boolean(false);
+    let mut h = SimHarness::with_setup(three_monitor_rig(), cfg, three_per_monitor);
+    h.engine.hot.drag_dwell_ms = 0;
+    focus(&mut h, 101);
+    let (mut x, mut y) = (500., 500.);
+    h.engine.event(Event::Contacts(four(x, y)));
+    for _ in 0..80 {
+        x += 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddlePreview { .. })
+        ) {
+            break;
+        }
+    }
+    let before = h.desktop.0.lock().unwrap().scenes.len();
+    for _ in 0..30 {
+        y -= 8.;
+        h.engine.event(Event::Contacts(four(x, y)));
+        h.engine.tick().unwrap();
+        if matches!(
+            phase(&h),
+            Some(crate::daemon::DragPhase::MiddleGroup { .. })
+        ) {
+            break;
+        }
+    }
+    assert!(matches!(
+        phase(&h),
+        Some(crate::daemon::DragPhase::MiddleGroup { .. })
+    ));
+    h.settle_quiet();
+    let g = h.desktop.0.lock().unwrap();
+    let s = g.scenes[before..]
+        .iter()
+        .find(|s| s.action == "drag_reflow")
+        .unwrap_or_else(|| {
+            panic!(
+                "no drag_reflow scene; actions: {:?}",
+                g.scenes[before..]
+                    .iter()
+                    .map(|s| (s.action.clone(), s.duration))
+                    .collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        s.duration > 0,
+        "the stack animates (duration {})",
+        s.duration
+    );
+    drop(g);
+    h.engine.event(Event::Contacts(vec![]));
+    h.settle();
+}
